@@ -16,7 +16,7 @@
 //!     fn build(&mut self) -> Vec<Widget> {
 //!         vec![
 //!             Widget::Title("Exemplo".into()),
-//!             Widget::Toggle { id: 1, text: "Ligado".into(), on: self.ligado },
+//!             Widget::Toggle { id: 1, text: "Ligado".into(), on: self.ligado, icon: None },
 //!             Widget::Separator,
 //!             Widget::Button { id: 2, text: "Fechar".into(), primary: false },
 //!         ]
@@ -62,7 +62,7 @@ use std::cell::{self, RefCell};
 use std::ffi::c_void;
 use std::time::Instant;
 
-use tiny_skia::{BlendMode, FillRule, Paint, PixmapMut, Rect, Stroke, Transform};
+use tiny_skia::{BlendMode, FillRule, Paint, Pixmap, PixmapMut, PixmapPaint, Rect, Stroke, Transform};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
@@ -114,6 +114,7 @@ pub mod glyph {
     pub const BLUETOOTH: u16 = 0xE702;
     pub const REFRESH: u16 = 0xE72C;
     pub const SETTINGS: u16 = 0xE713;
+    pub const CHEVRON_DOWN: u16 = 0xE70D;
 }
 
 /// Um controle do painel. A lista vem de [`PanelContent::build`], de cima para baixo.
@@ -130,8 +131,11 @@ pub enum Widget {
     /// Igual a [`Widget::Row`], com um glifo pequeno e apagado à direita (ex.: o cadeado das
     /// redes protegidas).
     RowBadge { id: u32, glyph: Option<u16>, text: String, sub: Option<String>, selected: bool, badge: u16 },
-    /// Interruptor liga/desliga → [`Event::Toggle`] com o valor novo.
-    Toggle { id: u32, text: String, on: bool },
+    /// Interruptor liga/desliga → [`Event::Toggle`] com o valor novo. `icon`: imagem à esquerda.
+    Toggle { id: u32, text: String, on: bool, icon: Option<Pixmap> },
+    /// Grade de imagens clicáveis (ex.: ícones da bandeja) → [`Event::Click`] e
+    /// [`Event::RightClick`].
+    Icons { items: Vec<(u32, Pixmap)> },
     /// Controle deslizante (`value` 0..1) → [`Event::Slide`]. `button`: ícone clicável à
     /// esquerda `(glifo, id)` → [`Event::Click`]. `label`: texto à direita (ex.: "45%").
     Slider { id: u32, button: Option<(u16, u32)>, value: f32, label: String },
@@ -167,6 +171,8 @@ pub enum CellStyle {
 #[allow(dead_code)]
 pub enum Event<'a> {
     Click(u32),
+    /// Clique com o botão direito numa área clicável.
+    RightClick(u32),
     Toggle(u32, bool),
     /// Valor novo (0..1), enquanto arrasta.
     Slide(u32, f32),
@@ -227,6 +233,8 @@ const RADIUS: f32 = 12.0;
 const SIDE: f32 = 8.0;
 const INSET: f32 = 8.0;
 const PAD_Y: f32 = 8.0;
+/// Lado da célula de [`Widget::Icons`].
+const ICON_CELL: f32 = 36.0;
 
 thread_local! {
     static PANEL: RefCell<Option<Panel>> = const { RefCell::new(None) };
@@ -606,6 +614,7 @@ impl Panel {
             Widget::Separator => 9.0,
             Widget::Field { .. } => 40.0,
             Widget::Grid { cols, cells } => 32.0 * cells.len().div_ceil((*cols).max(1)) as f32,
+            Widget::Icons { items } => ICON_CELL * items.len().div_ceil(self.icon_cols()) as f32,
         };
         px * s
     }
@@ -711,6 +720,17 @@ impl Panel {
             }
         };
 
+        // Imagem (RGBA) centrada em (cx, cy); a DIB é BGRA, então troca vermelho e azul.
+        let draw_icon = |pm: &mut PixmapMut, icon: &Pixmap, cx: f32, cy: f32| {
+            let mut c = icon.clone();
+            for px in c.data_mut().chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let x = (cx - icon.width() as f32 / 2.0).round() as i32;
+            let y = (cy - icon.height() as f32 / 2.0).round() as i32;
+            pm.draw_pixmap(x, y, c.as_ref(), &PixmapPaint::default(), tf, None);
+        };
+
         let mut texts: Vec<TextOp> = Vec::new();
         let mk = |t: &str, font: Font, r: [f32; 4], align: DWRITE_TEXT_ALIGNMENT, color: [f32; 4]| {
             TextOp {
@@ -800,7 +820,7 @@ impl Panel {
                         None => texts.push(mk(t, font, [tx, y, tw, wh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink)),
                     }
                 }
-                Widget::Toggle { id: tid, text: t, on } => {
+                Widget::Toggle { id: tid, text: t, on, icon } => {
                     zones.push(Zone {
                         x: left,
                         y: y + 2.0 * s,
@@ -815,7 +835,23 @@ impl Panel {
                     let kr = sh / 2.0 - 3.0 * s;
                     let kx = if *on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 };
                     fill(&mut pm, kx - kr, sy + sh / 2.0 - kr, 2.0 * kr, 2.0 * kr, kr, [255, 255, 255, 255]);
-                    texts.push(mk(t, Font::Body, [left + inset, y, sx - left - 2.0 * inset, wh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
+                    let mut tx = left + inset;
+                    if let Some(icon) = icon {
+                        draw_icon(&mut pm, icon, tx + 10.0 * s, y + wh / 2.0);
+                        tx += 30.0 * s;
+                    }
+                    texts.push(mk(t, Font::Body, [tx, y, sx - tx - inset, wh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
+                }
+                Widget::Icons { items } => {
+                    let cols = self.icon_cols();
+                    let cell = ICON_CELL * s;
+                    for (i, (iid, icon)) in items.iter().enumerate() {
+                        let cx = left + (i % cols) as f32 * cell;
+                        let cy = y + (i / cols) as f32 * cell;
+                        let k = 2.0 * s;
+                        zones.push(Zone { x: cx + k, y: cy + k, w: cell - 2.0 * k, h: cell - 2.0 * k, radius: 6.0 * s, kind: ZoneKind::Click(*iid) });
+                        draw_icon(&mut pm, icon, cx + cell / 2.0, cy + cell / 2.0);
+                    }
                 }
                 Widget::Slider { id: sid, button, value, label } => {
                     let mut base = left + inset;
@@ -1044,6 +1080,11 @@ impl Panel {
         x >= 0.0 && y >= 0.0 && x < self.w as f32 && y < self.h as f32
     }
 
+    /// Colunas de [`Widget::Icons`] na largura atual.
+    fn icon_cols(&self) -> usize {
+        ((self.w as f32 / self.scale - 2.0 * SIDE) / ICON_CELL).floor().max(1.0) as usize
+    }
+
     fn hit(&self, x: f32, y: f32) -> Option<usize> {
         self.zones.iter().position(|z| x >= z.x && x < z.x + z.w && y >= z.y && y < z.y + z.h)
     }
@@ -1104,6 +1145,13 @@ impl Panel {
             None => {}
         }
         true
+    }
+
+    fn right_click(&mut self, lp: LPARAM) {
+        let (x, y) = self.local(lp);
+        if let Some(ZoneKind::Click(id)) = self.hit(x, y).map(|i| self.zones[i].kind) {
+            self.emit(Event::RightClick(id));
+        }
     }
 
     fn mouse_up(&mut self, lp: LPARAM) {
@@ -1360,6 +1408,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_LBUTTONUP => {
                 with_panel(|p| p.mouse_up(lp));
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                with_panel(|p| p.right_click(lp));
                 LRESULT(0)
             }
             WM_KEYDOWN => {

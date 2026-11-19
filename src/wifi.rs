@@ -546,7 +546,7 @@ impl PanelContent for WifiPanel {
         } else {
             out.push(Widget::Title("Wi‑Fi".into()));
             if let Some(on) = self.radio.filter(|_| self.can_toggle) {
-                out.push(Widget::Toggle { id: TOGGLE, text: if on { "Ligado" } else { "Desligado" }.into(), on });
+                out.push(Widget::Toggle { id: TOGGLE, text: if on { "Ligado" } else { "Desligado" }.into(), on, icon: None });
             }
             if self.radio != Some(false) {
                 let split = self.nets.iter().take_while(|n| n.connected).count();

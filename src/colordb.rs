@@ -3,6 +3,9 @@
 //!
 //! Tabela `colors(app TEXT PRIMARY KEY, color TEXT)`: `app` é o nome do exe em minúsculas
 //! (ex.: `brave.exe`) e `color` é `#RRGGBB`. Pode ser editada à mão; vale na próxima leitura.
+//!
+//! Tabela `tray(icon TEXT PRIMARY KEY, shown INTEGER)`: ícones da bandeja que ficam na barra
+//! (`shown` = 1) ou dentro da bandeja (0). `icon` é `exe#uid` (ex.: `discord.exe#1`).
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -63,7 +66,8 @@ fn open() -> Option<Db> {
         return None;
     }
     let db = Db(db);
-    let sql = c"CREATE TABLE IF NOT EXISTS colors (app TEXT PRIMARY KEY, color TEXT NOT NULL)";
+    let sql = c"CREATE TABLE IF NOT EXISTS colors (app TEXT PRIMARY KEY, color TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS tray (icon TEXT PRIMARY KEY, shown INTEGER NOT NULL);";
     let ok = unsafe { sqlite3_exec(db.0, sql.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()) };
     (ok == SQLITE_OK).then_some(db)
 }
@@ -114,4 +118,15 @@ pub fn get(app: &str) -> Option<[u8; 3]> {
 pub fn set(app: &str, [r, g, b]: [u8; 3]) {
     let hex = format!("#{r:02X}{g:02X}{b:02X}");
     with_db(|db| run(db, c"INSERT OR REPLACE INTO colors (app, color) VALUES (?1, ?2)", &[app, &hex]));
+}
+
+/// Se o ícone da bandeja fica na barra; None se o usuário nunca escolheu.
+pub fn tray_shown(icon: &str) -> Option<bool> {
+    let v = with_db(|db| run(db, c"SELECT shown FROM tray WHERE icon = ?1", &[icon]).flatten())?;
+    Some(v.trim() != "0")
+}
+
+/// Guarda se o ícone da bandeja fica na barra.
+pub fn set_tray_shown(icon: &str, shown: bool) {
+    with_db(|db| run(db, c"INSERT OR REPLACE INTO tray (icon, shown) VALUES (?1, ?2)", &[icon, if shown { "1" } else { "0" }]));
 }

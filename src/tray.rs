@@ -28,12 +28,11 @@ pub enum TrayButton {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // tip/hwnd/uid ainda sem uso (dica ao passar o mouse)
 pub struct TrayIcon {
     pub icon: Option<Pixmap>,
     pub tip: String,
-    hwnd: u32,
-    uid: u32,
+    /// Identidade estável entre reinícios: `exe#uid` (ex.: `discord.exe#1`).
+    pub key: String,
 }
 
 /// NOTIFYICONDATAW como o shell32 manda no WM_COPYDATA. Os handles (hWnd, hIcon, hBalloonIcon)
@@ -199,7 +198,11 @@ pub fn icons() -> Vec<TrayIcon> {
         s.icons
             .iter()
             .filter(|e| !e.hidden)
-            .map(|e| TrayIcon { icon: e.icon.clone(), tip: e.tip.clone(), hwnd: e.hwnd, uid: e.uid })
+            .map(|e| TrayIcon {
+                icon: e.icon.clone(),
+                tip: e.tip.clone(),
+                key: format!("{}#{}", crate::tint::app_key(hwnd32(e.hwnd)).unwrap_or_default(), e.uid),
+            })
             .collect()
     })
 }

@@ -335,7 +335,7 @@ impl PanelContent for BluetoothPanel {
     fn build(&mut self) -> Vec<Widget> {
         let mut out = vec![
             Widget::Title("Bluetooth".into()),
-            Widget::Toggle { id: TOGGLE, text: if self.on { "Ligado" } else { "Desligado" }.into(), on: self.on },
+            Widget::Toggle { id: TOGGLE, text: if self.on { "Ligado" } else { "Desligado" }.into(), on: self.on, icon: None },
             Widget::Separator,
         ];
         if !self.on {

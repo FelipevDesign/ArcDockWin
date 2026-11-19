@@ -49,6 +49,17 @@ pub enum TrayButton {
     Double,
 }
 
+/// Ícone da bandeja (já em tons de cinza e no tamanho certo, ~16 px × escala).
+#[derive(Clone)]
+pub struct TrayEntry {
+    pub icon: Pixmap,
+    pub tip: String,
+    /// Chave no banco (`exe#uid`).
+    pub key: String,
+    /// Na barra (`true`) ou dentro da bandeja.
+    pub shown: bool,
+}
+
 /// Callback de clique na bandeja: índice do ícone, botão e ponto (tela) onde menus devem abrir.
 pub type TrayClick = fn(index: usize, button: TrayButton, anchor: POINT);
 
@@ -86,6 +97,8 @@ thread_local! {
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Tray(usize),
+    /// Seta que abre a bandeja (ícones ocultos e a escolha de quem fica na barra).
+    Overflow,
     Network,
     Bluetooth,
     Volume,
@@ -118,8 +131,8 @@ struct Bar {
     dwrite: IDWriteFactory,
     text_fmt: IDWriteTextFormat,
     icon_fmt: IDWriteTextFormat,
-    /// Ícones da bandeja, já no tamanho certo (~16 px × escala).
-    tray: Vec<Pixmap>,
+    /// Ícones da bandeja (os ocultos ficam na lista, mas fora da barra).
+    tray: Vec<TrayEntry>,
     items: Vec<Item>,
     hot: Option<Kind>,
     tracking: bool,
@@ -486,10 +499,13 @@ impl Bar {
 
         // Bandeja: à esquerda dos ícones de status, índice 0 mais à esquerda.
         x -= 4.0 * s;
-        for (i, icon) in self.tray.iter().enumerate().rev() {
-            let l = x - icon.width() as f32 - 2.0 * TRAY_PAD * s;
+        for (i, e) in self.tray.iter().enumerate().rev().filter(|(_, e)| e.shown) {
+            let l = x - e.icon.width() as f32 - 2.0 * TRAY_PAD * s;
             items.push(Item { kind: Kind::Tray(i), l, r: x, text: Vec::new() });
             x = l;
+        }
+        if !self.tray.is_empty() {
+            self.glyph_item(&mut items, x, Kind::Overflow, &[(panel::glyph::CHEVRON_DOWN, 0.8)]);
         }
         self.items = items;
     }
@@ -555,7 +571,7 @@ impl Bar {
         }
         for it in &self.items {
             if let Kind::Tray(i) = it.kind
-                && let Some(icon) = self.tray.get(i)
+                && let Some(icon) = self.tray.get(i).map(|e| &e.icon)
             {
                 let x = ((it.l + it.r - icon.width() as f32) / 2.0).round() as i32;
                 let y = ((h - 1.0 - icon.height() as f32) / 2.0).round() as i32;
@@ -700,6 +716,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Network => ("network", || Box::new(crate::wifi::WifiPanel::new())),
         Kind::Bluetooth => ("bluetooth", || Box::new(crate::bluetooth::BluetoothPanel::new())),
         Kind::Battery => ("battery", || Box::new(panel::Placeholder("Bateria"))),
+        Kind::Overflow => ("tray", || Box::new(crate::overflow::Overflow::new())),
         Kind::Tray(_) | Kind::Stats => return None,
     })
 }
@@ -719,8 +736,8 @@ pub fn on_tray_click(f: TrayClick) {
     TRAY_CLICK.with(|c| c.set(Some(f)));
 }
 
-/// Troca os ícones da bandeja (já no tamanho certo, ~16 px × escala) e redesenha.
-pub fn set_tray(icons: Vec<Pixmap>) {
+/// Troca os ícones da bandeja e redesenha.
+pub fn set_tray(icons: Vec<TrayEntry>) {
     with_bar(|b| {
         b.tray = icons;
         if matches!(b.hot, Some(Kind::Tray(i)) if i >= b.tray.len()) {
@@ -729,6 +746,37 @@ pub fn set_tray(icons: Vec<Pixmap>) {
         b.relayout();
         b.redraw();
     });
+    // Fora do borrow da barra: o painel lê a lista de novo.
+    if panel::is_open("tray") {
+        panel::refresh();
+    }
+}
+
+/// Ícones da bandeja, na ordem dos índices de clique.
+pub fn tray_list() -> Vec<TrayEntry> {
+    with_bar(|b| b.tray.clone()).unwrap_or_default()
+}
+
+/// Põe o ícone `i` na barra (`true`) ou dentro da bandeja, e guarda a escolha.
+pub fn set_tray_shown(i: usize, shown: bool) {
+    with_bar(|b| {
+        let Some(e) = b.tray.get_mut(i) else { return };
+        e.shown = shown;
+        crate::colordb::set_tray_shown(&e.key, shown);
+        b.relayout();
+        b.redraw();
+    });
+}
+
+/// Clique no ícone `i` vindo de fora da barra (a bandeja); o menu abre no cursor.
+pub fn tray_click_index(i: usize, button: TrayButton) {
+    let mut anchor = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut anchor);
+    }
+    if let Some(f) = TRAY_CLICK.with(|c| c.get()) {
+        f(i, button, anchor);
+    }
 }
 
 /// Item da bandeja sob `x` e o ponto de menu dele.

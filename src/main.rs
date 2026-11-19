@@ -12,6 +12,7 @@ mod taskbar;
 mod tint;
 mod topbar;
 mod tray;
+mod overflow;
 mod volume;
 mod wifi;
 
@@ -461,9 +462,21 @@ fn start_tray() {
         let px = tray_px();
         let icons = tray::icons()
             .into_iter()
-            .filter_map(|t| t.icon.or_else(|| tiny_skia::Pixmap::new(px, px)))
+            .filter_map(|t| {
+                let mut icon = t.icon.or_else(|| tiny_skia::Pixmap::new(px, px))?;
+                grayscale(&mut icon);
+                let shown = colordb::tray_shown(&t.key).unwrap_or(true);
+                Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown })
+            })
             .collect();
         topbar::set_tray(icons);
+    }
+    /// Tons de cinza (alfa pré-multiplicado: a média ponderada continua válida).
+    fn grayscale(p: &mut tiny_skia::Pixmap) {
+        for c in p.data_mut().chunks_exact_mut(4) {
+            let y = (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32).round() as u8;
+            c[..3].fill(y);
+        }
     }
     fn clicked(index: usize, button: topbar::TrayButton, anchor: POINT) {
         let b = match button {
