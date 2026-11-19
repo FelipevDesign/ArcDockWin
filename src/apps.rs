@@ -20,7 +20,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
-    GetWindowLongW, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
@@ -38,7 +38,7 @@ pub struct App {
     pub tile: [u8; 4],
     /// O ícone já é um "azulejo" (quadrado e preenchido): ocupa a caixa inteira, sem fundo pastel.
     pub full: bool,
-    /// Janelas abertas do app, da mais à frente para a mais atrás.
+    /// Janelas abertas do app, na ordem em que apareceram.
     pub windows: Vec<HWND>,
 }
 
@@ -167,7 +167,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {
 }
 
 /// Item especial do botão Iniciar.
-const START: &str = "::start";
+pub const START: &str = "::start";
 
 /// Logo do Windows: quatro quadrados com degradê azul.
 fn start_icon(size: u32) -> Option<Pixmap> {
@@ -342,7 +342,10 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
 
     let mut changed = false;
     for app in apps.iter_mut() {
-        let new = groups.remove(&app.key).map(|g| g.1).unwrap_or_default();
+        let found = groups.remove(&app.key).map(|g| g.1).unwrap_or_default();
+        // Ordem estável: as que já estavam ficam no lugar, as novas vão para o fim.
+        let mut new: Vec<HWND> = app.windows.iter().copied().filter(|h| found.contains(h)).collect();
+        new.extend(found.into_iter().filter(|h| !app.windows.contains(h)));
         if new != app.windows {
             changed = true;
             app.windows = new;
@@ -454,25 +457,97 @@ fn process_path(pid: u32) -> String {
     }
 }
 
-/// Clique no ícone: abre o app, traz a janela para frente ou minimiza se já estiver em foco.
+/// Clique no ícone: abre o app, alterna entre as janelas dele ou minimiza a única em foco.
 pub fn activate(source: &str, windows: &[HWND]) {
     if source == START {
         open_start();
         return;
     }
     unsafe {
-        let Some(&top) = windows.first() else {
+        if windows.is_empty() {
             ShellExecuteW(None, w!("open"), &HSTRING::from(source), None, None, SW_SHOWNORMAL);
             return;
-        };
-        let fg = GetForegroundWindow();
-        if windows.contains(&fg) {
-            let _ = ShowWindow(fg, SW_MINIMIZE);
-        } else {
-            if IsIconic(top).as_bool() {
-                let _ = ShowWindow(top, SW_RESTORE);
-            }
-            let _ = SetForegroundWindow(top);
         }
+        let fg = GetForegroundWindow();
+        match windows.iter().position(|&h| h == fg) {
+            Some(_) if windows.len() == 1 => {
+                let _ = ShowWindow(fg, SW_MINIMIZE);
+            }
+            // Várias janelas: a próxima na ordem estável, em ciclo.
+            Some(i) => focus_window(windows[(i + 1) % windows.len()]),
+            // Nenhuma em foco: a mais recente não minimizada, ou a primeira se todas estiverem.
+            None => {
+                let z = z_order(windows);
+                let top = z.iter().copied().find(|&h| !IsIconic(h).as_bool());
+                focus_window(top.or(z.first().copied()).unwrap_or(windows[0]));
+            }
+        }
+    }
+}
+
+/// Traz a janela para frente, restaurando se estiver minimizada.
+pub fn focus_window(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// As janelas dadas, da mais à frente para a mais atrás.
+fn z_order(windows: &[HWND]) -> Vec<HWND> {
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut all as *mut _ as isize));
+    }
+    all.retain(|h| windows.contains(h));
+    all
+}
+
+/// Título da janela para o menu, cortado em ~60 caracteres.
+pub fn menu_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) }.max(0) as usize;
+    let title = String::from_utf16_lossy(&buf[..len]);
+    let mut out: String = title.chars().take(60).collect();
+    if title.chars().count() > 60 {
+        out.pop();
+        out.push('…');
+    }
+    // & no menu vira atalho de teclado: dobra para aparecer como texto.
+    out.replace('&', "&&")
+}
+
+/// Fixa ou desafixa o app no dock e no pinned.txt (comentários e demais linhas ficam como estão).
+/// Fixados ficam antes dos abertos: o recém-fixado vai para o fim do grupo dos fixados.
+pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
+    let Some(i) = apps.iter().position(|a| a.key == key) else { return };
+    if apps[i].pinned == pin || apps[i].source == START {
+        return;
+    }
+    let cfg = config_path();
+    let mut text = std::fs::read_to_string(&cfg).unwrap_or_default();
+    let source = apps[i].source.clone();
+    if pin {
+        let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push_str(nl);
+        }
+        text.push_str(&source);
+        text.push_str(nl);
+    } else {
+        text = text.split_inclusive('\n').filter(|l| l.trim() != source).collect();
+    }
+    if let Some(dir) = cfg.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&cfg, text);
+
+    let mut app = apps.remove(i);
+    app.pinned = pin;
+    if pin || !app.windows.is_empty() {
+        let at = apps.iter().filter(|a| a.pinned).count();
+        apps.insert(at, app);
     }
 }

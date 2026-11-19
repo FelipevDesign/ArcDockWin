@@ -7,7 +7,7 @@ mod taskbar;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use tiny_skia::Pixmap;
@@ -27,7 +27,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use apps::App;
 use render::{Metrics, Theme};
@@ -41,6 +42,10 @@ const SLIDE_TIME: f32 = 0.18;
 /// Tempo de entrada/saída do zoom (segundos).
 const HOVER_TIME: f32 = 0.14;
 const MENU_QUIT: usize = 1;
+const MENU_PIN: usize = 2;
+const MENU_CLOSE: usize = 3;
+/// Itens das janelas do app: MENU_WINDOW + índice.
+const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 thread_local! {
@@ -117,7 +122,7 @@ impl Dock {
                 apps: apps::load_pinned(icon_size),
                 icon_size,
                 m,
-                theme: Theme::new(light_theme()),
+                theme: Theme::new(light_theme(), accent_color()),
                 pixmap: Pixmap::new(w as u32, h as u32).expect("pixmap"),
                 memdc,
                 bits: bits as *mut u8,
@@ -165,7 +170,15 @@ impl Dock {
         }
         let slots = self.slots();
         let sep = self.sep_after();
-        render::draw(&mut self.pixmap, &slots, sep, &self.apps, &self.m, &self.theme, self.hover);
+        // App em foco: dono da última janela em primeiro plano fora do dock (o menu do dock
+        // toma o foco, mas o destaque continua no app).
+        let fg = unsafe { GetForegroundWindow() };
+        if fg != self.hwnd && fg != self.glass {
+            LAST_FG.store(fg.0 as isize, Ordering::Relaxed);
+        }
+        let fg = HWND(LAST_FG.load(Ordering::Relaxed) as *mut c_void);
+        let focus = self.apps.iter().position(|a| a.windows.contains(&fg));
+        render::draw(&mut self.pixmap, &slots, sep, &self.apps, &self.m, &self.theme, self.hover, focus);
         self.update_glass(render::box_rect(&slots, &self.m, self.pixmap.height() as f32));
 
         // RGBA (tiny-skia) -> BGRA (GDI), ambos com alfa pré-multiplicado.
@@ -430,6 +443,121 @@ fn light_theme() -> bool {
     ok.is_ok() && value != 0
 }
 
+/// Cor de destaque do Windows (no registro vem como ABGR).
+fn accent_color() -> Option<[u8; 4]> {
+    let mut value: u32 = 0;
+    let mut size = size_of::<u32>() as u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\DWM"),
+            w!("AccentColor"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut _ as *mut c_void),
+            Some(&mut size),
+        )
+    };
+    ok.is_ok().then(|| [value as u8, (value >> 8) as u8, (value >> 16) as u8, 255])
+}
+
+/// Janela em primeiro plano mudou: atualiza o destaque do app em foco na hora.
+unsafe extern "system" fn on_foreground(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
+    with_dock(|d| {
+        if hwnd == d.hwnd || hwnd == d.glass {
+            return;
+        }
+        // Janela ainda não listada (acabou de abrir): atualiza os apps antes.
+        if !hwnd.is_invalid() && !d.apps.iter().any(|a| a.windows.contains(&hwnd)) {
+            d.refresh();
+        }
+        d.redraw();
+    });
+}
+
+/// Menu do botão direito: com `target` (key, fixado, janelas), as opções do app; sempre "Sair".
+unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>) {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let fg = GetForegroundWindow();
+        if let Some((_, pinned, windows)) = &target {
+            if windows.len() >= 2 {
+                for (k, &win) in windows.iter().enumerate() {
+                    let flags = if win == fg { MF_STRING | MF_CHECKED } else { MF_STRING };
+                    let title = HSTRING::from(apps::menu_title(win));
+                    let _ = AppendMenuW(menu, flags, MENU_WINDOW + k, &title);
+                }
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            let pin = if *pinned { w!("Desafixar do dock") } else { w!("Fixar no dock") };
+            let _ = AppendMenuW(menu, MF_STRING, MENU_PIN, pin);
+            match windows.len() {
+                0 => {}
+                1 => {
+                    let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, w!("Fechar janela"));
+                }
+                n => {
+                    let text = HSTRING::from(format!("Fechar {n} janelas"));
+                    let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, &text);
+                }
+            }
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair do ArcDockWin"));
+
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let _ = SetForegroundWindow(hwnd);
+        MENU_OPEN.store(true, Ordering::Relaxed);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            pt.x,
+            pt.y,
+            None,
+            hwnd,
+            None,
+        );
+        MENU_OPEN.store(false, Ordering::Relaxed);
+        let _ = DestroyMenu(menu);
+
+        let cmd = cmd.0 as usize;
+        if cmd == MENU_QUIT {
+            let _ = DestroyWindow(hwnd);
+            return;
+        }
+        let Some((key, pinned, windows)) = target else { return };
+        match cmd {
+            MENU_PIN => {
+                with_dock(|d| apps::set_pinned(&mut d.apps, &key, !pinned));
+            }
+            MENU_CLOSE => {
+                for &win in &windows {
+                    let _ = PostMessageW(Some(win), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            c if c >= MENU_WINDOW => {
+                if let Some(&win) = windows.get(c - MENU_WINDOW) {
+                    apps::focus_window(win);
+                }
+            }
+            _ => return,
+        }
+        with_dock(|d| {
+            d.refresh();
+            d.redraw();
+        });
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -489,27 +617,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
-                if let Ok(menu) = CreatePopupMenu() {
-                    let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair do ArcDockWin"));
-                    let mut pt = POINT::default();
-                    let _ = GetCursorPos(&mut pt);
-                    let _ = SetForegroundWindow(hwnd);
-                    MENU_OPEN.store(true, Ordering::Relaxed);
-                    let cmd = TrackPopupMenu(
-                        menu,
-                        TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
-                        pt.x,
-                        pt.y,
-                        None,
-                        hwnd,
-                        None,
-                    );
-                    MENU_OPEN.store(false, Ordering::Relaxed);
-                    let _ = DestroyMenu(menu);
-                    if cmd.0 as usize == MENU_QUIT {
-                        let _ = DestroyWindow(hwnd);
+                // App sob o mouse; fora de um ícone ou no botão Iniciar, só "Sair".
+                let target = with_dock(|d| {
+                    if d.refresh() {
+                        d.redraw();
                     }
-                }
+                    d.hit(mouse_x(lp))
+                        .map(|i| &d.apps[i])
+                        .filter(|a| a.source != apps::START)
+                        .map(|a| (a.key.clone(), a.pinned, a.windows.clone()))
+                })
+                .flatten();
+                context_menu(hwnd, target);
                 LRESULT(0)
             }
             WM_ENDSESSION => {
@@ -537,6 +656,9 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// Menu do botão direito aberto: o dock não some enquanto ele estiver na tela.
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Última janela em primeiro plano fora do dock (HWND como número).
+static LAST_FG: AtomicIsize = AtomicIsize::new(0);
 
 unsafe fn register(hinst: HINSTANCE, name: PCWSTR, proc: WNDPROC) -> windows::core::Result<()> {
     unsafe {
@@ -624,6 +746,15 @@ fn main() -> windows::core::Result<()> {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_REFRESH, 1000, None);
         SetTimer(Some(hwnd), TIMER_EDGE, 50, None);
+        let _ = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(on_foreground),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
 
         // Parado: espera mensagens. Animando: um quadro por atualização da tela (DwmFlush
         // espera o próximo quadro do compositor), na taxa do monitor (60, 120, 144 Hz...).
