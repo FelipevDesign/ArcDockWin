@@ -24,14 +24,15 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(scale: f32) -> Self {
+        let (base, gap) = (48.0 * scale, 8.0 * scale);
         Self {
-            base: 48.0 * scale,
-            max: 70.0 * scale,
-            gap: 8.0 * scale,
+            base,
+            max: base * 1.25,
+            gap,
             sep: 9.0 * scale, // 8 px + linha de 1 px: 8 px de cada lado da linha
             pad: 8.0 * scale,
             margin: 6.0 * scale,
-            range: 210.0 * scale,
+            range: 2.0 * (base + gap), // 2 slots de cada lado
             radius: 18.0 * scale,
             dot: 2.0 * scale,
         }

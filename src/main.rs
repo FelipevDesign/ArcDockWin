@@ -14,10 +14,11 @@ use tiny_skia::Pixmap;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, GetMonitorInfoW, HDC, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromWindow, SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, HDC, HGDIOBJ, SelectObject,
 };
-use windows::Win32::Graphics::Dwm::DwmFlush;
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{FALSE, TRUE};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -33,14 +34,12 @@ use render::{Metrics, Theme};
 
 const TIMER_REFRESH: usize = 2;
 const TIMER_EDGE: usize = 3;
-/// Quanto tempo o dock continua visível depois que o mouse sai dele.
-const HIDE_DELAY: Duration = Duration::from_millis(400);
+/// Quanto tempo o dock continua visível depois que o motivo para ficar visível acabou.
+const HIDE_DELAY: Duration = Duration::from_millis(500);
 /// Tempo de subida e descida do dock ao aparecer/sumir (segundos).
-const SHOW_TIME: f32 = 0.28;
-const HIDE_TIME: f32 = 0.24;
-/// Constantes de tempo (segundos) da suavização: entrada/saída do zoom e seguir o mouse.
-const HOVER_TAU: f32 = 0.085;
-const FOLLOW_TAU: f32 = 0.045;
+const SLIDE_TIME: f32 = 0.18;
+/// Tempo de entrada/saída do zoom (segundos).
+const HOVER_TIME: f32 = 0.14;
 const MENU_QUIT: usize = 1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -63,13 +62,14 @@ struct Dock {
     memdc: HDC,
     bits: *mut u8,
     pos: POINT,
-    /// Posição x usada no zoom (segue o mouse suavemente até `mx_target`).
+    /// Posição x do mouse usada no zoom.
     mx: f32,
-    mx_target: f32,
+    /// Intensidade do zoom (0..1), animada de `hover_from` até `target`.
     hover: f32,
     target: f32,
+    hover_from: f32,
+    hover_start: Instant,
     animating: bool,
-    last_frame: Instant,
     tracking: bool,
     /// 0 = visível, 1 = escondido abaixo da tela.
     slide: f32,
@@ -78,9 +78,7 @@ struct Dock {
     slide_start: Instant,
     /// Janelas do dock mostradas (escondidas de vez quando slide chega a 1).
     shown: bool,
-    /// Se a janela em foco cobre a tela principal (maximizada ou tela cheia).
-    covers: bool,
-    /// Última vez que o mouse estava no dock ou na borda de baixo.
+    /// Última vez que havia motivo para o dock ficar visível.
     last_inside: Option<Instant>,
 }
 
@@ -125,18 +123,17 @@ impl Dock {
                 bits: bits as *mut u8,
                 pos: POINT { x: 0, y: screen_h - h },
                 mx: 0.0,
-                mx_target: 0.0,
                 hover: 0.0,
                 target: 0.0,
+                hover_from: 0.0,
+                hover_start: Instant::now(),
                 animating: false,
-                last_frame: Instant::now(),
                 tracking: false,
                 slide: 0.0,
                 slide_target: 0.0,
                 slide_from: 0.0,
                 slide_start: Instant::now(),
                 shown: true,
-                covers: false,
                 last_inside: None,
             }
         }
@@ -234,32 +231,38 @@ impl Dock {
 
     /// Liga o laço de animação (sincronizado com a tela em `main`).
     fn start_anim(&mut self) {
-        if !self.animating {
-            self.animating = true;
-            self.last_frame = Instant::now();
-        }
+        self.animating = true;
     }
 
     /// Um quadro de animação, com passo proporcional ao tempo real (independe da taxa da tela).
     fn step(&mut self) {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.05);
-        self.last_frame = now;
 
-        self.hover = smooth(self.hover, self.target, dt, HOVER_TAU, 0.002);
-        self.mx = smooth(self.mx, self.mx_target, dt, FOLLOW_TAU, 0.25);
+        // Entrada/saída do zoom: duração fixa, recomeça do ponto atual se o alvo mudar no meio.
+        let th = ((now - self.hover_start).as_secs_f32() / HOVER_TIME).min(1.0);
+        self.hover = self.hover_from + (self.target - self.hover_from) * ease_out_quad(th);
 
         // Subir/descer: curva com duração fixa; recomeça do ponto atual se o alvo mudar no meio.
-        let (dur, ease): (f32, fn(f32) -> f32) =
-            if self.slide_target < self.slide_from { (SHOW_TIME, ease_out_cubic) } else { (HIDE_TIME, ease_in_out_cubic) };
-        let t = ((now - self.slide_start).as_secs_f32() / dur).min(1.0);
+        let ease: fn(f32) -> f32 =
+            if self.slide_target < self.slide_from { ease_out_cubic } else { ease_in_out_cubic };
+        let t = ((now - self.slide_start).as_secs_f32() / SLIDE_TIME).min(1.0);
         self.slide = self.slide_from + (self.slide_target - self.slide_from) * ease(t);
 
-        if self.hover == self.target && self.mx == self.mx_target && t >= 1.0 {
+        if th >= 1.0 && t >= 1.0 {
             self.animating = false;
         }
         self.apply_shown();
         self.redraw();
+    }
+
+    /// Muda o alvo do zoom (0 ou 1) e começa a animação a partir do valor atual.
+    fn set_hover(&mut self, target: f32) {
+        if target != self.target {
+            self.hover_from = self.hover;
+            self.hover_start = Instant::now();
+            self.target = target;
+            self.start_anim();
+        }
     }
 
     /// Esconde as janelas quando o dock termina de descer e mostra de novo ao subir.
@@ -296,24 +299,41 @@ impl Dock {
 
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
-        if let Some(c) = foreground_covers(&[self.hwnd, self.glass]) {
-            self.covers = c;
-        }
         let now = Instant::now();
-        if self.tracking || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() {
+        if self.tracking || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() || !self.covered() {
             self.last_inside = Some(now);
         }
+        // Aparecer é imediato; esconder espera a carência.
         let near = self.last_inside.is_some_and(|t| now - t < HIDE_DELAY);
-        let target = if !self.covers || near { 0.0 } else { 1.0 };
+        let target = if near { 0.0 } else { 1.0 };
         if target != self.slide_target {
             self.slide_from = self.slide;
             self.slide_start = now;
             self.slide_target = target;
             if target == 1.0 {
-                self.target = 0.0;
+                self.set_hover(0.0);
             }
             self.start_anim();
         }
+    }
+
+    /// Alguma janela encosta no fundo do dock em repouso (sem zoom), estendido até a base da tela?
+    fn covered(&self) -> bool {
+        let w = self.pixmap.width() as f32;
+        let slots = render::layout(self.apps.len(), self.sep_after(), w, &self.m, self.mx, 0.0);
+        let Some((l, t, r, _)) = render::box_rect(&slots, &self.m, self.pixmap.height() as f32) else {
+            return false;
+        };
+        let (_, sh) = taskbar::screen_size();
+        let mut s = CoverSearch {
+            rect: RECT { left: self.pos.x + l, top: self.pos.y + t, right: self.pos.x + r, bottom: sh },
+            own: [self.hwnd, self.glass],
+            hit: false,
+        };
+        unsafe {
+            let _ = EnumWindows(Some(cover_proc), LPARAM(&mut s as *mut _ as isize));
+        }
+        s.hit
     }
 
     fn hit(&self, x: f32) -> Option<usize> {
@@ -323,10 +343,8 @@ impl Dock {
     }
 }
 
-/// Aproxima `v` de `target` exponencialmente, com constante de tempo `tau` (segundos).
-fn smooth(v: f32, target: f32, dt: f32, tau: f32, eps: f32) -> f32 {
-    let n = v + (target - v) * (1.0 - (-dt / tau).exp());
-    if (target - n).abs() < eps { target } else { n }
+fn ease_out_quad(t: f32) -> f32 {
+    1.0 - (1.0 - t) * (1.0 - t)
 }
 
 fn ease_out_cubic(t: f32) -> f32 {
@@ -337,39 +355,51 @@ fn ease_in_out_cubic(t: f32) -> f32 {
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
 }
 
-/// A janela em foco ocupa a tela principal inteira (maximizada ou tela cheia)?
-/// `None` quando o foco está no próprio dock (mantém o estado anterior).
-fn foreground_covers(own: &[HWND]) -> Option<bool> {
+/// Estado da busca de janelas que encostam no dock (passado ao `EnumWindows`).
+struct CoverSearch {
+    rect: RECT,
+    own: [HWND; 2],
+    hit: bool,
+}
+
+/// Marca `hit` e para a busca na primeira janela visível que encosta no retângulo.
+unsafe extern "system" fn cover_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
     unsafe {
-        let fg = GetForegroundWindow();
-        if fg.is_invalid() {
-            return Some(false);
+        let s = &mut *(lp.0 as *mut CoverSearch);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || s.own.contains(&hwnd) {
+            return TRUE;
         }
-        if own.contains(&fg) {
-            return None;
+        if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
+            return TRUE;
+        }
+        // Retângulo real, sem as bordas invisíveis de redimensionar.
+        let mut r = RECT::default();
+        if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut c_void, size_of::<RECT>() as u32)
+            .is_err()
+        {
+            return TRUE;
+        }
+        let d = s.rect;
+        if r.right <= r.left || r.bottom <= r.top
+            || r.right <= d.left || r.left >= d.right || r.bottom <= d.top || r.top >= d.bottom
+        {
+            return TRUE;
+        }
+        // Escondida pelo DWM: outra área de trabalho virtual ou app UWP suspenso.
+        let mut cloaked: u32 = 0;
+        let _ = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut c_void, size_of::<u32>() as u32);
+        if cloaked != 0 {
+            return TRUE;
         }
         let mut buf = [0u16; 64];
-        let n = GetClassNameW(fg, &mut buf).max(0) as usize;
+        let n = GetClassNameW(hwnd, &mut buf).max(0) as usize;
         let class = String::from_utf16_lossy(&buf[..n]);
         // Área de trabalho e barra do Windows.
         if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
-            return Some(false);
+            return TRUE;
         }
-        if IsIconic(fg).as_bool() {
-            return Some(false);
-        }
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-        if !GetMonitorInfoW(mon, &mut mi).as_bool() || mi.dwFlags & MONITORINFOF_PRIMARY == 0 {
-            return Some(false);
-        }
-        if IsZoomed(fg).as_bool() {
-            return Some(true);
-        }
-        let mut r = RECT::default();
-        let _ = GetWindowRect(fg, &mut r);
-        let m = mi.rcMonitor;
-        Some(r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom)
+        s.hit = true;
+        FALSE
     }
 }
 
@@ -406,11 +436,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_MOUSEMOVE => {
                 with_dock(|d| {
-                    d.mx_target = mouse_x(lp);
-                    // Entrando no dock: o zoom já nasce sob o mouse, sem deslizar de onde estava.
-                    if d.hover < 0.05 {
-                        d.mx = d.mx_target;
-                    }
+                    // O zoom segue o mouse na hora, sem suavização.
+                    d.mx = mouse_x(lp);
                     if !d.tracking {
                         d.tracking = true;
                         let mut tme = TRACKMOUSEEVENT {
@@ -421,16 +448,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         };
                         let _ = TrackMouseEvent(&mut tme);
                     }
-                    d.target = 1.0;
-                    d.start_anim();
+                    d.set_hover(1.0);
+                    if !d.animating {
+                        d.redraw();
+                    }
                 });
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
                 with_dock(|d| {
                     d.tracking = false;
-                    d.target = 0.0;
-                    d.start_anim();
+                    d.set_hover(0.0);
                 });
                 LRESULT(0)
             }
