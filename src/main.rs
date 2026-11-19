@@ -349,6 +349,19 @@ impl Dock {
         s.hit
     }
 
+    /// Ponto do menu de contexto do ícone `i`: centralizado nele, um espaço acima do topo
+    /// (já com o zoom atual, que fica parado enquanto o menu está aberto).
+    fn menu_anchor(&self, i: usize) -> Option<POINT> {
+        let slots = self.slots();
+        let slot = slots.get(i)?;
+        let (_, _, _, b) = render::box_rect(&slots, &self.m, self.pixmap.height() as f32)?;
+        let top = b as f32 - self.m.pad - slot.size;
+        Some(POINT {
+            x: self.pos.x + (slot.x + slot.size / 2.0).round() as i32,
+            y: self.pos.y + self.offset() + (top - self.m.gap).round() as i32,
+        })
+    }
+
     fn hit(&self, x: f32) -> Option<usize> {
         self.slots()
             .iter()
@@ -484,7 +497,8 @@ unsafe extern "system" fn on_foreground(
 }
 
 /// Menu do botão direito: com `target` (key, fixado, janelas), as opções do app; sempre "Sair".
-unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>) {
+/// `anchor`: ponto acima do centro do ícone onde o menu se apoia (sem ícone, abre no mouse).
+unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, anchor: Option<POINT>) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let fg = GetForegroundWindow();
@@ -513,13 +527,19 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>) {
         }
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair do ArcDockWin"));
 
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
+        let (pt, align) = match anchor {
+            Some(p) => (p, TPM_CENTERALIGN),
+            None => {
+                let mut p = POINT::default();
+                let _ = GetCursorPos(&mut p);
+                (p, TPM_LEFTALIGN)
+            }
+        };
         let _ = SetForegroundWindow(hwnd);
         MENU_OPEN.store(true, Ordering::Relaxed);
         let cmd = TrackPopupMenu(
             menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | align,
             pt.x,
             pt.y,
             None,
@@ -618,17 +638,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_RBUTTONUP => {
                 // App sob o mouse; fora de um ícone ou no botão Iniciar, só "Sair".
-                let target = with_dock(|d| {
+                let (target, anchor) = with_dock(|d| {
                     if d.refresh() {
                         d.redraw();
                     }
-                    d.hit(mouse_x(lp))
+                    let i = d.hit(mouse_x(lp));
+                    let target = i
                         .map(|i| &d.apps[i])
                         .filter(|a| a.source != apps::START)
-                        .map(|a| (a.key.clone(), a.pinned, a.windows.clone()))
+                        .map(|a| (a.key.clone(), a.pinned, a.windows.clone()));
+                    (target, i.and_then(|i| d.menu_anchor(i)))
                 })
-                .flatten();
-                context_menu(hwnd, target);
+                .unwrap_or((None, None));
+                context_menu(hwnd, target, anchor);
                 LRESULT(0)
             }
             WM_ENDSESSION => {
