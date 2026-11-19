@@ -195,18 +195,28 @@ fn start_icon(size: u32) -> Option<Pixmap> {
     Some(pm)
 }
 
-/// Abre/fecha o menu Iniciar simulando a tecla Windows.
+/// Abre a Paleta de Comandos do PowerToys simulando Win+Alt+Espaço (o atalho dela).
+/// O menu Iniciar continua no Ctrl+Esc.
 fn open_start() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-        VK_LWIN,
+        VIRTUAL_KEY, VK_LMENU, VK_LWIN, VK_SPACE,
     };
-    let key = |flags| INPUT {
+    let key = |vk: VIRTUAL_KEY, flags| INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_LWIN, dwFlags: flags, ..Default::default() } },
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: flags, ..Default::default() } },
     };
+    let (down, up) = (KEYBD_EVENT_FLAGS(0), KEYEVENTF_KEYUP);
+    let seq = [
+        key(VK_LWIN, down),
+        key(VK_LMENU, down),
+        key(VK_SPACE, down),
+        key(VK_SPACE, up),
+        key(VK_LMENU, up),
+        key(VK_LWIN, up),
+    ];
     unsafe {
-        SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32);
+        SendInput(&seq, size_of::<INPUT>() as i32);
     }
 }
 
