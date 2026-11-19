@@ -75,22 +75,22 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         full: false,
         windows: Vec::new(),
     };
-    let mut apps: Vec<App> = std::iter::once(start)
-        .chain(
-            text.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .filter(|l| l.starts_with(APPS_FOLDER) || Path::new(l).exists())
-                .map(|source| App {
-                    key: source_key(source),
-                    icon: load_icon(source, icon_size),
-                    tile: [0; 4],
-                    full: false,
-                    source: source.to_string(),
-                    pinned: true,
-                    windows: Vec::new(),
-                }),
-        )
+    // O botão Iniciar fica na ponta direita, depois dos fixados e dos abertos.
+    let mut apps: Vec<App> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| l.starts_with(APPS_FOLDER) || Path::new(l).exists())
+        .map(|source| App {
+            key: source_key(source),
+            icon: load_icon(source, icon_size),
+            tile: [0; 4],
+            full: false,
+            source: source.to_string(),
+            pinned: true,
+            windows: Vec::new(),
+        })
+        .chain(std::iter::once(start))
         .collect();
     for app in &mut apps {
         app.tile = pastel(app.icon.as_ref());
@@ -359,7 +359,9 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
     for key in order {
         if let Some((source, windows)) = groups.remove(&key) {
             let icon = load_icon(&source, icon_size);
-            apps.push(App {
+            // Antes do botão Iniciar, que é sempre o último.
+            let at = apps.iter().position(|a| a.source == START).unwrap_or(apps.len());
+            apps.insert(at, App {
                 tile: pastel(icon.as_ref()),
                 full: is_tile(icon.as_ref()),
                 icon,
@@ -547,7 +549,7 @@ pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
     let mut app = apps.remove(i);
     app.pinned = pin;
     if pin || !app.windows.is_empty() {
-        let at = apps.iter().filter(|a| a.pinned).count();
+        let at = apps.iter().filter(|a| a.pinned && a.source != START).count();
         apps.insert(at, app);
     }
 }

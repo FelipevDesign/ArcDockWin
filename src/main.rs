@@ -144,10 +144,13 @@ impl Dock {
         }
     }
 
-    /// Índice do último fixado, se houver apps abertos não fixados depois dele.
+    /// Índice do último fixado, se houver apps abertos não fixados depois dele
+    /// (o botão Iniciar, na ponta direita, não conta em nenhum dos dois grupos).
     fn sep_after(&self) -> Option<usize> {
-        let pinned = self.apps.iter().filter(|a| a.pinned).count();
-        (pinned > 0 && pinned < self.apps.len()).then(|| pinned - 1)
+        let regular = |a: &&App| a.source != apps::START;
+        let pinned = self.apps.iter().filter(regular).filter(|a| a.pinned).count();
+        let open = self.apps.iter().filter(regular).filter(|a| !a.pinned).count();
+        (pinned > 0 && open > 0).then(|| pinned - 1)
     }
 
     fn slots(&self) -> Vec<render::Slot> {
