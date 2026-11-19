@@ -24,6 +24,18 @@ struct Search {
     /// Faixa logo abaixo da barra (coordenadas de tela).
     strip: RECT,
     found: Option<HWND>,
+    /// Alguma janela (maximizada ou não) sobre a faixa.
+    covered: bool,
+}
+
+/// O que há logo abaixo da barra.
+pub enum Below {
+    /// App maximizado: a barra pega a cor dele.
+    Maximized(HWND),
+    /// Uma janela solta encostada na barra.
+    Window,
+    /// Só a área de trabalho (wallpaper).
+    Desktop,
 }
 
 unsafe extern "system" fn find_proc(h: HWND, lp: LPARAM) -> BOOL {
@@ -53,6 +65,7 @@ unsafe extern "system" fn find_proc(h: HWND, lp: LPARAM) -> BOOL {
         let st = &s.strip;
         if r.left < st.right && r.right > st.left && r.top < st.bottom && r.bottom > st.top {
             // A primeira janela (em z-order) sobre a faixa decide: maximizada ou não.
+            s.covered = true;
             if IsZoomed(h).as_bool() {
                 s.found = Some(h);
             }
@@ -62,17 +75,22 @@ unsafe extern "system" fn find_proc(h: HWND, lp: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-/// Janela da frente logo abaixo de `bar`, se estiver maximizada.
+/// O que está logo abaixo de `bar`.
 /// As janelas do próprio processo (topbar, dock, painéis) são TOOLWINDOW e ficam de fora.
-pub fn top_maximized(bar: RECT) -> Option<HWND> {
+pub fn below(bar: RECT) -> Below {
     let mut s = Search {
         strip: RECT { left: bar.left, top: bar.bottom, right: bar.right, bottom: bar.bottom + 4 },
         found: None,
+        covered: false,
     };
     unsafe {
         let _ = EnumWindows(Some(find_proc), LPARAM(&mut s as *mut _ as isize));
     }
-    s.found
+    match s.found {
+        Some(h) => Below::Maximized(h),
+        None if s.covered => Below::Window,
+        None => Below::Desktop,
+    }
 }
 
 /// Chave do app para o banco de cores: nome do exe em minúsculas. None para hosts que
@@ -97,8 +115,34 @@ pub fn app_key(h: HWND) -> Option<String> {
 
 /// Cor (RGB) que mais aparece na primeira linha de pixels abaixo de `bar`.
 pub fn read(bar: RECT) -> Option<[u8; 3]> {
-    let w = bar.right - bar.left;
     // Uma linha de pixels 2 px abaixo da barra (pula uma eventual borda de 1 px).
+    capture(bar, 2, 1, dominant)
+}
+
+/// Brilho (0–255) do wallpaper logo abaixo da barra, em fatias de `bucket` px.
+pub fn wallpaper_luma(bar: RECT, bucket: usize) -> Option<Vec<f32>> {
+    let w = (bar.right - bar.left) as usize;
+    const ROWS: i32 = 8;
+    capture(bar, 1, ROWS, |px| {
+        let mut out = vec![0.0f32; w.div_ceil(bucket)];
+        let mut n = vec![0u32; out.len()];
+        for row in px.chunks_exact(w * 4) {
+            for (x, p) in row.chunks_exact(4).enumerate().step_by(2) {
+                out[x / bucket] += 0.299 * p[2] as f32 + 0.587 * p[1] as f32 + 0.114 * p[0] as f32;
+                n[x / bucket] += 1;
+            }
+        }
+        for (o, n) in out.iter_mut().zip(n) {
+            *o /= n.max(1) as f32;
+        }
+        Some(out)
+    })
+}
+
+/// Copia `rows` linhas da tela, começando `gap` px abaixo da barra, e passa os pixels
+/// (BGRA, de cima para baixo) para `f`.
+fn capture<R>(bar: RECT, gap: i32, rows: i32, f: impl FnOnce(&[u8]) -> Option<R>) -> Option<R> {
+    let w = bar.right - bar.left;
     unsafe {
         let screen = GetDC(None);
         let mem = CreateCompatibleDC(Some(screen));
@@ -106,7 +150,7 @@ pub fn read(bar: RECT) -> Option<[u8; 3]> {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: w,
-                biHeight: -1,
+                biHeight: -rows,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -118,10 +162,10 @@ pub fn read(bar: RECT) -> Option<[u8; 3]> {
         let result = match CreateDIBSection(Some(mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
             Ok(dib) => {
                 let old = SelectObject(mem, HGDIOBJ(dib.0));
-                let ok = BitBlt(mem, 0, 0, w, 1, Some(screen), bar.left, bar.bottom + 2, SRCCOPY).is_ok();
+                let ok = BitBlt(mem, 0, 0, w, rows, Some(screen), bar.left, bar.bottom + gap, SRCCOPY).is_ok();
                 let out = if ok {
-                    let px = std::slice::from_raw_parts(bits as *const u8, w as usize * 4);
-                    dominant(px)
+                    let px = std::slice::from_raw_parts(bits as *const u8, (w * rows) as usize * 4);
+                    f(px)
                 } else {
                     None
                 };

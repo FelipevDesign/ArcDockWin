@@ -61,6 +61,10 @@ const TIMER_POLL: usize = 2;
 const TIMER_TINT: usize = 3;
 const TIMER_STATS: usize = 4;
 const STATS_MS: u32 = 2000;
+/// Largura (px) de cada fatia do brilho do wallpaper.
+const LUMA_BUCKET: usize = 16;
+const GLYPH_CPU: u16 = 0xE950;
+const GLYPH_RAM: u16 = 0xE964;
 const TINT_DEBOUNCE_MS: u32 = 120;
 const TINT_REFRESH_MS: u32 = 1500;
 /// Segunda leitura antes de gravar a cor de um app novo no banco.
@@ -129,6 +133,8 @@ struct Bar {
     bt: Option<bool>,
     /// Cor do app maximizado logo abaixo (RGB); None = vidro normal.
     app_color: Option<[u8; 3]>,
+    /// Brilho do wallpaper sob a barra, por fatia de LUMA_BUCKET px (vazio = não lido).
+    wall: Vec<f32>,
     usage: status::Usage,
     cpu: Option<u8>,
     ram: Option<u8>,
@@ -207,6 +213,9 @@ impl Bar {
             let glass_fx = glass::Glass::new(glass_hwnd, 0.0).ok();
             if let Some(fx) = &glass_fx {
                 fx.resize(w as f32, h as f32);
+                // Sem desfoque: a barra é transparente na área de trabalho e sólida
+                // (cor do app) sobre um app maximizado.
+                fx.set_opacity(0.0);
             }
 
             Ok(Self {
@@ -228,6 +237,7 @@ impl Bar {
                 tracking: false,
                 fullscreen: false,
                 app_color: None,
+                wall: Vec::new(),
                 usage: status::Usage::new(),
                 cpu: None,
                 ram: None,
@@ -262,7 +272,7 @@ impl Bar {
             // Painel aberto cobre a faixa lida: mantém a cor e tenta de novo depois.
             next = TINT_REFRESH_MS;
             self.app_color
-        } else if let Some(win) = crate::tint::top_maximized(self.rect) {
+        } else if let crate::tint::Below::Maximized(win) = crate::tint::below(self.rect) {
             let key = crate::tint::app_key(win);
             if let Some(c) = key.as_deref().and_then(crate::colordb::get) {
                 self.tint_pending = None;
@@ -287,6 +297,17 @@ impl Bar {
             }
         } else {
             self.tint_pending = None;
+            // Área de trabalho livre embaixo: relê o brilho do wallpaper (com janela solta
+            // encostada, mantém a última leitura).
+            if matches!(crate::tint::below(self.rect), crate::tint::Below::Desktop)
+                && let Some(l) = crate::tint::wallpaper_luma(self.rect, LUMA_BUCKET)
+                && l != self.wall
+            {
+                self.wall = l;
+                if self.app_color.is_none() {
+                    self.redraw();
+                }
+            }
             None
         };
         unsafe {
@@ -426,12 +447,12 @@ impl Bar {
                 .text_layout(&"100%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
                 .map(|t| width(&t))
                 .unwrap_or(30.0 * s);
-            for (label, v) in [("CPU", self.cpu), ("RAM", self.ram)] {
+            let gw = GLYPH_W * s;
+            for (glyph, v) in [(GLYPH_CPU, self.cpu), (GLYPH_RAM, self.ram)] {
                 let value = v.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
-                if let Some(t) = self.text_layout(&label.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
-                    let w = width(&t);
-                    text.push((t, lx, 0.6));
-                    lx += w + 4.0 * s;
+                if let Some(t) = self.text_layout(&[glyph], &self.icon_fmt, gw) {
+                    text.push((t, lx, 0.75));
+                    lx += gw + 3.0 * s;
                 }
                 if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
                     text.push((t, lx, 1.0));
@@ -471,6 +492,14 @@ impl Bar {
         self.items = items;
     }
 
+    /// Se o wallpaper sob [l, r) é claro (texto escuro); None se ainda não foi lido.
+    fn wall_light(&self, l: f32, r: f32) -> Option<bool> {
+        let a = (l.max(0.0) as usize / LUMA_BUCKET).min(self.wall.len().checked_sub(1)?);
+        let b = ((r.max(0.0) as usize).div_ceil(LUMA_BUCKET)).clamp(a + 1, self.wall.len());
+        let avg = self.wall[a..b].iter().sum::<f32>() / (b - a) as f32;
+        Some(avg > 150.0)
+    }
+
     fn hit(&self, x: f32) -> Option<Kind> {
         self.items.iter().find(|i| x >= i.l && x < i.r && i.kind != Kind::Stats).map(|i| i.kind)
     }
@@ -485,15 +514,23 @@ impl Bar {
             Some([r, g, b]) => 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 150.0,
             None => crate::light_theme(),
         };
-        let (mut tint, mut line, hover, ink) = if light {
-            ([246, 246, 248, 150], [0, 0, 0, 30], [0, 0, 0, 24], [0.0, 0.0, 0.0, 0.88])
-        } else {
-            ([28, 28, 32, 150], [255, 255, 255, 24], [255, 255, 255, 36], [1.0, 1.0, 1.0, 0.95])
+        let ink = if light { [0.0, 0.0, 0.0, 0.88] } else { [1.0, 1.0, 1.0, 0.95] };
+        // Sobre o app: fundo sólido na cor dele. Área de trabalho: transparente
+        // (alfa 1 para continuar recebendo cliques).
+        let tint = match app {
+            Some([r, g, b]) => [r, g, b, 255],
+            None => [0, 0, 0, 1],
         };
-        if let Some([r, g, b]) = app {
-            tint = [r, g, b, 255];
-            line = [r, g, b, 255];
-        }
+        let line = tint;
+        // Tinta de cada item: pela cor do app ou pelo brilho do wallpaper sob o item.
+        let item_light: Vec<bool> = self
+            .items
+            .iter()
+            .map(|it| match app {
+                Some(_) => light,
+                None => self.wall_light(it.l, it.r).unwrap_or(light),
+            })
+            .collect();
         let s = self.scale;
         let (w, h) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
         let id = Transform::identity();
@@ -507,7 +544,8 @@ impl Bar {
         if let Some(r) = Rect::from_xywh(0.0, h - 1.0, w, 1.0) {
             pm.fill_rect(r, &solid(line), id, None);
         }
-        if let Some(it) = self.items.iter().find(|i| Some(i.kind) == self.hot) {
+        if let Some((i, it)) = self.items.iter().enumerate().find(|(_, i)| Some(i.kind) == self.hot) {
+            let hover = if item_light[i] { [0, 0, 0, 24] } else { [255, 255, 255, 36] };
             let m = 2.0 * s;
             if let Some(p) = rounded_rect(it.l, m, it.r - it.l, h - 1.0 - 2.0 * m, 5.0 * s) {
                 pm.fill_path(&p, &solid(hover), FillRule::Winding, id, None);
@@ -537,7 +575,15 @@ impl Bar {
                 let color = D2D1_COLOR_F { r: ink[0], g: ink[1], b: ink[2], a: ink[3] };
                 if let Ok(brush) = self.target.CreateSolidColorBrush(&color, None) {
                     self.target.BeginDraw();
-                    for it in &self.items {
+                    for (it, &il) in self.items.iter().zip(&item_light) {
+                        let c = if app.is_some() || il == light {
+                            color
+                        } else if il {
+                            D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.88 }
+                        } else {
+                            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 }
+                        };
+                        brush.SetColor(&c);
                         for (t, x, alpha) in &it.text {
                             brush.SetOpacity(*alpha);
                             self.target.DrawTextLayout(Vector2 { X: *x, Y: 0.0 }, t, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
@@ -824,8 +870,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_SETTINGCHANGE => {
-                // Pode ser a troca de tema claro/escuro.
-                with_bar(|b| b.redraw());
+                // Pode ser a troca de tema claro/escuro ou de wallpaper.
+                with_bar(|b| {
+                    b.redraw();
+                    SetTimer(Some(hwnd), TIMER_TINT, 300, None);
+                });
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_TIMECHANGE => {
