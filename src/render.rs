@@ -3,9 +3,8 @@
 use std::f32::consts::PI;
 
 use tiny_skia::{
-    Color, FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PixmapPaint, Rect,
-    SpreadMode, Stroke,
-    Transform,
+    Color, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder, Pattern,
+    Pixmap, PixmapPaint, Point, Rect, SpreadMode, Stroke, Transform,
 };
 
 use crate::apps::App;
@@ -65,7 +64,7 @@ impl Theme {
 
 /// Arredondamento da caixinha (fração do lado) e quanto do lado o ícone ocupa.
 const TILE_RADIUS: f32 = 0.24;
-const ICON_IN_TILE: f32 = 0.68;
+const ICON_IN_TILE: f32 = 0.72;
 
 pub struct Slot {
     pub x: f32,
@@ -187,13 +186,32 @@ pub fn draw(
             // Demais: caixinha 1:1 pastel com o ícone centralizado dentro, com margem.
             Some(icon) => {
                 if let Some(tile) = &tile {
-                    pm.fill_path(tile, &solid(app.tile), FillRule::Winding, id, None);
+                    // Degradê vertical sutil: topo mais claro, base um pouco mais escura.
+                    let paint = gradient(app.tile, y, y + slot.size);
+                    pm.fill_path(tile, &paint, FillRule::Winding, id, None);
+                }
+                // Contorno fino para a caixinha não "sumir" em fundos claros.
+                if let Some(edge) = rounded_rect(
+                    slot.x + 0.5,
+                    y + 0.5,
+                    slot.size - 1.0,
+                    slot.size - 1.0,
+                    slot.size * TILE_RADIUS - 0.5,
+                ) {
+                    let stroke = Stroke { width: 1.0, ..Default::default() };
+                    pm.stroke_path(&edge, &solid([0, 0, 0, 28]), &stroke, id, None);
                 }
                 let inner = slot.size * ICON_IN_TILE;
                 let (iw, ih) = (icon.width() as f32, icon.height() as f32);
                 let s = inner / iw.max(ih);
                 let ox = slot.x + (slot.size - iw * s) / 2.0;
                 let oy = y + (slot.size - ih * s) / 2.0;
+                // Sombra leve: o próprio ícone em preto, transparente, 1 px abaixo.
+                if let Some(shadow) = app.shadow.as_ref() {
+                    let sp = PixmapPaint { opacity: 0.18, ..icon_paint };
+                    let tr = Transform::from_row(s, 0.0, 0.0, s, ox, oy + slot.size * 0.025);
+                    pm.draw_pixmap(0, 0, shadow.as_ref(), &sp, tr, None);
+                }
                 let tr = Transform::from_row(s, 0.0, 0.0, s, ox, oy);
                 pm.draw_pixmap(0, 0, icon.as_ref(), &icon_paint, tr, None);
             }
@@ -214,6 +232,28 @@ pub fn draw(
                 pm.fill_path(&dot, &solid(color), FillRule::Winding, id, None);
             }
         }
+    }
+}
+
+fn gradient([r, g, b, a]: [u8; 4], top: f32, bottom: f32) -> Paint<'static> {
+    let shade = |k: f32| {
+        let f = |c: u8| (c as f32 * k).clamp(0.0, 255.0) as u8;
+        Color::from_rgba8(f(r), f(g), f(b), a)
+    };
+    let top_c = {
+        let f = |c: u8| (c as f32 + (255.0 - c as f32) * 0.5) as u8;
+        Color::from_rgba8(f(r), f(g), f(b), a)
+    };
+    let shader = LinearGradient::new(
+        Point::from_xy(0.0, top),
+        Point::from_xy(0.0, bottom),
+        vec![GradientStop::new(0.0, top_c), GradientStop::new(1.0, shade(0.94))],
+        SpreadMode::Pad,
+        Transform::identity(),
+    );
+    match shader {
+        Some(shader) => Paint { shader, anti_alias: true, ..Default::default() },
+        None => solid([r, g, b, a]),
     }
 }
 

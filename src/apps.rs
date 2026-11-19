@@ -38,6 +38,8 @@ pub struct App {
     pub tile: [u8; 4],
     /// O ícone já é um "azulejo" (quadrado e preenchido): ocupa a caixa inteira, sem fundo pastel.
     pub full: bool,
+    /// Silhueta preta do ícone, para a sombra leve dentro da caixinha.
+    pub shadow: Option<Pixmap>,
     /// Janelas abertas do app, na ordem em que apareceram.
     pub windows: Vec<HWND>,
 }
@@ -73,6 +75,7 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         icon: start_icon(icon_size as u32),
         tile: [0; 4],
         full: false,
+        shadow: None,
         windows: Vec::new(),
     };
     // O botão Iniciar fica na ponta direita, depois dos fixados e dos abertos.
@@ -86,6 +89,7 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
             icon: load_icon(source, icon_size),
             tile: [0; 4],
             full: false,
+            shadow: None,
             source: source.to_string(),
             pinned: true,
             windows: Vec::new(),
@@ -95,6 +99,7 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
     for app in &mut apps {
         app.tile = pastel(app.icon.as_ref());
         app.full = is_tile(app.icon.as_ref());
+        app.shadow = silhouette(app.icon.as_ref());
     }
     apps
 }
@@ -116,8 +121,19 @@ pub fn is_tile(icon: Option<&Pixmap>) -> bool {
 }
 
 /// Tom pastel da cor predominante do ícone (pixels vivos pesam mais que preto/branco/cinza).
+/// Cópia do ícone toda preta, mantendo o alfa (pré-multiplicado: RGB = 0).
+pub fn silhouette(icon: Option<&Pixmap>) -> Option<Pixmap> {
+    let mut out = icon?.clone();
+    for p in out.data_mut().chunks_exact_mut(4) {
+        p[0] = 0;
+        p[1] = 0;
+        p[2] = 0;
+    }
+    Some(out)
+}
+
 pub fn pastel(icon: Option<&Pixmap>) -> [u8; 4] {
-    let (mut x, mut y, mut wsum, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut x, mut y, mut wsum, mut n, mut vivid) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
     for p in icon.map(|i| i.data()).unwrap_or(&[]).chunks_exact(4) {
         let a = p[3] as f32;
         if a < 128.0 {
@@ -137,15 +153,19 @@ pub fn pastel(icon: Option<&Pixmap>) -> [u8; 4] {
             (r - g) / (max - min) + 4.0
         } * std::f32::consts::FRAC_PI_3;
         let w = (max - min) / max * max; // saturação × brilho
+        if (max - min) / max > 0.25 && max > 0.2 {
+            vivid += 1.0;
+        }
         x += w * hue.cos();
         y += w * hue.sin();
         wsum += w;
     }
-    // Ícone quase sem cor: cinza claro neutro.
-    let (hue, sat, light) = if n == 0.0 || wsum / n < 0.08 {
-        (0.0, 0.0, 0.90)
+    // Pouca área colorida (ex.: engrenagem com um detalhe azul): cinza claro neutro.
+    // Senão, um pastel bem suave, só um toque da cor do ícone.
+    let (hue, sat, light) = if n == 0.0 || wsum / n < 0.08 || vivid / n < 0.40 {
+        (0.0, 0.0, 0.94)
     } else {
-        (y.atan2(x).to_degrees().rem_euclid(360.0), 0.60, 0.87)
+        (y.atan2(x).to_degrees().rem_euclid(360.0), 0.22, 0.92)
     };
     let [r, g, b] = hsl_to_rgb(hue, sat, light);
     [r, g, b, 255]
@@ -413,6 +433,7 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
             apps.insert(at, App {
                 tile: pastel(icon.as_ref()),
                 full: is_tile(icon.as_ref()),
+                shadow: silhouette(icon.as_ref()),
                 icon,
                 source,
                 key,
