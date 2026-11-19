@@ -458,7 +458,7 @@ impl Bar {
                 if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
                     let w = width(&t).max(value_w);
                     text.push((t, lx, 1.0));
-                    lx += w + 2.0 * pad;
+                    lx += w + 8.0 * s;
                 }
             }
             items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx, text });
