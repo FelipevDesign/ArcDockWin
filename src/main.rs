@@ -11,6 +11,7 @@ mod taskbar;
 mod topbar;
 mod tray;
 mod volume;
+mod wifi;
 
 use std::cell::RefCell;
 use std::ffi::c_void;

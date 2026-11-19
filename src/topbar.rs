@@ -529,11 +529,16 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
     Some(match kind {
         Kind::Clock => ("clock", || Box::new(crate::calendar::Calendar::new())),
         Kind::Volume => ("volume", || Box::new(crate::volume::VolumePanel::new())),
-        Kind::Network => ("network", || Box::new(panel::Placeholder("Rede"))),
+        Kind::Network => ("network", || Box::new(crate::wifi::WifiPanel::new())),
         Kind::Bluetooth => ("bluetooth", || Box::new(crate::bluetooth::BluetoothPanel::new())),
         Kind::Battery => ("battery", || Box::new(panel::Placeholder("Bateria"))),
         Kind::Tray(_) => return None,
     })
+}
+
+/// Janela da topbar (destino das mensagens de trabalho feito em outra thread).
+pub fn hwnd() -> HWND {
+    with_bar(|b| b.hwnd).unwrap_or_default()
 }
 
 fn with_bar<R>(f: impl FnOnce(&mut Bar) -> R) -> Option<R> {
@@ -681,6 +686,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         }
                     });
                 }
+                panel::notify(msg, wp.0);
+                LRESULT(0)
+            }
+            crate::wifi::WM_WIFI => {
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }

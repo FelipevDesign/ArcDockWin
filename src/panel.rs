@@ -127,6 +127,9 @@ pub enum Widget {
     Text(String),
     /// Linha de lista clicável → [`Event::Click`]. `selected` mostra um ✓ na cor de destaque.
     Row { id: u32, glyph: Option<u16>, text: String, sub: Option<String>, selected: bool },
+    /// Igual a [`Widget::Row`], com um glifo pequeno e apagado à direita (ex.: o cadeado das
+    /// redes protegidas).
+    RowBadge { id: u32, glyph: Option<u16>, text: String, sub: Option<String>, selected: bool, badge: u16 },
     /// Interruptor liga/desliga → [`Event::Toggle`] com o valor novo.
     Toggle { id: u32, text: String, on: bool },
     /// Controle deslizante (`value` 0..1) → [`Event::Slide`]. `button`: ícone clicável à
@@ -590,7 +593,7 @@ impl Panel {
                     .unwrap_or(18.0 * s);
                 return h.ceil() + 8.0 * s;
             }
-            Widget::Row { sub, .. } => {
+            Widget::Row { sub, .. } | Widget::RowBadge { sub, .. } => {
                 if sub.is_some() {
                     48.0
                 } else {
@@ -760,7 +763,8 @@ impl Panel {
                         clip: None,
                     });
                 }
-                Widget::Row { id: rid, glyph: g, text: t, sub, selected } => {
+                Widget::Row { id: rid, glyph: g, text: t, sub, selected }
+                | Widget::RowBadge { id: rid, glyph: g, text: t, sub, selected, .. } => {
                     zones.push(Zone {
                         x: left,
                         y: y + 2.0 * s,
@@ -779,7 +783,14 @@ impl Panel {
                         let a = rgba(pal.accent);
                         texts.push(mk(&glyph(glyph::CHECK), Font::Icon, [right - inset - 18.0 * s, y, 18.0 * s, wh], DWRITE_TEXT_ALIGNMENT_CENTER, a));
                     }
-                    let tw = right - inset - check - tx;
+                    let mut tw = right - inset - check - tx;
+                    if let Widget::RowBadge { badge, .. } = wd {
+                        let bx = if *selected { right - inset - check - 16.0 * s } else { right - inset - 18.0 * s };
+                        texts.push(mk(&glyph(*badge), Font::Icon, [bx, y, 16.0 * s, wh], DWRITE_TEXT_ALIGNMENT_CENTER, pal.dim));
+                        if *selected {
+                            tw -= 20.0 * s;
+                        }
+                    }
                     let font = if *selected { Font::Bold } else { Font::Body };
                     match sub {
                         Some(sub) => {
