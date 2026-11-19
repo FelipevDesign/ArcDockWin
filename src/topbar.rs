@@ -61,9 +61,9 @@ const TIMER_POLL: usize = 2;
 const POLL_MS: u32 = 3000;
 
 /// Altura da barra, espaço interno de cada item e largura de um glifo (px antes da escala).
-const HEIGHT: f32 = 30.0;
-const PAD: f32 = 7.0;
-const GLYPH_W: f32 = 18.0;
+const HEIGHT: f32 = 24.0;
+const PAD: f32 = 6.0;
+const GLYPH_W: f32 = 16.0;
 const TRAY_PAD: f32 = 4.0;
 
 thread_local! {
@@ -180,8 +180,8 @@ impl Bar {
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
                 Ok(f)
             };
-            let text_fmt = format(family, 13.0)?;
-            let icon_fmt = format(w!("Segoe Fluent Icons"), 16.0)?;
+            let text_fmt = format(family, 12.0)?;
+            let icon_fmt = format(w!("Segoe Fluent Icons"), 14.0)?;
             icon_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
 
             let glass_fx = glass::Glass::new(glass_hwnd, 0.0).ok();
@@ -382,7 +382,7 @@ impl Bar {
             pm.fill_rect(r, &solid(line), id, None);
         }
         if let Some(it) = self.items.iter().find(|i| Some(i.kind) == self.hot) {
-            let m = 3.0 * s;
+            let m = 2.0 * s;
             if let Some(p) = rounded_rect(it.l, m, it.r - it.l, h - 1.0 - 2.0 * m, 5.0 * s) {
                 pm.fill_path(&p, &solid(hover), FillRule::Winding, id, None);
             }
