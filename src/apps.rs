@@ -195,9 +195,48 @@ fn start_icon(size: u32) -> Option<Pixmap> {
     Some(pm)
 }
 
-/// Abre a Paleta de Comandos do PowerToys simulando Win+Alt+Espaço (o atalho dela).
-/// O menu Iniciar continua no Ctrl+Esc.
+/// Processos rodando agora (nome do exe em minúsculas).
+fn running_exes() -> Vec<String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    let mut out = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            out.push(String::from_utf16_lossy(&e.szExeFile[..n]).to_lowercase());
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// Botão Iniciar do dock: abre a Paleta de Comandos do PowerToys. Se o PowerToys ou a Paleta
+/// estão fechados, abre antes (a Paleta aberta pelo link `x-cmdpal:` já aparece na tela);
+/// com ela rodando, aperta o atalho dela (Win+Alt+Espaço).
 fn open_start() {
+    let running = running_exes();
+    if !running.iter().any(|n| n == "powertoys.exe")
+        && let Some(local) = std::env::var_os("LOCALAPPDATA")
+    {
+        let exe = std::path::PathBuf::from(local).join(r"PowerToys\PowerToys.exe");
+        if exe.exists() {
+            unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(exe.as_os_str()), None, None, SW_SHOWNORMAL) };
+        }
+    }
+    if !running.iter().any(|n| n == "microsoft.cmdpal.ui.exe") {
+        unsafe { ShellExecuteW(None, w!("open"), w!("x-cmdpal:"), None, None, SW_SHOWNORMAL) };
+        return;
+    }
+    send_palette_hotkey();
+}
+
+/// Win+Alt+Espaço, o atalho da Paleta de Comandos.
+fn send_palette_hotkey() {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VIRTUAL_KEY, VK_LMENU, VK_LWIN, VK_SPACE,
