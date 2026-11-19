@@ -73,6 +73,7 @@ thread_local! {
 enum Kind {
     Tray(usize),
     Network,
+    Bluetooth,
     Volume,
     Battery,
     Clock,
@@ -112,6 +113,8 @@ struct Bar {
     battery: Option<u16>,
     volume: Option<(f32, bool)>,
     net: Net,
+    /// Rádio Bluetooth: None = não existe; Some(ligado).
+    bt: Option<bool>,
     audio: Option<Audio>,
     wlan: Wlan,
 }
@@ -209,6 +212,7 @@ impl Bar {
                 battery: status::battery().map(battery_glyph),
                 volume: None,
                 net: Net::None,
+                bt: None,
                 audio: Audio::new(hwnd),
                 wlan: Wlan::open(),
             })
@@ -341,6 +345,9 @@ impl Bar {
             x = self.glyph_item(&mut items, x, Kind::Volume, &[(volume_glyph(v), 1.0)]);
         }
         x = self.glyph_item(&mut items, x, Kind::Network, &net_glyphs(self.net));
+        if let Some(on) = self.bt {
+            x = self.glyph_item(&mut items, x, Kind::Bluetooth, &[(panel::glyph::BLUETOOTH, if on { 1.0 } else { 0.35 })]);
+        }
 
         // Bandeja: à esquerda dos ícones de status, índice 0 mais à esquerda.
         x -= 4.0 * s;
@@ -522,6 +529,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Clock => ("clock", || Box::new(crate::calendar::Calendar::new())),
         Kind::Volume => ("volume", || Box::new(crate::volume::VolumePanel::new())),
         Kind::Network => ("network", || Box::new(panel::Placeholder("Rede"))),
+        Kind::Bluetooth => ("bluetooth", || Box::new(crate::bluetooth::BluetoothPanel::new())),
         Kind::Battery => ("battery", || Box::new(panel::Placeholder("Bateria"))),
         Kind::Tray(_) => return None,
     })
@@ -661,6 +669,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }
+            crate::bluetooth::WM_BT_RADIO | crate::bluetooth::WM_BT_PANEL => {
+                if msg == crate::bluetooth::WM_BT_RADIO {
+                    with_bar(|b| {
+                        let bt = Some(wp.0 == 2);
+                        if bt != b.bt {
+                            b.bt = bt;
+                            b.relayout();
+                            b.redraw();
+                        }
+                    });
+                }
+                panel::notify(msg, wp.0);
+                LRESULT(0)
+            }
             WM_APPBAR => {
                 with_bar(|b| match wp.0 as u32 {
                     ABN_POSCHANGED => b.place(),
@@ -761,6 +783,7 @@ pub fn create() {
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_POLL, POLL_MS, None);
+        crate::bluetooth::watch(hwnd);
     }
 }
 
