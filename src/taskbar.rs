@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::Shell::{ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage};
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, FindWindowW, GetSystemMetrics, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN,
-    SW_HIDE, SW_SHOW, ShowWindow,
+    FindWindowExW, GetSystemMetrics, GetWindowThreadProcessId, IsWindowVisible, SM_CXSCREEN,
+    SM_CYSCREEN, SW_HIDE, SW_SHOW, ShowWindow,
 };
 use windows::core::w;
 
@@ -14,10 +15,26 @@ fn state_file() -> PathBuf {
     crate::apps::config_path().with_file_name("taskbar_state")
 }
 
+/// Shell_TrayWnd do Explorer. Não usa FindWindow direto porque o host da bandeja
+/// (tray.rs) cria uma janela nossa com a mesma classe, acima da do Explorer.
+pub fn explorer_tray() -> Option<HWND> {
+    let own = unsafe { GetCurrentProcessId() };
+    let mut prev = None;
+    while let Ok(h) = unsafe { FindWindowExW(None, prev, w!("Shell_TrayWnd"), None) } {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+        if pid != own {
+            return Some(h);
+        }
+        prev = Some(h);
+    }
+    None
+}
+
 fn tray_windows() -> Vec<HWND> {
     let mut out = Vec::new();
     unsafe {
-        if let Ok(main) = FindWindowW(w!("Shell_TrayWnd"), None) {
+        if let Some(main) = explorer_tray() {
             out.push(main);
         }
         let mut prev = None;
@@ -34,7 +51,7 @@ fn appbar_data(hwnd: HWND) -> APPBARDATA {
 }
 
 fn set_state(state: u32) {
-    if let Ok(tray) = unsafe { FindWindowW(w!("Shell_TrayWnd"), None) } {
+    if let Some(tray) = explorer_tray() {
         let mut abd = appbar_data(tray);
         abd.lParam = LPARAM(state as isize);
         unsafe { SHAppBarMessage(ABM_SETSTATE, &mut abd) };

@@ -4,6 +4,8 @@ mod apps;
 mod glass;
 mod render;
 mod taskbar;
+#[allow(dead_code)]
+mod tray;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
