@@ -20,6 +20,7 @@ const DWMWA_USE_HOSTBACKDROPBRUSH: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(17);
 pub struct Glass {
     _queue: Option<DispatcherQueueController>,
     _target: DesktopWindowTarget,
+    compositor: Compositor,
     visual: SpriteVisual,
     shape: CompositionRoundedRectangleGeometry,
 }
@@ -59,12 +60,20 @@ impl Glass {
             visual.SetClip(&compositor.CreateGeometricClipWithGeometry(&shape)?)?;
             target.SetRoot(&visual)?;
 
-            Ok(Self { _queue: queue, _target: target, visual, shape })
+            Ok(Self { _queue: queue, _target: target, compositor, visual, shape })
         }
     }
 
     pub fn resize(&self, w: f32, h: f32) {
         let _ = self.shape.SetSize(Vector2 { X: w, Y: h });
+    }
+
+    /// O DWM guarda o que está atrás e só re-amostra quando a janela muda; quando um app
+    /// fecha ou minimiza por trás, o vidro fica com a cor antiga. Um pincel novo força a releitura.
+    pub fn refresh(&self) {
+        if let Ok(brush) = self.compositor.CreateHostBackdropBrush() {
+            let _ = self.visual.SetBrush(&brush);
+        }
     }
 
     /// Opacidade do vidro (0..1), usada na animação de abrir dos painéis.

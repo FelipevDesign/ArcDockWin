@@ -47,6 +47,7 @@ use render::{Metrics, Theme};
 
 const TIMER_REFRESH: usize = 2;
 const TIMER_EDGE: usize = 3;
+const TIMER_GLASS: usize = 4;
 /// Quanto tempo o dock continua visível depois que o motivo para ficar visível acabou.
 const HIDE_DELAY: Duration = Duration::from_millis(500);
 /// Tempo de subida e descida do dock ao aparecer/sumir (segundos).
@@ -303,6 +304,9 @@ impl Dock {
         self.glass_rect = None;
         unsafe {
             if want {
+                if let Some(fx) = &self.glass_fx {
+                    fx.refresh();
+                }
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             } else {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -573,6 +577,10 @@ unsafe extern "system" fn on_foreground(
     _: u32,
 ) {
     with_dock(|d| {
+        // O que está atrás do vidro mudou: re-amostra depois que a animação do Windows acaba.
+        unsafe {
+            SetTimer(Some(d.hwnd), TIMER_GLASS, 400, None);
+        }
         if hwnd == d.hwnd || hwnd == d.glass {
             return;
         }
@@ -701,6 +709,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_TIMER => {
                 with_dock(|d| match wp.0 {
                     TIMER_EDGE => d.edge_tick(),
+                    TIMER_GLASS => {
+                        let _ = KillTimer(Some(d.hwnd), TIMER_GLASS);
+                        if let Some(fx) = &d.glass_fx {
+                            fx.refresh();
+                        }
+                    },
                     TIMER_REFRESH => {
                         taskbar::ensure_hidden();
                         if d.refresh() {
@@ -866,6 +880,16 @@ fn main() -> windows::core::Result<()> {
         let _ = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(on_foreground),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        // Minimizar/restaurar também muda o que está atrás do vidro.
+        let _ = SetWinEventHook(
+            EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MINIMIZEEND,
             None,
             Some(on_foreground),
             0,
