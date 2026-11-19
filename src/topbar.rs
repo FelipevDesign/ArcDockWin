@@ -443,8 +443,9 @@ impl Bar {
                 let _ = unsafe { t.GetMetrics(&mut m) };
                 m.width.ceil()
             };
+            // Largura mínima de "00%": o valor não fica pulando entre 9% e 10%.
             let value_w = self
-                .text_layout(&"100%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
+                .text_layout(&"00%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
                 .map(|t| width(&t))
                 .unwrap_or(30.0 * s);
             let gw = GLYPH_W * s;
@@ -452,11 +453,12 @@ impl Bar {
                 let value = v.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
                 if let Some(t) = self.text_layout(&[glyph], &self.icon_fmt, gw) {
                     text.push((t, lx, 0.75));
-                    lx += gw + 3.0 * s;
+                    lx += gw + 2.0 * s;
                 }
                 if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
+                    let w = width(&t).max(value_w);
                     text.push((t, lx, 1.0));
-                    lx += value_w + 10.0 * s;
+                    lx += w + 2.0 * pad;
                 }
             }
             items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx, text });
