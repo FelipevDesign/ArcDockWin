@@ -32,7 +32,7 @@ use windows::core::BOOL;
 use windows::Win32::Foundation::{FALSE, TRUE};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RegGetValueW, RegSetKeyValueW};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
@@ -495,6 +495,38 @@ fn start_tray() {
     }
 }
 
+/// Inicia com o Windows: grava o caminho deste exe em HKCU\...\Run (só se mudou).
+fn autostart() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let value: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain([0]).collect();
+    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
+    let mut buf = [0u16; 1024];
+    let mut size = size_of_val(&buf) as u32;
+    unsafe {
+        let same = RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            w!("ArcDockWin"),
+            windows::Win32::System::Registry::RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            Some(&mut size),
+        )
+        .is_ok()
+            && buf[..(size as usize / 2)] == value[..];
+        if !same {
+            let _ = RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                key,
+                w!("ArcDockWin"),
+                REG_SZ.0,
+                Some(value.as_ptr() as *const c_void),
+                (value.len() * 2) as u32,
+            );
+        }
+    }
+}
+
 fn light_theme() -> bool {
     let mut value: u32 = 0;
     let mut size = size_of::<u32>() as u32;
@@ -828,6 +860,7 @@ fn main() -> windows::core::Result<()> {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         topbar::create();
         start_tray();
+        autostart();
         SetTimer(Some(hwnd), TIMER_REFRESH, 1000, None);
         SetTimer(Some(hwnd), TIMER_EDGE, 50, None);
         let _ = SetWinEventHook(
