@@ -5,17 +5,20 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, GetDC, HGDIOBJ, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, IsIconic, IsWindowVisible, IsZoomed,
+    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
     WS_EX_TOOLWINDOW,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, PWSTR};
 
 struct Search {
     /// Faixa logo abaixo da barra (coordenadas de tela).
@@ -59,10 +62,9 @@ unsafe extern "system" fn find_proc(h: HWND, lp: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-/// Cor (RGB) da faixa logo abaixo de `bar`, se a janela da frente ali estiver maximizada.
+/// Janela da frente logo abaixo de `bar`, se estiver maximizada.
 /// As janelas do próprio processo (topbar, dock, painéis) são TOOLWINDOW e ficam de fora.
-pub fn sample(bar: RECT) -> Option<[u8; 3]> {
-    let w = bar.right - bar.left;
+pub fn top_maximized(bar: RECT) -> Option<HWND> {
     let mut s = Search {
         strip: RECT { left: bar.left, top: bar.bottom, right: bar.right, bottom: bar.bottom + 4 },
         found: None,
@@ -70,8 +72,32 @@ pub fn sample(bar: RECT) -> Option<[u8; 3]> {
     unsafe {
         let _ = EnumWindows(Some(find_proc), LPARAM(&mut s as *mut _ as isize));
     }
-    s.found?;
+    s.found
+}
 
+/// Chave do app para o banco de cores: nome do exe em minúsculas. None para hosts que
+/// servem vários apps (UWP), que são sempre lidos da tela.
+pub fn app_key(h: HWND) -> Option<String> {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 512];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = CloseHandle(proc);
+        if !ok {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        let name = path.rsplit('\\').next()?.to_lowercase();
+        (name != "applicationframehost.exe").then_some(name)
+    }
+}
+
+/// Cor (RGB) que mais aparece na primeira linha de pixels abaixo de `bar`.
+pub fn read(bar: RECT) -> Option<[u8; 3]> {
+    let w = bar.right - bar.left;
     // Uma linha de pixels 2 px abaixo da barra (pula uma eventual borda de 1 px).
     unsafe {
         let screen = GetDC(None);

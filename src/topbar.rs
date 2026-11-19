@@ -61,6 +61,8 @@ const TIMER_POLL: usize = 2;
 const TIMER_TINT: usize = 3;
 const TINT_DEBOUNCE_MS: u32 = 120;
 const TINT_REFRESH_MS: u32 = 1500;
+/// Segunda leitura antes de gravar a cor de um app novo no banco.
+const TINT_CONFIRM_MS: u32 = 400;
 /// Intervalo da consulta de rede e bateria (ms).
 const POLL_MS: u32 = 3000;
 
@@ -123,6 +125,8 @@ struct Bar {
     bt: Option<bool>,
     /// Cor do app maximizado logo abaixo (RGB); None = vidro normal.
     app_color: Option<[u8; 3]>,
+    /// Primeira leitura de um app ainda sem cor no banco: (app, cor), esperando confirmação.
+    tint_pending: Option<(String, [u8; 3])>,
     audio: Option<Audio>,
     wlan: Wlan,
 }
@@ -217,6 +221,7 @@ impl Bar {
                 tracking: false,
                 fullscreen: false,
                 app_color: None,
+                tint_pending: None,
                 clock: String::new(),
                 battery: status::battery().map(battery_glyph),
                 volume: None,
@@ -239,11 +244,41 @@ impl Bar {
     }
 
     /// Pede a borda de cima ao sistema e põe as duas janelas lá.
-    /// Relê a cor do app maximizado e repinta se mudou.
+    /// Acha o app maximizado embaixo e pega a cor dele: do banco (colordb) se já houver;
+    /// senão lê da tela e grava quando duas leituras seguidas concordam.
     fn update_tint(&mut self) {
-        // Painel aberto cobre a faixa lida: mantém a cor e tenta de novo depois.
-        let color = if panel::any_open() || self.fullscreen { self.app_color } else { crate::tint::sample(self.rect) };
-        let next = if color.is_some() { TINT_REFRESH_MS } else { 0 };
+        let mut next = 0;
+        let color = if panel::any_open() || self.fullscreen {
+            // Painel aberto cobre a faixa lida: mantém a cor e tenta de novo depois.
+            next = TINT_REFRESH_MS;
+            self.app_color
+        } else if let Some(win) = crate::tint::top_maximized(self.rect) {
+            let key = crate::tint::app_key(win);
+            if let Some(c) = key.as_deref().and_then(crate::colordb::get) {
+                self.tint_pending = None;
+                Some(c)
+            } else {
+                let c = crate::tint::read(self.rect);
+                match (key, c) {
+                    (Some(k), Some(c)) => {
+                        if self.tint_pending.as_ref().is_some_and(|(pk, pc)| *pk == k && *pc == c) {
+                            crate::colordb::set(&k, c);
+                            self.tint_pending = None;
+                        } else {
+                            self.tint_pending = Some((k, c));
+                            next = TINT_CONFIRM_MS;
+                        }
+                    }
+                    // Sem chave (UWP): sem banco, relê de tempos em tempos.
+                    (None, Some(_)) => next = TINT_REFRESH_MS,
+                    _ => self.tint_pending = None,
+                }
+                c
+            }
+        } else {
+            self.tint_pending = None;
+            None
+        };
         unsafe {
             if next > 0 {
                 SetTimer(Some(self.hwnd), TIMER_TINT, next, None);
