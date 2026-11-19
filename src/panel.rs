@@ -1294,6 +1294,11 @@ pub fn is_open(key: &str) -> bool {
     with_panel(|p| p.key == key).unwrap_or(false)
 }
 
+/// Se há algum painel aberto.
+pub fn any_open() -> bool {
+    with_panel(|_| ()).is_some()
+}
+
 /// Reconstrói o painel aberto (estado mudou por fora).
 #[allow(dead_code)]
 pub fn refresh() {

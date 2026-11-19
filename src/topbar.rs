@@ -27,6 +27,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
     ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_FULLSCREENAPP, ABN_POSCHANGED,
@@ -55,6 +56,11 @@ const WM_APPBAR: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_CLOCK: usize = 1;
 const TIMER_POLL: usize = 2;
+/// Releitura da cor do app maximizado: logo depois de um evento de janela e, enquanto
+/// pintada, de tempos em tempos (o app pode mudar de cor sem mexer na janela).
+const TIMER_TINT: usize = 3;
+const TINT_DEBOUNCE_MS: u32 = 120;
+const TINT_REFRESH_MS: u32 = 1500;
 /// Intervalo da consulta de rede e bateria (ms).
 const POLL_MS: u32 = 3000;
 
@@ -115,6 +121,8 @@ struct Bar {
     net: Net,
     /// Rádio Bluetooth: None = não existe; Some(ligado).
     bt: Option<bool>,
+    /// Cor do app maximizado logo abaixo (RGB); None = vidro normal.
+    app_color: Option<[u8; 3]>,
     audio: Option<Audio>,
     wlan: Wlan,
 }
@@ -208,6 +216,7 @@ impl Bar {
                 hot: None,
                 tracking: false,
                 fullscreen: false,
+                app_color: None,
                 clock: String::new(),
                 battery: status::battery().map(battery_glyph),
                 volume: None,
@@ -230,6 +239,24 @@ impl Bar {
     }
 
     /// Pede a borda de cima ao sistema e põe as duas janelas lá.
+    /// Relê a cor do app maximizado e repinta se mudou.
+    fn update_tint(&mut self) {
+        // Painel aberto cobre a faixa lida: mantém a cor e tenta de novo depois.
+        let color = if panel::any_open() || self.fullscreen { self.app_color } else { crate::tint::sample(self.rect) };
+        let next = if color.is_some() { TINT_REFRESH_MS } else { 0 };
+        unsafe {
+            if next > 0 {
+                SetTimer(Some(self.hwnd), TIMER_TINT, next, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_TINT);
+            }
+        }
+        if color != self.app_color {
+            self.app_color = color;
+            self.redraw();
+        }
+    }
+
     fn place(&mut self) {
         let (w, h) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
         let mut abd = self.appbar_data();
@@ -368,12 +395,21 @@ impl Bar {
         if self.fullscreen {
             return;
         }
-        let light = crate::light_theme();
-        let (tint, line, hover, ink) = if light {
+        // Com app maximizado embaixo: fundo sólido na cor dele, sem linha, tinta pelo contraste.
+        let app = self.app_color;
+        let light = match app {
+            Some([r, g, b]) => 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 150.0,
+            None => crate::light_theme(),
+        };
+        let (mut tint, mut line, hover, ink) = if light {
             ([246, 246, 248, 150], [0, 0, 0, 30], [0, 0, 0, 24], [0.0, 0.0, 0.0, 0.88])
         } else {
             ([28, 28, 32, 150], [255, 255, 255, 24], [255, 255, 255, 36], [1.0, 1.0, 1.0, 0.95])
         };
+        if let Some([r, g, b]) = app {
+            tint = [r, g, b, 255];
+            line = [r, g, b, 255];
+        }
         let s = self.scale;
         let (w, h) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
         let id = Transform::identity();
@@ -659,6 +695,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 with_bar(|b| match wp.0 {
                     TIMER_CLOCK => b.update_clock(),
                     TIMER_POLL => b.poll(),
+                    TIMER_TINT => b.update_tint(),
                     _ => {}
                 });
                 LRESULT(0)
@@ -794,6 +831,11 @@ pub fn create() {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_POLL, POLL_MS, None);
         crate::bluetooth::watch(hwnd);
+        // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
+        let _ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        let _ = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        let _ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        SetTimer(Some(hwnd), TIMER_TINT, TINT_DEBOUNCE_MS, None);
     }
 }
 
@@ -807,5 +849,27 @@ pub fn shutdown() {
         SHAppBarMessage(ABM_REMOVE, &mut abd);
         let _ = ShowWindow(bar.hwnd, SW_HIDE);
         let _ = ShowWindow(bar.glass, SW_HIDE);
+    }
+}
+
+/// Algo mudou numa janela de topo: agenda a releitura da cor (o timer junta rajadas).
+unsafe extern "system" fn on_window_event(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    obj: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if hwnd.is_invalid() || obj != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 {
+        return;
+    }
+    let bar = BAR.with(|b| b.try_borrow().ok().and_then(|g| g.as_ref().map(|b| (b.hwnd, b.glass))));
+    if let Some((h, g)) = bar
+        && hwnd != h
+        && hwnd != g
+    {
+        unsafe { SetTimer(Some(h), TIMER_TINT, TINT_DEBOUNCE_MS, None) };
     }
 }

@@ -8,6 +8,7 @@ mod panel;
 mod render;
 mod status;
 mod taskbar;
+mod tint;
 mod topbar;
 mod tray;
 mod volume;
