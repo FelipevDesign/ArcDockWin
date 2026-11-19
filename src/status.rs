@@ -255,3 +255,42 @@ impl Drop for Audio {
         }
     }
 }
+
+/// Uso de CPU e RAM do sistema, em %. A CPU é a média desde a leitura anterior.
+pub struct Usage {
+    prev: Option<(u64, u64)>,
+}
+
+impl Usage {
+    pub fn new() -> Self {
+        let mut u = Self { prev: None };
+        u.cpu();
+        u
+    }
+
+    /// % de CPU desde a última chamada (None na primeira).
+    pub fn cpu(&mut self) -> Option<u8> {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::GetSystemTimes;
+        let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.ok()?;
+        let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        // O tempo de kernel já inclui o ocioso.
+        let (busy_total, idle) = (ft(kernel) + ft(user), ft(idle));
+        let prev = self.prev.replace((busy_total, idle))?;
+        let total = busy_total.saturating_sub(prev.0);
+        if total == 0 {
+            return None;
+        }
+        let used = total.saturating_sub(idle.saturating_sub(prev.1));
+        Some(((used * 100 + total / 2) / total).min(100) as u8)
+    }
+
+    /// % de memória física em uso.
+    pub fn ram(&self) -> Option<u8> {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut m = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+        unsafe { GlobalMemoryStatusEx(&mut m) }.ok()?;
+        Some(m.dwMemoryLoad.min(100) as u8)
+    }
+}

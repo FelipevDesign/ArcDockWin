@@ -59,6 +59,8 @@ const TIMER_POLL: usize = 2;
 /// Releitura da cor do app maximizado: logo depois de um evento de janela e, enquanto
 /// pintada, de tempos em tempos (o app pode mudar de cor sem mexer na janela).
 const TIMER_TINT: usize = 3;
+const TIMER_STATS: usize = 4;
+const STATS_MS: u32 = 2000;
 const TINT_DEBOUNCE_MS: u32 = 120;
 const TINT_REFRESH_MS: u32 = 1500;
 /// Segunda leitura antes de gravar a cor de um app novo no banco.
@@ -85,6 +87,8 @@ enum Kind {
     Volume,
     Battery,
     Clock,
+    /// CPU e RAM à esquerda: só leitura, sem clique nem realce.
+    Stats,
 }
 
 /// Item desenhado: faixa horizontal [l, r) e textos (layout, x, opacidade).
@@ -125,6 +129,9 @@ struct Bar {
     bt: Option<bool>,
     /// Cor do app maximizado logo abaixo (RGB); None = vidro normal.
     app_color: Option<[u8; 3]>,
+    usage: status::Usage,
+    cpu: Option<u8>,
+    ram: Option<u8>,
     /// Primeira leitura de um app ainda sem cor no banco: (app, cor), esperando confirmação.
     tint_pending: Option<(String, [u8; 3])>,
     audio: Option<Audio>,
@@ -221,6 +228,9 @@ impl Bar {
                 tracking: false,
                 fullscreen: false,
                 app_color: None,
+                usage: status::Usage::new(),
+                cpu: None,
+                ram: None,
                 tint_pending: None,
                 clock: String::new(),
                 battery: status::battery().map(battery_glyph),
@@ -358,6 +368,16 @@ impl Bar {
         }
     }
 
+    fn update_stats(&mut self) {
+        let (cpu, ram) = (self.usage.cpu(), self.usage.ram());
+        if (cpu, ram) != (self.cpu, self.ram) {
+            self.cpu = cpu;
+            self.ram = ram;
+            self.relayout();
+            self.redraw();
+        }
+    }
+
     fn update_volume(&mut self) {
         let volume = self.audio.as_ref().and_then(|a| a.state());
         let changed = volume.map(volume_glyph) != self.volume.map(volume_glyph);
@@ -392,6 +412,35 @@ impl Bar {
         let mut items = Vec::new();
         let mut x = self.pixmap.width() as f32 - 6.0 * s;
 
+        // CPU e RAM à esquerda: rótulo apagado + valor; o valor tem largura fixa ("100%")
+        // para o texto não pular quando o número muda.
+        {
+            let mut lx = 6.0 * s + pad;
+            let mut text = Vec::new();
+            let width = |t: &IDWriteTextLayout| {
+                let mut m = DWRITE_TEXT_METRICS::default();
+                let _ = unsafe { t.GetMetrics(&mut m) };
+                m.width.ceil()
+            };
+            let value_w = self
+                .text_layout(&"100%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
+                .map(|t| width(&t))
+                .unwrap_or(30.0 * s);
+            for (label, v) in [("CPU", self.cpu), ("RAM", self.ram)] {
+                let value = v.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
+                if let Some(t) = self.text_layout(&label.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
+                    let w = width(&t);
+                    text.push((t, lx, 0.6));
+                    lx += w + 4.0 * s;
+                }
+                if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
+                    text.push((t, lx, 1.0));
+                    lx += value_w + 10.0 * s;
+                }
+            }
+            items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx, text });
+        }
+
         // Data e hora no centro da barra.
         let clock: Vec<u16> = self.clock.encode_utf16().collect();
         if let Some(t) = self.text_layout(&clock, &self.text_fmt, 1000.0) {
@@ -423,7 +472,7 @@ impl Bar {
     }
 
     fn hit(&self, x: f32) -> Option<Kind> {
-        self.items.iter().find(|i| x >= i.l && x < i.r).map(|i| i.kind)
+        self.items.iter().find(|i| x >= i.l && x < i.r && i.kind != Kind::Stats).map(|i| i.kind)
     }
 
     fn redraw(&mut self) {
@@ -603,7 +652,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Network => ("network", || Box::new(crate::wifi::WifiPanel::new())),
         Kind::Bluetooth => ("bluetooth", || Box::new(crate::bluetooth::BluetoothPanel::new())),
         Kind::Battery => ("battery", || Box::new(panel::Placeholder("Bateria"))),
-        Kind::Tray(_) => return None,
+        Kind::Tray(_) | Kind::Stats => return None,
     })
 }
 
@@ -731,6 +780,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     TIMER_CLOCK => b.update_clock(),
                     TIMER_POLL => b.poll(),
                     TIMER_TINT => b.update_tint(),
+                    TIMER_STATS => b.update_stats(),
                     _ => {}
                 });
                 LRESULT(0)
@@ -865,6 +915,7 @@ pub fn create() {
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_POLL, POLL_MS, None);
+        SetTimer(Some(hwnd), TIMER_STATS, STATS_MS, None);
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
         let _ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
