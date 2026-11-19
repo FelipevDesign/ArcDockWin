@@ -227,6 +227,23 @@ impl Dock {
         }
     }
 
+    /// O DWM nem sempre re-amostra o fundo do vidro quando um app minimiza/fecha por trás
+    /// (fica com a cor do app). Esconder o vidro por um quadro e mostrar de novo força a releitura.
+    fn nudge_glass(&mut self) {
+        if self.glass_rect.is_none() {
+            return;
+        }
+        unsafe {
+            let _ = ShowWindow(self.glass, SW_HIDE);
+            let _ = DwmFlush();
+        }
+        if let Some(fx) = &self.glass_fx {
+            fx.refresh();
+        }
+        self.glass_rect = None;
+        self.redraw();
+    }
+
     /// Move a janela de vidro para trás do fundo do dock.
     fn update_glass(&mut self, rect: Option<(i32, i32, i32, i32)>) {
         let off = self.offset();
@@ -579,7 +596,7 @@ unsafe extern "system" fn on_foreground(
     with_dock(|d| {
         // O que está atrás do vidro mudou: re-amostra depois que a animação do Windows acaba.
         unsafe {
-            SetTimer(Some(d.hwnd), TIMER_GLASS, 400, None);
+            SetTimer(Some(d.hwnd), TIMER_GLASS, 500, None);
         }
         if hwnd == d.hwnd || hwnd == d.glass {
             return;
@@ -711,9 +728,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     TIMER_EDGE => d.edge_tick(),
                     TIMER_GLASS => {
                         let _ = KillTimer(Some(d.hwnd), TIMER_GLASS);
-                        if let Some(fx) = &d.glass_fx {
-                            fx.refresh();
-                        }
+                        d.nudge_glass();
                     },
                     TIMER_REFRESH => {
                         taskbar::ensure_hidden();
