@@ -47,25 +47,18 @@ pub struct Theme {
     border: [u8; 4],
     dot: [u8; 4],
     divider: [u8; 4],
+    /// Pontinhos do app em foco: cor de destaque do Windows.
+    accent: [u8; 4],
 }
 
 impl Theme {
-    pub fn new(light: bool) -> Self {
-        if light {
-            Self {
-                tint: [250, 250, 252, 120],
-                border: [255, 255, 255, 150],
-                dot: [0, 0, 0, 170],
-                divider: [0, 0, 0, 45],
-            }
+    pub fn new(light: bool, accent: Option<[u8; 4]>) -> Self {
+        let (tint, border, dot, divider) = if light {
+            ([250, 250, 252, 120], [255, 255, 255, 150], [0, 0, 0, 170], [0, 0, 0, 45])
         } else {
-            Self {
-                tint: [40, 40, 44, 130],
-                border: [255, 255, 255, 45],
-                dot: [255, 255, 255, 210],
-                divider: [255, 255, 255, 60],
-            }
-        }
+            ([40, 40, 44, 130], [255, 255, 255, 45], [255, 255, 255, 210], [255, 255, 255, 60])
+        };
+        Self { tint, border, dot, divider, accent: accent.unwrap_or(dot) }
     }
 }
 
@@ -136,6 +129,7 @@ pub fn draw(
     m: &Metrics,
     theme: &Theme,
     hover: f32,
+    focus: Option<usize>,
 ) {
     pm.fill(Color::TRANSPARENT);
     let Some((l, t, r, b)) = box_rect(slots, m, pm.height() as f32) else {
@@ -170,7 +164,7 @@ pub fn draw(
     }
 
     let icon_paint = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
-    for (slot, app) in slots.iter().zip(apps) {
+    for (i, (slot, app)) in slots.iter().zip(apps).enumerate() {
         let y = icon_bottom - slot.size;
         let tile = rounded_rect(slot.x, y, slot.size, slot.size, slot.size * TILE_RADIUS);
         match &app.icon {
@@ -208,11 +202,15 @@ pub fn draw(
                 }
             }
         }
-        if !app.windows.is_empty() {
-            let cx = slot.x + slot.size / 2.0;
-            let cy = icon_bottom + m.pad / 2.0 + 0.5;
-            if let Some(dot) = PathBuilder::from_circle(cx, cy, m.dot) {
-                pm.fill_path(&dot, &solid(theme.dot), FillRule::Winding, id, None);
+        // Um pontinho por janela (até 3), centralizados; no app em foco, na cor de destaque.
+        let n = app.windows.len().min(3);
+        let color = if focus == Some(i) { theme.accent } else { theme.dot };
+        let step = m.dot * 4.0; // 2× o diâmetro entre os centros
+        let x0 = slot.x + slot.size / 2.0 - step * (n as f32 - 1.0) / 2.0;
+        let cy = icon_bottom + m.pad / 2.0 + 0.5;
+        for k in 0..n {
+            if let Some(dot) = PathBuilder::from_circle(x0 + k as f32 * step, cy, m.dot) {
+                pm.fill_path(&dot, &solid(color), FillRule::Winding, id, None);
             }
         }
     }
