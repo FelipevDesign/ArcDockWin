@@ -3,7 +3,9 @@
 mod apps;
 mod glass;
 mod render;
+mod status;
 mod taskbar;
+mod topbar;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -658,11 +660,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_ENDSESSION => {
                 if wp.0 != 0 {
+                    topbar::shutdown();
                     taskbar::restore();
                 }
                 LRESULT(0)
             }
             WM_DESTROY => {
+                topbar::shutdown();
                 taskbar::restore();
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -769,6 +773,7 @@ fn main() -> windows::core::Result<()> {
         DOCK.with(|d| *d.borrow_mut() = Some(dock));
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        topbar::create();
         SetTimer(Some(hwnd), TIMER_REFRESH, 1000, None);
         SetTimer(Some(hwnd), TIMER_EDGE, 50, None);
         let _ = SetWinEventHook(

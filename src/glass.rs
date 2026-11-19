@@ -1,10 +1,10 @@
 //! Fundo de vidro: o conteúdo atrás do dock desfocado pelo DWM (HostBackdropBrush),
-//! recortado num retângulo de cantos arredondados.
+//! recortado num retângulo de cantos arredondados (raio 0 na topbar).
 
 use std::ffi::c_void;
 
 use windows_numerics::Vector2;
-use windows::System::DispatcherQueueController;
+use windows::System::{DispatcherQueue, DispatcherQueueController};
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{Compositor, CompositionRoundedRectangleGeometry, SpriteVisual};
 use windows::Win32::Foundation::HWND;
@@ -18,7 +18,7 @@ use windows::core::{BOOL, Interface, Result};
 const DWMWA_USE_HOSTBACKDROPBRUSH: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(17);
 
 pub struct Glass {
-    _queue: DispatcherQueueController,
+    _queue: Option<DispatcherQueueController>,
     _target: DesktopWindowTarget,
     _visual: SpriteVisual,
     shape: CompositionRoundedRectangleGeometry,
@@ -36,11 +36,15 @@ impl Glass {
                 size_of::<BOOL>() as u32,
             )?;
 
-            let queue = CreateDispatcherQueueController(DispatcherQueueOptions {
-                dwSize: size_of::<DispatcherQueueOptions>() as u32,
-                threadType: DQTYPE_THREAD_CURRENT,
-                apartmentType: DQTAT_COM_STA,
-            })?;
+            // Uma fila por thread: o segundo vidro (topbar) reaproveita a do primeiro.
+            let queue = match DispatcherQueue::GetForCurrentThread() {
+                Ok(_) => None,
+                Err(_) => Some(CreateDispatcherQueueController(DispatcherQueueOptions {
+                    dwSize: size_of::<DispatcherQueueOptions>() as u32,
+                    threadType: DQTYPE_THREAD_CURRENT,
+                    apartmentType: DQTAT_COM_STA,
+                })?),
+            };
             let compositor = Compositor::new()?;
             let target = compositor
                 .cast::<ICompositorDesktopInterop>()?

@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "tiny-skia",
  "windows",
+ "windows-core",
  "windows-numerics",
 ]
 
