@@ -524,13 +524,11 @@ fn with_bar<R>(f: impl FnOnce(&mut Bar) -> R) -> Option<R> {
 }
 
 /// Registra quem trata os cliques nos ícones da bandeja.
-#[allow(dead_code)] // usado pela bandeja (tray.rs) na integração
 pub fn on_tray_click(f: TrayClick) {
     TRAY_CLICK.with(|c| c.set(Some(f)));
 }
 
 /// Troca os ícones da bandeja (já no tamanho certo, ~16 px × escala) e redesenha.
-#[allow(dead_code)] // usado pela bandeja (tray.rs) na integração
 pub fn set_tray(icons: Vec<Pixmap>) {
     with_bar(|b| {
         b.tray = icons;

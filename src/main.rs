@@ -6,6 +6,7 @@ mod render;
 mod status;
 mod taskbar;
 mod topbar;
+mod tray;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -25,7 +26,8 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
+    SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -444,6 +446,35 @@ fn mouse_x(lp: LPARAM) -> f32 {
 }
 
 /// Tema da barra de tarefas (claro/escuro).
+/// Bandeja do sistema na topbar: os apps registram os ícones em nós (tray.rs) e a barra
+/// mostra e repassa os cliques.
+fn start_tray() {
+    fn push() {
+        // Ícone sem imagem vira um espaço vazio, para os índices baterem com os de tray.rs.
+        let px = tray_px();
+        let icons = tray::icons()
+            .into_iter()
+            .filter_map(|t| t.icon.or_else(|| tiny_skia::Pixmap::new(px, px)))
+            .collect();
+        topbar::set_tray(icons);
+    }
+    fn clicked(index: usize, button: topbar::TrayButton, anchor: POINT) {
+        let b = match button {
+            topbar::TrayButton::Left => tray::TrayButton::Left,
+            topbar::TrayButton::Right => tray::TrayButton::Right,
+            topbar::TrayButton::Double => tray::TrayButton::Double,
+        };
+        tray::click(index, b, anchor);
+    }
+    fn tray_px() -> u32 {
+        (16.0 * unsafe { GetDpiForSystem() } as f32 / 96.0).round() as u32
+    }
+    topbar::on_tray_click(clicked);
+    if tray::start(tray_px(), push).is_ok() {
+        push();
+    }
+}
+
 fn light_theme() -> bool {
     let mut value: u32 = 0;
     let mut size = size_of::<u32>() as u32;
@@ -660,12 +691,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_ENDSESSION => {
                 if wp.0 != 0 {
+                    tray::stop();
                     topbar::shutdown();
                     taskbar::restore();
                 }
                 LRESULT(0)
             }
             WM_DESTROY => {
+                tray::stop();
                 topbar::shutdown();
                 taskbar::restore();
                 PostQuitMessage(0);
@@ -774,6 +807,7 @@ fn main() -> windows::core::Result<()> {
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         topbar::create();
+        start_tray();
         SetTimer(Some(hwnd), TIMER_REFRESH, 1000, None);
         SetTimer(Some(hwnd), TIMER_EDGE, 50, None);
         let _ = SetWinEventHook(
