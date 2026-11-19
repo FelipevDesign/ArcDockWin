@@ -46,6 +46,9 @@ impl PanelContent for Calendar {
     fn width(&self) -> f32 {
         300.0
     }
+    fn centered(&self) -> bool {
+        true
+    }
 
     fn build(&mut self) -> Vec<Widget> {
         let t = unsafe { GetLocalTime() };

@@ -179,6 +179,10 @@ pub trait PanelContent {
     fn width(&self) -> f32 {
         320.0
     }
+    /// `true` abre centralizado sob o item (ex.: calendário sob a hora); `false` alinha à direita.
+    fn centered(&self) -> bool {
+        false
+    }
     /// Controles atuais, de cima para baixo. Chamado ao abrir e a cada reconstrução.
     fn build(&mut self) -> Vec<Widget>;
     /// Ação num controle. `true` = reconstruir (chamar `build` de novo).
@@ -636,9 +640,14 @@ impl Panel {
         self.h = (y + PAD_Y * s).min(max_h).ceil() as i32;
         self.widgets = placed;
 
-        // Posição: borda direita na do item, sem sair da área de trabalho.
+        // Posição: borda direita na do item (ou centro no centro), sem sair da área de trabalho.
         let side = (8.0 * s) as i32;
-        self.x = (self.item.right - self.w).min(self.work.right - side - self.w).max(self.work.left + side);
+        let want = if self.content.centered() {
+            (self.item.left + self.item.right - self.w) / 2
+        } else {
+            self.item.right - self.w
+        };
+        self.x = want.min(self.work.right - side - self.w).max(self.work.left + side);
         self.y = self.item.bottom + (GAP * s).round() as i32;
 
         let (m, mt) = self.margins();

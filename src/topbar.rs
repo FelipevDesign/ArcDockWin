@@ -326,13 +326,14 @@ impl Bar {
         let mut items = Vec::new();
         let mut x = self.pixmap.width() as f32 - 6.0 * s;
 
+        // Data e hora no centro da barra.
         let clock: Vec<u16> = self.clock.encode_utf16().collect();
         if let Some(t) = self.text_layout(&clock, &self.text_fmt, 1000.0) {
             let mut m = DWRITE_TEXT_METRICS::default();
             let _ = unsafe { t.GetMetrics(&mut m) };
-            let l = x - m.width.ceil() - 2.0 * pad;
-            items.push(Item { kind: Kind::Clock, l, r: x, text: vec![(t, l + pad, 1.0)] });
-            x = l;
+            let cw = m.width.ceil() + 2.0 * pad;
+            let l = ((self.pixmap.width() as f32 - cw) / 2.0).round();
+            items.push(Item { kind: Kind::Clock, l, r: l + cw, text: vec![(t, l + pad, 1.0)] });
         }
         if let Some(g) = self.battery {
             x = self.glyph_item(&mut items, x, Kind::Battery, &[(g, 1.0)]);
