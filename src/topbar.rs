@@ -27,10 +27,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_LWIN,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
     ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_FULLSCREENAPP, ABN_POSCHANGED,
     APPBARDATA, SHAppBarMessage,
@@ -40,6 +37,7 @@ use windows::core::{BOOL, PCWSTR, w};
 use windows_numerics::Vector2;
 
 use crate::glass;
+use crate::panel::{self, PanelContent};
 use crate::status::{self, Audio, Net, Wlan};
 
 /// Botão usado num clique de ícone da bandeja.
@@ -443,6 +441,17 @@ impl Bar {
         }
     }
 
+    /// Retângulo do item na tela (altura inteira da barra).
+    fn item_rect(&self, kind: Kind) -> Option<RECT> {
+        let it = self.items.iter().find(|i| i.kind == kind)?;
+        Some(RECT {
+            left: self.rect.left + it.l.round() as i32,
+            top: self.rect.top,
+            right: self.rect.left + it.r.round() as i32,
+            bottom: self.rect.bottom,
+        })
+    }
+
     /// Ponto (tela) abaixo do centro do item, onde menus devem abrir.
     fn anchor(&self, kind: Kind) -> POINT {
         let it = self.items.iter().find(|i| i.kind == kind);
@@ -461,7 +470,7 @@ fn battery_glyph(b: status::Battery) -> u16 {
     }
 }
 
-fn volume_glyph((level, muted): (f32, bool)) -> u16 {
+pub(crate) fn volume_glyph((level, muted): (f32, bool)) -> u16 {
     match level {
         _ if muted => 0xE74F,
         l if l <= 0.0 => 0xE992,
@@ -488,7 +497,7 @@ fn solid([r, g, b, a]: [u8; 4]) -> Paint<'static> {
     p
 }
 
-fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
+pub(crate) fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
     let r = r.min(w / 2.0).min(h / 2.0);
     // Constante de Bézier para quartos de círculo.
     let k = r * 0.5523;
@@ -506,16 +515,16 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Pat
     pb.finish()
 }
 
-/// Win + tecla (Win+A: Configurações rápidas; Win+N: notificações e calendário).
-fn win_shortcut(key: u8) {
-    let input = |vk: VIRTUAL_KEY, flags| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: flags, ..Default::default() } },
-    };
-    let (down, up, k) = (KEYBD_EVENT_FLAGS(0), KEYEVENTF_KEYUP, VIRTUAL_KEY(key as u16));
-    unsafe {
-        SendInput(&[input(VK_LWIN, down), input(k, down), input(k, up), input(VK_LWIN, up)], size_of::<INPUT>() as i32);
-    }
+/// Painel de cada item de status: chave (para o segundo clique fechar) e o conteúdo.
+/// É aqui que se pluga um painel novo (ex.: Wi‑Fi em `Kind::Network`).
+fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)> {
+    Some(match kind {
+        Kind::Clock => ("clock", || Box::new(crate::calendar::Calendar::new())),
+        Kind::Volume => ("volume", || Box::new(crate::volume::VolumePanel::new())),
+        Kind::Network => ("network", || Box::new(panel::Placeholder("Rede"))),
+        Kind::Battery => ("battery", || Box::new(panel::Placeholder("Bateria"))),
+        Kind::Tray(_) => return None,
+    })
 }
 
 fn with_bar<R>(f: impl FnOnce(&mut Bar) -> R) -> Option<R> {
@@ -554,6 +563,7 @@ fn tray_click(lp: LPARAM, button: TrayButton) {
     if let Some((i, anchor)) = tray_hit(lp)
         && let Some(f) = TRAY_CLICK.with(|c| c.get())
     {
+        panel::close();
         f(i, button, anchor);
     }
 }
@@ -596,11 +606,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                match with_bar(|b| b.hit(mouse_x(lp))).flatten() {
-                    Some(Kind::Network | Kind::Volume | Kind::Battery) => win_shortcut(b'A'),
-                    Some(Kind::Clock) => win_shortcut(b'N'),
-                    Some(Kind::Tray(_)) => tray_click(lp, TrayButton::Left),
-                    None => {}
+                let hit = with_bar(|b| b.hit(mouse_x(lp)).map(|k| (k, b.item_rect(k)))).flatten();
+                match hit {
+                    Some((Kind::Tray(_), _)) => tray_click(lp, TrayButton::Left),
+                    // Fora do borrow da barra: abrir o painel ativa outra janela.
+                    Some((kind, Some(rect))) => {
+                        if let Some((key, make)) = panel_for(kind) {
+                            panel::toggle(key, rect, make);
+                        }
+                    }
+                    _ => {}
                 }
                 LRESULT(0)
             }
@@ -643,6 +658,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                     b.update_volume();
                 });
+                panel::notify(msg, wp.0);
                 LRESULT(0)
             }
             WM_APPBAR => {

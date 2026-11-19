@@ -23,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use windows::core::{PCWSTR, Result, implement};
 
 /// Mensagem postada na janela da topbar pelo áudio: wParam 0 = volume/mudo mudou,
-/// 1 = dispositivo de saída padrão trocou.
+/// 1 = dispositivo de saída padrão trocou, 2 = um dispositivo entrou, saiu ou mudou de estado.
 pub const WM_AUDIO: u32 = WM_APP + 2;
 
 /// Texto do relógio (ex.: "qua 19 nov  14:32") e quantos ms faltam para o próximo minuto.
@@ -166,12 +166,15 @@ struct DeviceEvents(isize);
 
 impl IMMNotificationClient_Impl for DeviceEvents_Impl {
     fn OnDeviceStateChanged(&self, _: &PCWSTR, _: DEVICE_STATE) -> Result<()> {
+        post(self.0, 2);
         Ok(())
     }
     fn OnDeviceAdded(&self, _: &PCWSTR) -> Result<()> {
+        post(self.0, 2);
         Ok(())
     }
     fn OnDeviceRemoved(&self, _: &PCWSTR) -> Result<()> {
+        post(self.0, 2);
         Ok(())
     }
     fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _: &PCWSTR) -> Result<()> {

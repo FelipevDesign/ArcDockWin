@@ -1,12 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod apps;
+mod calendar;
 mod glass;
+mod panel;
 mod render;
 mod status;
 mod taskbar;
 mod topbar;
 mod tray;
+mod volume;
 
 use std::cell::RefCell;
 use std::ffi::c_void;

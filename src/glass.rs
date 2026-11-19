@@ -20,7 +20,7 @@ const DWMWA_USE_HOSTBACKDROPBRUSH: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(17);
 pub struct Glass {
     _queue: Option<DispatcherQueueController>,
     _target: DesktopWindowTarget,
-    _visual: SpriteVisual,
+    visual: SpriteVisual,
     shape: CompositionRoundedRectangleGeometry,
 }
 
@@ -59,11 +59,16 @@ impl Glass {
             visual.SetClip(&compositor.CreateGeometricClipWithGeometry(&shape)?)?;
             target.SetRoot(&visual)?;
 
-            Ok(Self { _queue: queue, _target: target, _visual: visual, shape })
+            Ok(Self { _queue: queue, _target: target, visual, shape })
         }
     }
 
     pub fn resize(&self, w: f32, h: f32) {
         let _ = self.shape.SetSize(Vector2 { X: w, Y: h });
+    }
+
+    /// Opacidade do vidro (0..1), usada na animação de abrir dos painéis.
+    pub fn set_opacity(&self, opacity: f32) {
+        let _ = self.visual.SetOpacity(opacity);
     }
 }
