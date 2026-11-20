@@ -48,7 +48,7 @@ No visual do macOS Tahoe, com cartões arredondados:
 | :---: | :---: |
 | ![Central de Controle](docs/screenshots/central.png) | ![Dock](docs/screenshots/dock.png) |
 
-| Barra do topo com a cor do app | Lançador |
+| Barra do topo | Lançador |
 | :---: | :---: |
 | ![Barra do topo](docs/screenshots/topbar.png) | ![Lançador](docs/screenshots/launcher.png) |
 
