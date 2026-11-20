@@ -1,4 +1,4 @@
-//! Topbar: barra fina no topo da tela principal, estilo barra de menus do macOS.
+//! Topbar: barra fina no topo de cada monitor, estilo barra de menus do macOS.
 //! Mesmo padrão do dock: janela de vidro atrás + janela em camadas por cima. A tinta, a
 //! linha de baixo, o realce e os ícones da bandeja saem do tiny-skia; texto e glifos de
 //! status são desenhados com DirectWrite (Direct2D ligado ao memdc da DIB).
@@ -23,15 +23,17 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, HDC, HGDIOBJ, SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors,
+    GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
     ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_FULLSCREENAPP, ABN_POSCHANGED,
-    APPBARDATA, SHAppBarMessage,
+    APPBARDATA, SHAppBarMessage, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, PCWSTR, w};
@@ -39,7 +41,7 @@ use windows_numerics::Vector2;
 
 use crate::glass;
 use crate::panel::{self, PanelContent};
-use crate::status::{self, Audio, Net, Wlan};
+use crate::status::{self, Audio};
 
 /// Botão usado num clique de ícone da bandeja.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,11 +68,18 @@ pub type TrayClick = fn(index: usize, button: TrayButton, anchor: POINT);
 const WM_APPBAR: u32 = WM_APP + 1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_CLOCK: usize = 1;
-const TIMER_POLL: usize = 2;
 /// Releitura da cor do app maximizado: logo depois de um evento de janela e, enquanto
 /// pintada, de tempos em tempos (o app pode mudar de cor sem mexer na janela).
 const TIMER_TINT: usize = 3;
+/// Relê CPU/RAM (esquerda) e avisa a Central de Controle aberta.
 const TIMER_STATS: usize = 4;
+/// Releitura depois de eventos de janela: no máximo uma a cada TINT_THROTTLE_MS
+/// (não é reiniciada a cada evento, senão uma rajada adiaria a cor até acabar).
+const TIMER_TINT_EVENT: usize = 5;
+const TINT_THROTTLE_MS: u32 = 50;
+/// Monitores mudaram (conectar, resolução, escala): recria as barras depois de um respiro.
+const TIMER_REBUILD: usize = 6;
+const REBUILD_MS: u32 = 300;
 const STATS_MS: u32 = 2000;
 /// Largura (px) de cada fatia do brilho do wallpaper.
 const LUMA_BUCKET: usize = 16;
@@ -80,8 +89,6 @@ const TINT_DEBOUNCE_MS: u32 = 120;
 const TINT_REFRESH_MS: u32 = 1500;
 /// Segunda leitura antes de gravar a cor de um app novo no banco.
 const TINT_CONFIRM_MS: u32 = 400;
-/// Intervalo da consulta de rede e bateria (ms).
-const POLL_MS: u32 = 3000;
 
 /// Altura da barra, espaço interno de cada item e largura de um glifo (px antes da escala).
 const HEIGHT: f32 = 24.0;
@@ -90,7 +97,13 @@ const GLYPH_W: f32 = 16.0;
 const TRAY_PAD: f32 = 4.0;
 
 thread_local! {
-    static BAR: RefCell<Option<Bar>> = const { RefCell::new(None) };
+    /// Uma barra por monitor; a primeira é a do monitor principal.
+    static BARS: RefCell<Vec<Bar>> = const { RefCell::new(Vec::new()) };
+    /// Janela da barra principal: nunca muda (destino de mensagens de outros módulos).
+    static MAIN: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+    /// Som e CPU/RAM são um só para todas as barras.
+    static AUDIO: RefCell<Option<Audio>> = const { RefCell::new(None) };
+    static USAGE: RefCell<Option<status::Usage>> = const { RefCell::new(None) };
     static TRAY_CLICK: Cell<Option<TrayClick>> = const { Cell::new(None) };
 }
 
@@ -99,12 +112,10 @@ enum Kind {
     Tray(usize),
     /// Seta que abre a bandeja (ícones ocultos e a escolha de quem fica na barra).
     Overflow,
-    Network,
-    Bluetooth,
-    Volume,
-    Battery,
     Clock,
-    /// CPU e RAM à esquerda: só leitura, sem clique nem realce.
+    /// Central de Controle (último à direita): rede, Bluetooth, som, energia, mídia.
+    Control,
+    /// CPU e RAM à esquerda; o clique abre o Gerenciador de Tarefas.
     Stats,
 }
 
@@ -120,12 +131,16 @@ struct Bar {
     hwnd: HWND,
     /// Janela atrás que só fornece o desfoque (vidro).
     glass: HWND,
-    _glass_fx: Option<glass::Glass>,
+    glass_fx: Option<glass::Glass>,
     scale: f32,
+    /// Monitor desta barra e o retângulo inteiro dele.
+    hmon: HMONITOR,
+    monitor: RECT,
     /// Posição atual na tela (dada pelo sistema como AppBar).
     rect: RECT,
     pixmap: Pixmap,
     memdc: HDC,
+    dib: HBITMAP,
     bits: *mut u8,
     target: ID2D1DCRenderTarget,
     dwrite: IDWriteFactory,
@@ -139,29 +154,30 @@ struct Bar {
     /// App em tela cheia: a barra sai da frente.
     fullscreen: bool,
     clock: String,
-    battery: Option<u16>,
-    volume: Option<(f32, bool)>,
-    net: Net,
-    /// Rádio Bluetooth: None = não existe; Some(ligado).
-    bt: Option<bool>,
     /// Cor do app maximizado logo abaixo (RGB); None = vidro normal.
     app_color: Option<[u8; 3]>,
     /// Brilho do wallpaper sob a barra, por fatia de LUMA_BUCKET px (vazio = não lido).
     wall: Vec<f32>,
-    usage: status::Usage,
-    cpu: Option<u8>,
-    ram: Option<u8>,
     /// Primeira leitura de um app ainda sem cor no banco: (app, cor), esperando confirmação.
     tint_pending: Option<(String, [u8; 3])>,
-    audio: Option<Audio>,
-    wlan: Wlan,
+    /// Releitura da cor já agendada (TIMER_TINT_EVENT).
+    tint_queued: bool,
+    cpu: Option<u8>,
+    ram: Option<u8>,
 }
 
 impl Bar {
-    unsafe fn new(hwnd: HWND, glass_hwnd: HWND) -> windows::core::Result<Self> {
+    /// `glass_fx`: o vidro de uma barra anterior da mesma janela (só um por janela).
+    unsafe fn new(
+        hwnd: HWND,
+        glass_hwnd: HWND,
+        hmon: HMONITOR,
+        monitor: RECT,
+        glass_fx: Option<glass::Glass>,
+    ) -> windows::core::Result<Self> {
         unsafe {
-            let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
-            let (w, _) = crate::taskbar::screen_size();
+            let scale = monitor_scale(hmon);
+            let w = monitor.right - monitor.left;
             let h = (HEIGHT * scale).round() as i32;
 
             let bmi = BITMAPINFO {
@@ -223,7 +239,7 @@ impl Bar {
             let icon_fmt = format(w!("Segoe Fluent Icons"), 14.0)?;
             icon_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
 
-            let glass_fx = glass::Glass::new(glass_hwnd, 0.0).ok();
+            let glass_fx = glass_fx.or_else(|| glass::Glass::new(glass_hwnd, 0.0).ok());
             if let Some(fx) = &glass_fx {
                 fx.resize(w as f32, h as f32);
                 // Sem desfoque: a barra é transparente na área de trabalho e sólida
@@ -234,11 +250,14 @@ impl Bar {
             Ok(Self {
                 hwnd,
                 glass: glass_hwnd,
-                _glass_fx: glass_fx,
+                glass_fx,
                 scale,
-                rect: RECT { left: 0, top: 0, right: w, bottom: h },
+                hmon,
+                monitor,
+                rect: RECT { left: monitor.left, top: monitor.top, right: monitor.right, bottom: monitor.top + h },
                 pixmap: Pixmap::new(w as u32, h as u32).expect("pixmap"),
                 memdc,
+                dib,
                 bits: bits as *mut u8,
                 target,
                 dwrite,
@@ -251,17 +270,11 @@ impl Bar {
                 fullscreen: false,
                 app_color: None,
                 wall: Vec::new(),
-                usage: status::Usage::new(),
+                tint_pending: None,
+                tint_queued: false,
+                clock: String::new(),
                 cpu: None,
                 ram: None,
-                tint_pending: None,
-                clock: String::new(),
-                battery: status::battery().map(battery_glyph),
-                volume: None,
-                net: Net::None,
-                bt: None,
-                audio: Audio::new(hwnd),
-                wlan: Wlan::open(),
             })
         }
     }
@@ -339,7 +352,8 @@ impl Bar {
     fn place(&mut self) {
         let (w, h) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
         let mut abd = self.appbar_data();
-        abd.rc = RECT { left: 0, top: 0, right: w, bottom: h };
+        let m = self.monitor;
+        abd.rc = RECT { left: m.left, top: m.top, right: m.left + w, bottom: m.top + h };
         unsafe {
             SHAppBarMessage(ABM_QUERYPOS, &mut abd);
             abd.rc.bottom = abd.rc.top + h;
@@ -379,44 +393,18 @@ impl Bar {
         }
     }
 
-    /// Relógio agora e timer até a virada do próximo minuto.
-    fn update_clock(&mut self) {
-        let (text, ms) = status::clock();
-        unsafe { SetTimer(Some(self.hwnd), TIMER_CLOCK, ms, None) };
+    fn set_clock(&mut self, text: &str) {
         if text != self.clock {
-            self.clock = text;
+            self.clock = text.to_string();
             self.relayout();
             self.redraw();
         }
     }
 
-    /// Rede e bateria; só redesenha se o ícone mudou.
-    fn poll(&mut self) {
-        let net = status::network(&self.wlan);
-        let battery = status::battery().map(battery_glyph);
-        if net != self.net || battery != self.battery {
-            self.net = net;
-            self.battery = battery;
-            self.relayout();
-            self.redraw();
-        }
-    }
-
-    fn update_stats(&mut self) {
-        let (cpu, ram) = (self.usage.cpu(), self.usage.ram());
+    fn set_stats(&mut self, cpu: Option<u8>, ram: Option<u8>) {
         if (cpu, ram) != (self.cpu, self.ram) {
             self.cpu = cpu;
             self.ram = ram;
-            self.relayout();
-            self.redraw();
-        }
-    }
-
-    fn update_volume(&mut self) {
-        let volume = self.audio.as_ref().and_then(|a| a.state());
-        let changed = volume.map(volume_glyph) != self.volume.map(volume_glyph);
-        self.volume = volume;
-        if changed {
             self.relayout();
             self.redraw();
         }
@@ -446,7 +434,7 @@ impl Bar {
         let mut items = Vec::new();
         let mut x = self.pixmap.width() as f32 - 6.0 * s;
 
-        // CPU e RAM à esquerda: rótulo apagado + valor; o valor tem largura fixa ("100%")
+        // CPU e RAM à esquerda: glifo apagado + valor; o valor tem largura mínima ("00%")
         // para o texto não pular quando o número muda.
         {
             let mut lx = 6.0 * s + pad;
@@ -456,7 +444,6 @@ impl Bar {
                 let _ = unsafe { t.GetMetrics(&mut m) };
                 m.width.ceil()
             };
-            // Largura mínima de "00%": o valor não fica pulando entre 9% e 10%.
             let value_w = self
                 .text_layout(&"00%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
                 .map(|t| width(&t))
@@ -474,7 +461,7 @@ impl Bar {
                     lx += w + 8.0 * s;
                 }
             }
-            items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx, text });
+            items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx - 8.0 * s + pad, text });
         }
 
         // Data e hora no centro da barra.
@@ -486,18 +473,9 @@ impl Bar {
             let l = ((self.pixmap.width() as f32 - cw) / 2.0).round();
             items.push(Item { kind: Kind::Clock, l, r: l + cw, text: vec![(t, l + pad, 1.0)] });
         }
-        if let Some(g) = self.battery {
-            x = self.glyph_item(&mut items, x, Kind::Battery, &[(g, 1.0)]);
-        }
-        if let Some(v) = self.volume {
-            x = self.glyph_item(&mut items, x, Kind::Volume, &[(volume_glyph(v), 1.0)]);
-        }
-        x = self.glyph_item(&mut items, x, Kind::Network, &net_glyphs(self.net));
-        if let Some(on) = self.bt {
-            x = self.glyph_item(&mut items, x, Kind::Bluetooth, &[(panel::glyph::BLUETOOTH, if on { 1.0 } else { 0.35 })]);
-        }
+        x = self.glyph_item(&mut items, x, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
 
-        // Bandeja: à esquerda dos ícones de status, índice 0 mais à esquerda.
+        // Bandeja: à esquerda da central, índice 0 mais à esquerda.
         x -= 4.0 * s;
         for (i, e) in self.tray.iter().enumerate().rev().filter(|(_, e)| e.shown) {
             let l = x - e.icon.width() as f32 - 2.0 * TRAY_PAD * s;
@@ -519,7 +497,7 @@ impl Bar {
     }
 
     fn hit(&self, x: f32) -> Option<Kind> {
-        self.items.iter().find(|i| x >= i.l && x < i.r && i.kind != Kind::Stats).map(|i| i.kind)
+        self.items.iter().find(|i| x >= i.l && x < i.r).map(|i| i.kind)
     }
 
     fn redraw(&mut self) {
@@ -527,7 +505,8 @@ impl Bar {
             return;
         }
         // Com app maximizado embaixo: fundo sólido na cor dele, sem linha, tinta pelo contraste.
-        let app = self.app_color;
+        // 10% mais escura que o app, para separar barra e app.
+        let app = self.app_color.map(|c| c.map(|v| (v as f32 * 0.9).round() as u8));
         let light = match app {
             Some([r, g, b]) => 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 150.0,
             None => crate::light_theme(),
@@ -652,16 +631,17 @@ impl Bar {
     }
 }
 
-/// Glifos da fonte Segoe Fluent Icons.
-fn battery_glyph(b: status::Battery) -> u16 {
-    let level = ((b.percent as u16 + 5) / 10).min(10);
-    match (b.charging, level) {
-        (true, l) => 0xEBAB + l,  // BatteryCharging0..10
-        (false, 10) => 0xE83F,    // Battery10
-        (false, l) => 0xE850 + l, // Battery0..9
+impl Drop for Bar {
+    /// Barras são refeitas quando os monitores mudam: solta a DIB e o DC.
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteDC(self.memdc);
+            let _ = DeleteObject(HGDIOBJ(self.dib.0));
+        }
     }
 }
 
+/// Glifo de volume da fonte Segoe Fluent Icons.
 pub(crate) fn volume_glyph((level, muted): (f32, bool)) -> u16 {
     match level {
         _ if muted => 0xE74F,
@@ -669,16 +649,6 @@ pub(crate) fn volume_glyph((level, muted): (f32, bool)) -> u16 {
         l if l < 0.34 => 0xE993,
         l if l < 0.67 => 0xE994,
         _ => 0xE995,
-    }
-}
-
-/// Wi-Fi: o leque inteiro apagado e, por cima, o nível do sinal.
-fn net_glyphs(net: Net) -> Vec<(u16, f32)> {
-    match net {
-        Net::None => vec![(0xF384, 1.0)],
-        Net::Ethernet => vec![(0xE839, 1.0)],
-        Net::Wifi(3) => vec![(0xE701, 1.0)],
-        Net::Wifi(l) => vec![(0xE701, 0.3), (0xE872 + l as u16, 1.0)],
     }
 }
 
@@ -708,27 +678,46 @@ pub(crate) fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tin
 }
 
 /// Painel de cada item de status: chave (para o segundo clique fechar) e o conteúdo.
-/// É aqui que se pluga um painel novo (ex.: Wi‑Fi em `Kind::Network`).
+/// É aqui que se pluga um painel novo.
 fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)> {
     Some(match kind {
         Kind::Clock => ("clock", || Box::new(crate::calendar::Calendar::new())),
-        Kind::Volume => ("volume", || Box::new(crate::volume::VolumePanel::new())),
-        Kind::Network => ("network", || Box::new(crate::wifi::WifiPanel::new())),
-        Kind::Bluetooth => ("bluetooth", || Box::new(crate::bluetooth::BluetoothPanel::new())),
-        Kind::Battery => ("battery", || Box::new(panel::Placeholder("Bateria"))),
+        Kind::Control => ("control", || Box::new(crate::control::ControlCenter::new())),
         Kind::Overflow => ("tray", || Box::new(crate::overflow::Overflow::new())),
         Kind::Tray(_) | Kind::Stats => return None,
     })
 }
 
-/// Janela da topbar (destino das mensagens de trabalho feito em outra thread).
+/// Janela da barra principal (destino das mensagens de trabalho feito em outra thread).
 pub fn hwnd() -> HWND {
-    with_bar(|b| b.hwnd).unwrap_or_default()
+    MAIN.get()
 }
 
-fn with_bar<R>(f: impl FnOnce(&mut Bar) -> R) -> Option<R> {
+/// Barra da janela `hwnd`.
+fn with_bar<R>(hwnd: HWND, f: impl FnOnce(&mut Bar) -> R) -> Option<R> {
     // try_borrow_mut: chamadas do Windows podem reentrar no wndproc.
-    BAR.with(|b| b.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
+    BARS.with(|b| b.try_borrow_mut().ok().and_then(|mut g| g.iter_mut().find(|b| b.hwnd == hwnd).map(f)))
+}
+
+/// Todas as barras.
+fn for_bars(mut f: impl FnMut(&mut Bar)) {
+    BARS.with(|b| {
+        if let Ok(mut g) = b.try_borrow_mut() {
+            g.iter_mut().for_each(&mut f);
+        }
+    });
+}
+
+/// Relógio agora em todas as barras e timer até a virada do próximo minuto.
+fn update_clock() {
+    let (text, ms) = status::clock();
+    unsafe { SetTimer(Some(MAIN.get()), TIMER_CLOCK, ms, None) };
+    for_bars(|b| b.set_clock(&text));
+}
+
+fn update_stats() {
+    let Some((cpu, ram)) = USAGE.with(|u| u.borrow_mut().as_mut().map(|u| (u.cpu(), u.ram()))) else { return };
+    for_bars(|b| b.set_stats(cpu, ram));
 }
 
 /// Registra quem trata os cliques nos ícones da bandeja.
@@ -738,8 +727,8 @@ pub fn on_tray_click(f: TrayClick) {
 
 /// Troca os ícones da bandeja e redesenha.
 pub fn set_tray(icons: Vec<TrayEntry>) {
-    with_bar(|b| {
-        b.tray = icons;
+    for_bars(|b| {
+        b.tray = icons.clone();
         if matches!(b.hot, Some(Kind::Tray(i)) if i >= b.tray.len()) {
             b.hot = None;
         }
@@ -754,18 +743,22 @@ pub fn set_tray(icons: Vec<TrayEntry>) {
 
 /// Ícones da bandeja, na ordem dos índices de clique.
 pub fn tray_list() -> Vec<TrayEntry> {
-    with_bar(|b| b.tray.clone()).unwrap_or_default()
+    with_bar(MAIN.get(), |b| b.tray.clone()).unwrap_or_default()
 }
 
 /// Põe o ícone `i` na barra (`true`) ou dentro da bandeja, e guarda a escolha.
 pub fn set_tray_shown(i: usize, shown: bool) {
-    with_bar(|b| {
+    let mut key = None;
+    for_bars(|b| {
         let Some(e) = b.tray.get_mut(i) else { return };
         e.shown = shown;
-        crate::colordb::set_tray_shown(&e.key, shown);
+        key = Some(e.key.clone());
         b.relayout();
         b.redraw();
     });
+    if let Some(k) = key {
+        crate::colordb::set_tray_shown(&k, shown);
+    }
 }
 
 /// Clique no ícone `i` vindo de fora da barra (a bandeja); o menu abre no cursor.
@@ -780,17 +773,17 @@ pub fn tray_click_index(i: usize, button: TrayButton) {
 }
 
 /// Item da bandeja sob `x` e o ponto de menu dele.
-fn tray_hit(lp: LPARAM) -> Option<(usize, POINT)> {
-    with_bar(|b| match b.hit(mouse_x(lp)) {
+fn tray_hit(hwnd: HWND, lp: LPARAM) -> Option<(usize, POINT)> {
+    with_bar(hwnd, |b| match b.hit(mouse_x(lp)) {
         Some(k @ Kind::Tray(i)) => Some((i, b.anchor(k))),
         _ => None,
     })
     .flatten()
 }
 
-fn tray_click(lp: LPARAM, button: TrayButton) {
+fn tray_click(hwnd: HWND, lp: LPARAM, button: TrayButton) {
     // Fora do borrow: o callback pode chamar set_tray.
-    if let Some((i, anchor)) = tray_hit(lp)
+    if let Some((i, anchor)) = tray_hit(hwnd, lp)
         && let Some(f) = TRAY_CLICK.with(|c| c.get())
     {
         panel::close();
@@ -804,10 +797,11 @@ fn mouse_x(lp: LPARAM) -> f32 {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
+        let main = hwnd == MAIN.get();
         match msg {
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_MOUSEMOVE => {
-                with_bar(|b| {
+                with_bar(hwnd, |b| {
                     if !b.tracking {
                         b.tracking = true;
                         let mut tme = TRACKMOUSEEVENT {
@@ -827,7 +821,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
-                with_bar(|b| {
+                with_bar(hwnd, |b| {
                     b.tracking = false;
                     if b.hot.take().is_some() {
                         b.redraw();
@@ -836,10 +830,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
-                let hit = with_bar(|b| b.hit(mouse_x(lp)).map(|k| (k, b.item_rect(k)))).flatten();
+                let hit = with_bar(hwnd, |b| b.hit(mouse_x(lp)).map(|k| (k, b.item_rect(k)))).flatten();
                 match hit {
-                    Some((Kind::Tray(_), _)) => tray_click(lp, TrayButton::Left),
+                    Some((Kind::Tray(_), _)) => tray_click(hwnd, lp, TrayButton::Left),
+                    Some((Kind::Stats, _)) => {
+                        ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), None, None, SW_SHOWNORMAL);
+                    }
                     // Fora do borrow da barra: abrir o painel ativa outra janela.
+                    // O painel abre no monitor do item (rect em coordenadas de tela).
                     Some((kind, Some(rect))) => {
                         if let Some((key, make)) = panel_for(kind) {
                             panel::toggle(key, rect, make);
@@ -850,93 +848,118 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
-                tray_click(lp, TrayButton::Right);
+                tray_click(hwnd, lp, TrayButton::Right);
                 LRESULT(0)
             }
             WM_LBUTTONDBLCLK => {
-                tray_click(lp, TrayButton::Double);
+                tray_click(hwnd, lp, TrayButton::Double);
                 LRESULT(0)
             }
             WM_MOUSEWHEEL => {
-                // Coordenadas de tela; ±2% por passo da roda sobre o volume.
+                // Coordenadas de tela; ±2% de volume por passo da roda sobre a central.
                 let x = (lp.0 & 0xffff) as i16 as i32;
                 let steps = ((wp.0 >> 16) as u16 as i16) as f32 / WHEEL_DELTA as f32;
-                with_bar(|b| {
-                    if b.hit((x - b.rect.left) as f32) == Some(Kind::Volume)
-                        && let (Some(a), Some((level, _))) = (&b.audio, b.volume)
-                    {
-                        a.set_level(level + 0.02 * steps);
-                        b.update_volume();
-                    }
-                });
+                let on_control = with_bar(hwnd, |b| b.hit((x - b.rect.left) as f32) == Some(Kind::Control));
+                if on_control == Some(true) {
+                    AUDIO.with(|a| {
+                        if let Ok(a) = a.try_borrow()
+                            && let Some(a) = a.as_ref()
+                            && let Some((level, _)) = a.state()
+                        {
+                            a.set_level(level + 0.02 * steps);
+                        }
+                    });
+                }
                 LRESULT(0)
             }
             WM_TIMER => {
-                with_bar(|b| match wp.0 {
-                    TIMER_CLOCK => b.update_clock(),
-                    TIMER_POLL => b.poll(),
-                    TIMER_TINT => b.update_tint(),
-                    TIMER_STATS => b.update_stats(),
+                match wp.0 {
+                    TIMER_CLOCK => update_clock(),
+                    TIMER_STATS => {
+                        update_stats();
+                        panel::notify(crate::control::TICK, 0);
+                    }
+                    TIMER_REBUILD => {
+                        let _ = KillTimer(Some(hwnd), TIMER_REBUILD);
+                        rebuild();
+                    }
+                    TIMER_TINT => {
+                        with_bar(hwnd, |b| b.update_tint());
+                    }
+                    TIMER_TINT_EVENT => {
+                        let _ = KillTimer(Some(hwnd), TIMER_TINT_EVENT);
+                        with_bar(hwnd, |b| {
+                            b.tint_queued = false;
+                            b.update_tint();
+                        });
+                    }
                     _ => {}
-                });
+                }
                 LRESULT(0)
             }
             status::WM_AUDIO => {
-                with_bar(|b| {
-                    if wp.0 == 1
-                        && let Some(a) = &mut b.audio
-                    {
-                        a.bind();
-                    }
-                    b.update_volume();
-                });
-                panel::notify(msg, wp.0);
-                LRESULT(0)
-            }
-            crate::bluetooth::WM_BT_RADIO | crate::bluetooth::WM_BT_PANEL => {
-                if msg == crate::bluetooth::WM_BT_RADIO {
-                    with_bar(|b| {
-                        let bt = Some(wp.0 == 2);
-                        if bt != b.bt {
-                            b.bt = bt;
-                            b.relayout();
-                            b.redraw();
+                if wp.0 == 1 {
+                    AUDIO.with(|a| {
+                        if let Ok(mut a) = a.try_borrow_mut()
+                            && let Some(a) = a.as_mut()
+                        {
+                            a.bind();
                         }
                     });
                 }
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }
-            crate::wifi::WM_WIFI => {
+            crate::bluetooth::WM_BT_RADIO
+            | crate::bluetooth::WM_BT_PANEL
+            | crate::wifi::WM_WIFI
+            | crate::control::WM_UPDATE => {
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }
             WM_APPBAR => {
-                with_bar(|b| match wp.0 as u32 {
+                with_bar(hwnd, |b| match wp.0 as u32 {
                     ABN_POSCHANGED => b.place(),
-                    ABN_FULLSCREENAPP => b.set_fullscreen(lp.0 != 0),
+                    // O aviso pode vir para todas as AppBars: só esconde a do monitor em tela cheia.
+                    ABN_FULLSCREENAPP if lp.0 != 0 => {
+                        if MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST) == b.hmon {
+                            b.set_fullscreen(true);
+                        }
+                    }
+                    ABN_FULLSCREENAPP => b.set_fullscreen(false),
                     _ => {}
                 });
                 LRESULT(0)
             }
+            WM_DISPLAYCHANGE => {
+                SetTimer(Some(MAIN.get()), TIMER_REBUILD, REBUILD_MS, None);
+                LRESULT(0)
+            }
+            WM_DPICHANGED => {
+                // A posição vem do monitor (rebuild), não do retângulo sugerido.
+                let dpi = (wp.0 & 0xffff) as f32;
+                if with_bar(hwnd, |b| b.scale != dpi / 96.0) != Some(false) {
+                    SetTimer(Some(MAIN.get()), TIMER_REBUILD, REBUILD_MS, None);
+                }
+                LRESULT(0)
+            }
             WM_SETTINGCHANGE => {
                 // Pode ser a troca de tema claro/escuro ou de wallpaper.
-                with_bar(|b| {
+                with_bar(hwnd, |b| {
                     b.redraw();
                     SetTimer(Some(hwnd), TIMER_TINT, 300, None);
                 });
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
-            WM_TIMECHANGE => {
-                with_bar(|b| b.update_clock());
+            // Chegam a todas as barras: só a principal trata.
+            WM_TIMECHANGE if main => {
+                update_clock();
                 LRESULT(0)
             }
-            WM_POWERBROADCAST => {
+            WM_POWERBROADCAST if main => {
                 // Volta da suspensão ou mudança na energia: relógio e bateria na hora.
-                with_bar(|b| {
-                    b.update_clock();
-                    b.poll();
-                });
+                update_clock();
+                panel::notify(crate::control::TICK, 0);
                 LRESULT(1)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -944,15 +967,42 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
-/// Cria a topbar (depois do dock: reaproveita a classe da janela de vidro dele).
-pub fn create() {
-    unsafe {
-        let Ok(module) = GetModuleHandleW(None) else { return };
-        let hinst: HINSTANCE = module.into();
-        let ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+/// Escala (DPI efetivo / 96) do monitor.
+fn monitor_scale(hmon: HMONITOR) -> f32 {
+    let (mut dx, mut dy) = (96u32, 96u32);
+    let _ = unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) };
+    dx as f32 / 96.0
+}
 
+/// Monitores ativos (handle e retângulo inteiro), o principal primeiro.
+fn monitors() -> Vec<(HMONITOR, RECT)> {
+    unsafe extern "system" fn add(hmon: HMONITOR, _: HDC, _: *mut RECT, lp: LPARAM) -> BOOL {
+        let list = unsafe { &mut *(lp.0 as *mut Vec<(HMONITOR, RECT)>) };
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if unsafe { GetMonitorInfoW(hmon, &mut mi) }.as_bool() {
+            let entry = (hmon, mi.rcMonitor);
+            if mi.dwFlags & MONITORINFOF_PRIMARY != 0 {
+                list.insert(0, entry);
+            } else {
+                list.push(entry);
+            }
+        }
+        BOOL(1)
+    }
+    let mut list = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(add), LPARAM(&mut list as *mut _ as isize));
+    }
+    list
+}
+
+/// Par de janelas de uma barra (vidro atrás, conteúdo em camadas à frente), já como AppBar.
+unsafe fn new_windows() -> Option<(HWND, HWND)> {
+    unsafe {
+        let hinst: HINSTANCE = GetModuleHandleW(None).ok()?.into();
+        let ex = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
         // Vidro: sem superfície GDI, o conteúdo vem só da composição (glass.rs).
-        let Ok(glass) = CreateWindowExW(
+        let glass = CreateWindowExW(
             ex | WS_EX_NOREDIRECTIONBITMAP,
             w!("ArcDockWinGlass"),
             w!("ArcDockWinTopbarGlass"),
@@ -965,82 +1015,144 @@ pub fn create() {
             None,
             Some(hinst),
             None,
-        ) else {
-            return;
-        };
-
+        )
+        .ok()?;
         // Conteúdo: janela em camadas, "dona" pelo vidro para ficar sempre à frente dele.
         let class = w!("ArcDockWinTopbar");
+        let Ok(hwnd) =
+            CreateWindowExW(ex | WS_EX_LAYERED, class, class, WS_POPUP, 0, 0, 0, 0, Some(glass), None, Some(hinst), None)
+        else {
+            let _ = DestroyWindow(glass);
+            return None;
+        };
+        // AppBar na borda de cima: janelas maximizadas ficam abaixo da barra.
+        let mut abd = APPBARDATA {
+            cbSize: size_of::<APPBARDATA>() as u32,
+            hWnd: hwnd,
+            uCallbackMessage: WM_APPBAR,
+            uEdge: ABE_TOP,
+            ..Default::default()
+        };
+        SHAppBarMessage(ABM_NEW, &mut abd);
+        Some((hwnd, glass))
+    }
+}
+
+/// Tira a AppBar do sistema e destrói as janelas.
+fn remove(mut bar: Bar) {
+    let mut abd = bar.appbar_data();
+    bar.glass_fx = None;
+    unsafe {
+        SHAppBarMessage(ABM_REMOVE, &mut abd);
+        let _ = DestroyWindow(bar.hwnd);
+        let _ = DestroyWindow(bar.glass);
+    }
+}
+
+/// Uma barra por monitor. A do principal é sempre a primeira e mantém a janela (MAIN);
+/// barras de monitores que mudaram de área ou escala são refeitas nas mesmas janelas.
+fn rebuild() {
+    let mons = monitors();
+    if mons.is_empty() {
+        return;
+    }
+    // Fora de BARS durante a troca: mensagens reentrantes só são ignoradas.
+    let Some(mut old) = BARS.with(|b| b.try_borrow_mut().ok().map(|mut g| std::mem::take(&mut *g))) else {
+        return;
+    };
+    let shared = old.first().map(|b| (b.tray.clone(), b.clock.clone(), b.cpu, b.ram));
+    if old.len() > mons.len() {
+        old.drain(mons.len()..).for_each(remove);
+    }
+    let mut old = old.into_iter();
+    let mut bars = Vec::with_capacity(mons.len());
+    for &(hmon, rc) in &mons {
+        let mut prev = old.next();
+        if prev.as_ref().is_some_and(|b| b.monitor == rc && b.scale == monitor_scale(hmon))
+            && let Some(mut b) = prev.take()
+        {
+            b.hmon = hmon;
+            b.place();
+            bars.push(b);
+            continue;
+        }
+        // Mesmas janelas (e vidro) da barra anterior nesta posição, ou janelas novas.
+        let (hwnd, glass, fx) = match prev {
+            Some(mut b) => (b.hwnd, b.glass, b.glass_fx.take()),
+            None => match unsafe { new_windows() } {
+                Some((h, g)) => (h, g, None),
+                None => continue,
+            },
+        };
+        let Ok(mut b) = (unsafe { Bar::new(hwnd, glass, hmon, rc, fx) }) else {
+            continue;
+        };
+        if let Some((tray, clock, cpu, ram)) = &shared {
+            (b.tray, b.clock, b.cpu, b.ram) = (tray.clone(), clock.clone(), *cpu, *ram);
+        }
+        b.relayout();
+        b.place();
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            SetTimer(Some(hwnd), TIMER_TINT, TINT_DEBOUNCE_MS, None);
+        }
+        bars.push(b);
+    }
+    if let Some(b) = bars.first() {
+        MAIN.set(b.hwnd);
+    }
+    BARS.with(|b| *b.borrow_mut() = bars);
+}
+
+/// Cria as topbars (depois do dock: reaproveita a classe da janela de vidro dele).
+pub fn create() {
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else { return };
         let wc = WNDCLASSW {
             style: CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
-            hInstance: hinst,
-            lpszClassName: class,
+            hInstance: module.into(),
+            lpszClassName: w!("ArcDockWinTopbar"),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             ..Default::default()
         };
         RegisterClassW(&wc);
-        let Ok(hwnd) = CreateWindowExW(
-            ex | WS_EX_LAYERED,
-            class,
-            class,
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            Some(glass),
-            None,
-            Some(hinst),
-            None,
-        ) else {
+        rebuild();
+        let hwnd = MAIN.get();
+        if hwnd.is_invalid() {
             return;
-        };
-
-        let Ok(mut bar) = Bar::new(hwnd, glass) else {
-            let _ = DestroyWindow(glass);
-            return;
-        };
-        // AppBar na borda de cima: janelas maximizadas ficam abaixo da barra.
-        let mut abd = bar.appbar_data();
-        SHAppBarMessage(ABM_NEW, &mut abd);
-
-        bar.update_clock();
-        bar.net = status::network(&bar.wlan);
-        bar.volume = bar.audio.as_ref().and_then(|a| a.state());
-        bar.relayout();
-        bar.place();
-        BAR.with(|b| *b.borrow_mut() = Some(bar));
-
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        SetTimer(Some(hwnd), TIMER_POLL, POLL_MS, None);
+        }
+        // Avisa mudanças de som (WM_AUDIO); a roda do mouse no botão da central muda o volume.
+        AUDIO.with(|a| *a.borrow_mut() = Audio::new(hwnd));
+        USAGE.with(|u| *u.borrow_mut() = Some(status::Usage::new()));
+        update_clock();
         SetTimer(Some(hwnd), TIMER_STATS, STATS_MS, None);
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
         let _ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
         let _ = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
         let _ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        SetTimer(Some(hwnd), TIMER_TINT, TINT_DEBOUNCE_MS, None);
     }
 }
 
-/// Tira a barra do sistema de AppBars (chamado onde o dock encerra).
+/// Tira as barras do sistema de AppBars (chamado onde o dock encerra).
 pub fn shutdown() {
-    let Some(bar) = BAR.with(|b| b.try_borrow_mut().ok().and_then(|mut g| g.take())) else {
-        return;
-    };
-    let mut abd = bar.appbar_data();
-    unsafe {
-        SHAppBarMessage(ABM_REMOVE, &mut abd);
-        let _ = ShowWindow(bar.hwnd, SW_HIDE);
-        let _ = ShowWindow(bar.glass, SW_HIDE);
+    let bars = BARS.with(|b| b.try_borrow_mut().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default());
+    for bar in bars {
+        let mut abd = bar.appbar_data();
+        unsafe {
+            SHAppBarMessage(ABM_REMOVE, &mut abd);
+            let _ = ShowWindow(bar.hwnd, SW_HIDE);
+            let _ = ShowWindow(bar.glass, SW_HIDE);
+        }
     }
 }
 
-/// Algo mudou numa janela de topo: agenda a releitura da cor (o timer junta rajadas).
+/// Algo mudou numa janela de topo: troca de app pinta na hora; o resto agenda uma releitura
+/// em cada barra.
 unsafe extern "system" fn on_window_event(
     _: HWINEVENTHOOK,
-    _: u32,
+    event: u32,
     hwnd: HWND,
     obj: i32,
     child: i32,
@@ -1050,11 +1162,23 @@ unsafe extern "system" fn on_window_event(
     if hwnd.is_invalid() || obj != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 {
         return;
     }
-    let bar = BAR.with(|b| b.try_borrow().ok().and_then(|g| g.as_ref().map(|b| (b.hwnd, b.glass))));
-    if let Some((h, g)) = bar
-        && hwnd != h
-        && hwnd != g
-    {
-        unsafe { SetTimer(Some(h), TIMER_TINT, TINT_DEBOUNCE_MS, None) };
+    let ours = BARS.with(|b| b.try_borrow().ok().map(|g| g.iter().any(|b| hwnd == b.hwnd || hwnd == b.glass)));
+    if ours != Some(false) {
+        return;
     }
+    // Só janelas de topo: as internas dos apps (vídeo, progresso...) geram eventos sem parar.
+    if unsafe { GetAncestor(hwnd, GA_ROOT) } != hwnd {
+        return;
+    }
+    for_bars(|b| {
+        if event == EVENT_SYSTEM_FOREGROUND {
+            // Troca de app: pinta já (com a cor do banco não precisa ler a tela).
+            b.update_tint();
+        }
+        // Releitura logo depois, para pegar o fim de animações (restaurar, maximizar).
+        if !b.tint_queued {
+            b.tint_queued = true;
+            unsafe { SetTimer(Some(b.hwnd), TIMER_TINT_EVENT, TINT_THROTTLE_MS, None) };
+        }
+    });
 }

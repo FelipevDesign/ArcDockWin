@@ -298,6 +298,17 @@ impl WifiPanel {
         p
     }
 
+    /// Para a Central de Controle: (tem Wi‑Fi, rádio ligado se dá para alternar, rede conectada).
+    pub fn summary(&self) -> (bool, Option<bool>, Option<String>) {
+        let name = self.nets.iter().find(|n| n.connected).map(|n| n.name.clone());
+        (self.iface.is_some(), self.radio.filter(|_| self.can_toggle), name)
+    }
+
+    /// Liga/desliga o rádio como o interruptor do painel; `true` = reconstruir.
+    pub fn set_radio(&mut self, on: bool) -> bool {
+        self.event(Event::Toggle(TOGGLE, on))
+    }
+
     fn close_handle(&mut self) {
         if !self.handle.is_invalid() {
             unsafe {

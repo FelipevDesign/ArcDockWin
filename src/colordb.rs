@@ -8,6 +8,7 @@
 //! (`shown` = 1) ou dentro da bandeja (0). `icon` é `exe#uid` (ex.: `discord.exe#1`).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 #[allow(non_camel_case_types)]
@@ -82,7 +83,7 @@ fn with_db<R>(f: impl FnOnce(*mut sqlite3) -> Option<R>) -> Option<R> {
     })
 }
 
-/// Roda `sql` com `args` ligados a ?1, ?2…; devolve a 1ª coluna da 1ª linha, se houver.
+/// Roda `sql` com `args` ligados a ?1, ?2â€¦; devolve a 1ª coluna da 1ª linha, se houver.
 fn run(db: *mut sqlite3, sql: &CStr, args: &[&str]) -> Option<Option<String>> {
     unsafe {
         let mut stmt = std::ptr::null_mut();
@@ -105,6 +106,20 @@ fn run(db: *mut sqlite3, sql: &CStr, args: &[&str]) -> Option<Option<String>> {
 
 /// Cor guardada para o app, se houver.
 pub fn get(app: &str) -> Option<[u8; 3]> {
+    // Cache em memória: chamado a cada troca de app.
+    if let Some(c) = CACHE.with_borrow(|m| m.get(app).copied()) {
+        return c;
+    }
+    let c = load(app);
+    CACHE.with_borrow_mut(|m| m.insert(app.to_owned(), c));
+    c
+}
+
+thread_local! {
+    static CACHE: RefCell<HashMap<String, Option<[u8; 3]>>> = RefCell::new(HashMap::new());
+}
+
+fn load(app: &str) -> Option<[u8; 3]> {
     let hex = with_db(|db| run(db, c"SELECT color FROM colors WHERE app = ?1", &[app]).flatten())?;
     let hex = hex.trim().trim_start_matches('#');
     if hex.len() != 6 {
@@ -116,6 +131,7 @@ pub fn get(app: &str) -> Option<[u8; 3]> {
 
 /// Guarda (ou troca) a cor do app.
 pub fn set(app: &str, [r, g, b]: [u8; 3]) {
+    CACHE.with_borrow_mut(|m| m.insert(app.to_owned(), Some([r, g, b])));
     let hex = format!("#{r:02X}{g:02X}{b:02X}");
     with_db(|db| run(db, c"INSERT OR REPLACE INTO colors (app, color) VALUES (?1, ?2)", &[app, &hex]));
 }

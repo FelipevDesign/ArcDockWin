@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
 
-const APPS_FOLDER: &str = "shell:AppsFolder\\";
+pub const APPS_FOLDER: &str = "shell:AppsFolder\\";
 
 pub struct App {
     /// Caminho do .exe ou `shell:AppsFolder\<id>` (apps da Store).
@@ -34,12 +34,6 @@ pub struct App {
     pub key: String,
     pub pinned: bool,
     pub icon: Option<Pixmap>,
-    /// Cor pastel da caixinha atrás do ícone (RGBA), tirada da cor predominante dele.
-    pub tile: [u8; 4],
-    /// O ícone já é um "azulejo" (quadrado e preenchido): ocupa a caixa inteira, sem fundo pastel.
-    pub full: bool,
-    /// Silhueta preta do ícone, para a sombra leve dentro da caixinha.
-    pub shadow: Option<Pixmap>,
     /// Janelas abertas do app, na ordem em que apareceram.
     pub windows: Vec<HWND>,
 }
@@ -72,14 +66,11 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         source: START.to_string(),
         key: START.to_string(),
         pinned: true,
-        icon: start_icon(icon_size as u32),
-        tile: [0; 4],
-        full: false,
-        shadow: None,
+        icon: load_icon(START, icon_size),
         windows: Vec::new(),
     };
     // O botão Iniciar fica na ponta direita, depois dos fixados e dos abertos.
-    let mut apps: Vec<App> = text
+    let apps: Vec<App> = text
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -87,103 +78,13 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         .map(|source| App {
             key: source_key(source),
             icon: load_icon(source, icon_size),
-            tile: [0; 4],
-            full: false,
-            shadow: None,
             source: source.to_string(),
             pinned: true,
             windows: Vec::new(),
         })
         .chain(std::iter::once(start))
         .collect();
-    for app in &mut apps {
-        app.tile = pastel(app.icon.as_ref());
-        app.full = is_tile(app.icon.as_ref());
-        app.shadow = silhouette(app.icon.as_ref());
-    }
     apps
-}
-
-/// O ícone (já sem margens) é quase quadrado, quase todo opaco e com as bordas preenchidas?
-pub fn is_tile(icon: Option<&Pixmap>) -> bool {
-    let Some(pm) = icon else { return false };
-    let (w, h) = (pm.width(), pm.height());
-    if w < 8 || h < 8 || !(0.9..=1.1).contains(&(w as f32 / h as f32)) {
-        return false;
-    }
-    let alpha = |x: u32, y: u32| pm.data()[((y * w + x) * 4 + 3) as usize];
-    let edges = [(w / 2, 1), (w / 2, h - 2), (1, h / 2), (w - 2, h / 2)];
-    if edges.iter().any(|&(x, y)| alpha(x, y) < 200) {
-        return false;
-    }
-    let opaque = pm.data().chunks_exact(4).filter(|p| p[3] >= 200).count();
-    opaque as f32 / (w * h) as f32 >= 0.85
-}
-
-/// Tom pastel da cor predominante do ícone (pixels vivos pesam mais que preto/branco/cinza).
-/// Cópia do ícone toda preta, mantendo o alfa (pré-multiplicado: RGB = 0).
-pub fn silhouette(icon: Option<&Pixmap>) -> Option<Pixmap> {
-    let mut out = icon?.clone();
-    for p in out.data_mut().chunks_exact_mut(4) {
-        p[0] = 0;
-        p[1] = 0;
-        p[2] = 0;
-    }
-    Some(out)
-}
-
-pub fn pastel(icon: Option<&Pixmap>) -> [u8; 4] {
-    let (mut x, mut y, mut wsum, mut n, mut vivid) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    for p in icon.map(|i| i.data()).unwrap_or(&[]).chunks_exact(4) {
-        let a = p[3] as f32;
-        if a < 128.0 {
-            continue;
-        }
-        let [r, g, b] = [p[0], p[1], p[2]].map(|c| c as f32 / a); // tira a pré-multiplicação
-        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-        n += 1.0;
-        if max - min < 1e-3 {
-            continue;
-        }
-        let hue = if max == r {
-            ((g - b) / (max - min)).rem_euclid(6.0)
-        } else if max == g {
-            (b - r) / (max - min) + 2.0
-        } else {
-            (r - g) / (max - min) + 4.0
-        } * std::f32::consts::FRAC_PI_3;
-        let w = (max - min) / max * max; // saturação × brilho
-        if (max - min) / max > 0.25 && max > 0.2 {
-            vivid += 1.0;
-        }
-        x += w * hue.cos();
-        y += w * hue.sin();
-        wsum += w;
-    }
-    // Pouca área colorida (ex.: engrenagem com um detalhe azul): cinza claro neutro.
-    // Senão, um pastel bem suave, só um toque da cor do ícone.
-    let (hue, sat, light) = if n == 0.0 || wsum / n < 0.08 || vivid / n < 0.40 {
-        (0.0, 0.0, 0.94)
-    } else {
-        (y.atan2(x).to_degrees().rem_euclid(360.0), 0.22, 0.92)
-    };
-    let [r, g, b] = hsl_to_rgb(hue, sat, light);
-    [r, g, b, 255]
-}
-
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = match (h / 60.0) as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    [r, g, b].map(|v| ((v + m) * 255.0).round() as u8)
 }
 
 /// Item especial do botão Iniciar.
@@ -215,70 +116,6 @@ fn start_icon(size: u32) -> Option<Pixmap> {
     Some(pm)
 }
 
-/// Processos rodando agora (nome do exe em minúsculas).
-fn running_exes() -> Vec<String> {
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-    };
-    let mut out = Vec::new();
-    unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
-        let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-        let mut ok = Process32FirstW(snap, &mut e).is_ok();
-        while ok {
-            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
-            out.push(String::from_utf16_lossy(&e.szExeFile[..n]).to_lowercase());
-            ok = Process32NextW(snap, &mut e).is_ok();
-        }
-        let _ = CloseHandle(snap);
-    }
-    out
-}
-
-/// Botão Iniciar do dock: abre a Paleta de Comandos do PowerToys. Se o PowerToys ou a Paleta
-/// estão fechados, abre antes (a Paleta aberta pelo link `x-cmdpal:` já aparece na tela);
-/// com ela rodando, aperta o atalho dela (Win+Alt+Espaço).
-fn open_start() {
-    let running = running_exes();
-    if !running.iter().any(|n| n == "powertoys.exe")
-        && let Some(local) = std::env::var_os("LOCALAPPDATA")
-    {
-        let exe = std::path::PathBuf::from(local).join(r"PowerToys\PowerToys.exe");
-        if exe.exists() {
-            unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(exe.as_os_str()), None, None, SW_SHOWNORMAL) };
-        }
-    }
-    if !running.iter().any(|n| n == "microsoft.cmdpal.ui.exe") {
-        unsafe { ShellExecuteW(None, w!("open"), w!("x-cmdpal:"), None, None, SW_SHOWNORMAL) };
-        return;
-    }
-    send_palette_hotkey();
-}
-
-/// Win+Alt+Espaço, o atalho da Paleta de Comandos.
-fn send_palette_hotkey() {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-        VIRTUAL_KEY, VK_LMENU, VK_LWIN, VK_SPACE,
-    };
-    let key = |vk: VIRTUAL_KEY, flags| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: flags, ..Default::default() } },
-    };
-    let (down, up) = (KEYBD_EVENT_FLAGS(0), KEYEVENTF_KEYUP);
-    let seq = [
-        key(VK_LWIN, down),
-        key(VK_LMENU, down),
-        key(VK_SPACE, down),
-        key(VK_SPACE, up),
-        key(VK_LMENU, up),
-        key(VK_LWIN, up),
-    ];
-    unsafe {
-        SendInput(&seq, size_of::<INPUT>() as i32);
-    }
-}
-
 fn source_key(source: &str) -> String {
     match source.strip_prefix(APPS_FOLDER) {
         Some(id) => format!("aumid:{}", id.to_lowercase()),
@@ -293,8 +130,36 @@ fn exe_key(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Ícones trocados por fora (`nome.exe=C:\caminho\icone.ico`), escrito pelo IconesTahoe.
+pub fn icons_path() -> PathBuf {
+    config_path().with_file_name("icons.txt")
+}
+
+fn icon_override(source: &str) -> Option<String> {
+    let key = if source == START { "start".to_string() } else { exe_key(source) };
+    std::fs::read_to_string(icons_path())
+        .ok()?
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case(&key))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|p| Path::new(p).exists())
+}
+
+/// Recarrega os ícones de todos os apps (o arquivo de ícones trocados mudou).
+pub fn reload_icons(apps: &mut [App], size: i32) {
+    for app in apps.iter_mut() {
+        app.icon = load_icon(&app.source, size);
+    }
+}
+
 /// Ícone em alta resolução, como pixmap RGBA pré-multiplicado.
-fn load_icon(source: &str, size: i32) -> Option<Pixmap> {
+pub fn load_icon(source: &str, size: i32) -> Option<Pixmap> {
+    let path = icon_override(source);
+    if source == START && path.is_none() {
+        return start_icon(size as u32);
+    }
+    let source = path.unwrap_or_else(|| source.to_string());
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(source), None).ok()?;
@@ -431,9 +296,6 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
             // Antes do botão Iniciar, que é sempre o último.
             let at = apps.iter().position(|a| a.source == START).unwrap_or(apps.len());
             apps.insert(at, App {
-                tile: pastel(icon.as_ref()),
-                full: is_tile(icon.as_ref()),
-                shadow: silhouette(icon.as_ref()),
                 icon,
                 source,
                 key,
@@ -538,7 +400,7 @@ fn process_path(pid: u32) -> String {
 /// Clique no ícone: abre o app, alterna entre as janelas dele ou minimiza a única em foco.
 pub fn activate(source: &str, windows: &[HWND]) {
     if source == START {
-        open_start();
+        crate::launcher::toggle();
         return;
     }
     unsafe {

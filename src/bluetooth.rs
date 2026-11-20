@@ -281,6 +281,17 @@ impl BluetoothPanel {
         p
     }
 
+    /// Para a Central de Controle: rádio ligado (None = sem Bluetooth) e um dispositivo conectado.
+    pub fn summary(&self) -> (Option<bool>, Option<String>) {
+        let device = self.devices.as_ref().and_then(|l| l.iter().find(|d| d.connected)).map(|d| d.name.clone());
+        (radio().is_some().then_some(self.on), device)
+    }
+
+    /// Liga/desliga como o interruptor do painel; `true` = reconstruir.
+    pub fn set_on(&mut self, on: bool) -> bool {
+        self.event(Event::Toggle(TOGGLE, on))
+    }
+
     fn reload(&mut self) {
         self.devices = None;
         let shared = self.shared.clone();

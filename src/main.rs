@@ -1,12 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod apps;
+mod attention;
 mod colordb;
+mod control;
+mod drag;
 mod bluetooth;
+mod brightness;
 mod calendar;
 mod glass;
+mod guard;
+mod launcher;
+mod media;
 mod panel;
+mod power;
 mod render;
+mod stacks;
 mod status;
 mod taskbar;
 mod tint;
@@ -60,6 +69,9 @@ const MENU_CLOSE: usize = 3;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// Abre/fecha o lançador. Mandada de fora (atalho do AutoHotkey) para a janela do dock
+/// (classe `ArcDockWin`): `PostMessage 0x8032`.
+const WM_LAUNCHER: u32 = WM_APP + 50;
 
 thread_local! {
     static DOCK: RefCell<Option<Dock>> = const { RefCell::new(None) };
@@ -75,7 +87,11 @@ struct Dock {
     m: Metrics,
     theme: Theme,
     icon_size: i32,
+    /// Data do arquivo de ícones trocados, para recarregar quando ele mudar.
+    icons_mtime: Option<std::time::SystemTime>,
     apps: Vec<App>,
+    /// Downloads e Lixeira, na ponta direita depois de um separador (stacks.rs).
+    stacks: stacks::Stacks,
     pixmap: Pixmap,
     memdc: HDC,
     bits: *mut u8,
@@ -98,6 +114,8 @@ struct Dock {
     shown: bool,
     /// Última vez que havia motivo para o dock ficar visível.
     last_inside: Option<Instant>,
+    /// Arrastar ícones para reordenar/fixar/desafixar (drag.rs).
+    drag: drag::Drag,
 }
 
 impl Dock {
@@ -133,7 +151,9 @@ impl Dock {
                 glass_rect: None,
                 glass_fx: glass::Glass::new(glass, m.radius).ok(),
                 apps: apps::load_pinned(icon_size),
+                stacks: stacks::Stacks::new(icon_size),
                 icon_size,
+                icons_mtime: icons_mtime(),
                 m,
                 theme: Theme::new(light_theme(), accent_color()),
                 pixmap: Pixmap::new(w as u32, h as u32).expect("pixmap"),
@@ -153,6 +173,7 @@ impl Dock {
                 slide_start: Instant::now(),
                 shown: true,
                 last_inside: None,
+                drag: drag::Drag::default(),
             }
         }
     }
@@ -166,13 +187,40 @@ impl Dock {
         (pinned > 0 && open > 0).then(|| pinned - 1)
     }
 
+    /// Separadores: fixados | abertos e apps | pilhas.
+    fn seps(&self) -> Vec<usize> {
+        self.sep_after().into_iter().chain(self.apps.len().checked_sub(1)).collect()
+    }
+
+    /// Quantos itens o dock desenha (apps e pilhas).
+    fn count(&self) -> usize {
+        self.apps.len() + self.stacks.items.len()
+    }
+
     fn slots(&self) -> Vec<render::Slot> {
         let w = self.pixmap.width() as f32;
-        render::layout(self.apps.len(), self.sep_after(), w, &self.m, self.mx, self.hover)
+        render::layout(self.count(), &self.seps(), w, &self.m, self.mx, self.hover)
+    }
+
+    /// Pilha (source) sob o índice `i` e o ponto acima do ícone, se `i` for uma pilha.
+    fn stack_at(&self, i: usize) -> Option<(String, POINT)> {
+        let s = self.stacks.items.get(i.checked_sub(self.apps.len())?)?;
+        Some((s.source.clone(), self.menu_anchor(i)?))
     }
 
     fn refresh(&mut self) -> bool {
-        apps::refresh(&mut self.apps, self.icon_size)
+        // Durante o arrasto a lista é do arrasto (drag.rs).
+        if self.drag.busy() {
+            return false;
+        }
+        let mtime = icons_mtime();
+        let icons_changed = mtime != self.icons_mtime;
+        if icons_changed {
+            self.icons_mtime = mtime;
+            apps::reload_icons(&mut self.apps, self.icon_size);
+        }
+        let stacks = self.stacks.refresh(icons_changed);
+        apps::refresh(&mut self.apps, self.icon_size) || icons_changed || stacks
     }
 
     /// Deslocamento vertical atual da animação de esconder.
@@ -184,8 +232,8 @@ impl Dock {
         if !self.shown {
             return;
         }
-        let slots = self.slots();
-        let sep = self.sep_after();
+        let slots = self.shown_slots();
+        let seps = self.seps();
         // App em foco: dono da última janela em primeiro plano fora do dock (o menu do dock
         // toma o foco, mas o destaque continua no app).
         let fg = unsafe { GetForegroundWindow() };
@@ -194,7 +242,8 @@ impl Dock {
         }
         let fg = HWND(LAST_FG.load(Ordering::Relaxed) as *mut c_void);
         let focus = self.apps.iter().position(|a| a.windows.contains(&fg));
-        render::draw(&mut self.pixmap, &slots, sep, &self.apps, &self.m, &self.theme, self.hover, focus);
+        let items: Vec<&App> = self.apps.iter().chain(&self.stacks.items).collect();
+        render::draw(&mut self.pixmap, &slots, &seps, &items, &self.m, &self.theme, self.hover, focus);
         self.update_glass(render::box_rect(&slots, &self.m, self.pixmap.height() as f32));
 
         // RGBA (tiny-skia) -> BGRA (GDI), ambos com alfa pré-multiplicado.
@@ -294,7 +343,8 @@ impl Dock {
         let t = ((now - self.slide_start).as_secs_f32() / SLIDE_TIME).min(1.0);
         self.slide = self.slide_from + (self.slide_target - self.slide_from) * ease(t);
 
-        if th >= 1.0 && t >= 1.0 {
+        let settling = self.drag_step();
+        if th >= 1.0 && t >= 1.0 && !attention::bouncing() && !settling {
             self.animating = false;
         }
         self.apply_shown();
@@ -349,7 +399,7 @@ impl Dock {
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
         let now = Instant::now();
-        if self.tracking || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() || !self.covered() {
+        if self.tracking || self.drag.busy() || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() || !self.covered() {
             self.last_inside = Some(now);
         }
         // Aparecer é imediato; esconder espera a carência.
@@ -369,7 +419,7 @@ impl Dock {
     /// Alguma janela encosta no fundo do dock em repouso (sem zoom), estendido até a base da tela?
     fn covered(&self) -> bool {
         let w = self.pixmap.width() as f32;
-        let slots = render::layout(self.apps.len(), self.sep_after(), w, &self.m, self.mx, 0.0);
+        let slots = render::layout(self.count(), &self.seps(), w, &self.m, self.mx, 0.0);
         let Some((l, t, r, _)) = render::box_rect(&slots, &self.m, self.pixmap.height() as f32) else {
             return false;
         };
@@ -465,6 +515,10 @@ unsafe extern "system" fn cover_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
     }
 }
 
+fn icons_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(apps::icons_path()).and_then(|m| m.modified()).ok()
+}
+
 fn with_dock<R>(f: impl FnOnce(&mut Dock) -> R) -> Option<R> {
     // try_borrow_mut: chamadas do Windows podem reentrar no wndproc.
     DOCK.with(|d| d.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
@@ -472,6 +526,10 @@ fn with_dock<R>(f: impl FnOnce(&mut Dock) -> R) -> Option<R> {
 
 fn mouse_x(lp: LPARAM) -> f32 {
     (lp.0 & 0xffff) as i16 as f32
+}
+
+fn mouse_y(lp: LPARAM) -> f32 {
+    ((lp.0 >> 16) & 0xffff) as i16 as f32
 }
 
 /// Tema da barra de tarefas (claro/escuro).
@@ -694,6 +752,10 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_LAUNCHER => {
+                launcher::toggle();
+                LRESULT(0)
+            }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_MOUSEMOVE => {
                 with_dock(|d| {
@@ -709,6 +771,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         };
                         let _ = TrackMouseEvent(&mut tme);
                     }
+                    d.drag_move(d.mx, mouse_y(lp));
                     d.set_hover(1.0);
                     if !d.animating {
                         d.redraw();
@@ -719,6 +782,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_MOUSELEAVE => {
                 with_dock(|d| {
                     d.tracking = false;
+                    // Com o mouse capturado no arrasto, o zoom fica até soltar.
+                    if d.drag.busy() {
+                        return;
+                    }
                     d.set_hover(0.0);
                 });
                 LRESULT(0)
@@ -740,12 +807,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 });
                 LRESULT(0)
             }
+            WM_LBUTTONDOWN => {
+                with_dock(|d| d.drag_down(mouse_x(lp), mouse_y(lp)));
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                with_dock(|d| d.drag_up());
+                LRESULT(0)
+            }
             WM_LBUTTONUP => {
+                // Foi um arrasto, não um clique.
+                if with_dock(|d| d.drag_up()).unwrap_or(false) {
+                    return LRESULT(0);
+                }
+                // Pilhas da ponta (Downloads, Lixeira).
+                if let Some((source, anchor)) = with_dock(|d| d.stack_at(d.hit(mouse_x(lp))?)).flatten() {
+                    stacks::click(&source, anchor);
+                    return LRESULT(0);
+                }
                 let target = with_dock(|d| {
                     if d.refresh() {
                         d.redraw();
                     }
-                    d.hit(mouse_x(lp)).map(|i| (d.apps[i].source.clone(), d.apps[i].windows.clone()))
+                    // get: depois do refresh o índice pode cair numa pilha.
+                    d.hit(mouse_x(lp)).and_then(|i| d.apps.get(i)).map(|a| (a.source.clone(), a.windows.clone()))
                 })
                 .flatten();
                 if let Some((source, windows)) = target {
@@ -754,6 +839,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
+                if let Some((source, anchor)) = with_dock(|d| d.stack_at(d.hit(mouse_x(lp))?)).flatten() {
+                    MENU_OPEN.store(true, Ordering::Relaxed);
+                    stacks::context_menu(hwnd, &source, anchor);
+                    MENU_OPEN.store(false, Ordering::Relaxed);
+                    with_dock(|d| if d.refresh() { d.redraw() });
+                    return LRESULT(0);
+                }
                 // App sob o mouse; fora de um ícone ou no botão Iniciar, só "Sair".
                 let (target, anchor) = with_dock(|d| {
                     if d.refresh() {
@@ -761,7 +853,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                     let i = d.hit(mouse_x(lp));
                     let target = i
-                        .map(|i| &d.apps[i])
+                        .and_then(|i| d.apps.get(i))
                         .filter(|a| a.source != apps::START)
                         .map(|a| (a.key.clone(), a.pinned, a.windows.clone()));
                     (target, i.and_then(|i| d.menu_anchor(i)))
@@ -769,6 +861,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 .unwrap_or((None, None));
                 context_menu(hwnd, target, anchor);
                 LRESULT(0)
+            }
+            WM_SETTINGCHANGE => {
+                // Tema claro/escuro ou cor de destaque mudou: refaz as cores do dock.
+                with_dock(|d| {
+                    d.theme = Theme::new(light_theme(), accent_color());
+                    d.redraw();
+                });
+                DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_ENDSESSION => {
                 if wp.0 != 0 {
@@ -783,6 +883,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 topbar::shutdown();
                 taskbar::restore();
                 PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ if attention::is_hook(msg) => {
+                if attention::handle(wp, lp) {
+                    with_dock(|d| {
+                        if attention::bouncing() {
+                            d.start_anim();
+                        }
+                        d.redraw();
+                    });
+                }
                 LRESULT(0)
             }
             _ if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 => {
@@ -829,6 +940,9 @@ unsafe extern "system" fn glass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 use windows::Win32::Foundation::HINSTANCE;
 
 fn main() -> windows::core::Result<()> {
+    if guard::run_if_requested() {
+        return Ok(());
+    }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -879,6 +993,8 @@ fn main() -> windows::core::Result<()> {
         )?;
 
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
+        guard::spawn();
+        attention::register(hwnd);
         taskbar::hide();
 
         let mut dock = Dock::new(hwnd, glass);

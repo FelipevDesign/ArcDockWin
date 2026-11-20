@@ -3,8 +3,8 @@
 use std::f32::consts::PI;
 
 use tiny_skia::{
-    Color, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder, Pattern,
-    Pixmap, PixmapPaint, Point, Rect, SpreadMode, Stroke, Transform,
+    Color, FillRule, FilterQuality, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke,
+    Transform,
 };
 
 use crate::apps::App;
@@ -62,25 +62,20 @@ impl Theme {
     }
 }
 
-/// Arredondamento da caixinha (fração do lado) e quanto do lado o ícone ocupa.
-const TILE_RADIUS: f32 = 0.24;
-const ICON_IN_TILE: f32 = 0.72;
-
 pub struct Slot {
     pub x: f32,
     pub size: f32,
+    /// Deslocamento só do desenho do ícone (arrastado), sem mexer no fundo nem no separador.
+    pub dx: f32,
 }
 
 /// Posição e tamanho de cada ícone dado o mouse em `mx` e a intensidade do hover (0..1).
-/// `sep_after`: índice do último fixado, se houver separador depois dele.
-pub fn layout(n: usize, sep_after: Option<usize>, width: f32, m: &Metrics, mx: f32, hover: f32) -> Vec<Slot> {
+/// `seps`: índices dos itens com separador depois (último fixado; último app antes das pilhas).
+pub fn layout(n: usize, seps: &[usize], width: f32, m: &Metrics, mx: f32, hover: f32) -> Vec<Slot> {
     if n == 0 {
         return Vec::new();
     }
-    let extra = |i: usize| match sep_after {
-        Some(s) if i > s => m.sep,
-        _ => 0.0,
-    };
+    let extra = |i: usize| m.sep * seps.iter().filter(|&&s| i > s).count() as f32;
     let base_total = n as f32 * m.base + (n - 1) as f32 * m.gap + extra(n - 1);
     let base_left = (width - base_total) / 2.0;
 
@@ -99,9 +94,9 @@ pub fn layout(n: usize, sep_after: Option<usize>, width: f32, m: &Metrics, mx: f
         .into_iter()
         .enumerate()
         .map(|(i, size)| {
-            let slot = Slot { x, size };
+            let slot = Slot { x, size, dx: 0.0 };
             x += size + m.gap;
-            if sep_after == Some(i) {
+            if seps.contains(&i) {
                 x += m.sep;
             }
             slot
@@ -124,8 +119,8 @@ pub fn box_rect(slots: &[Slot], m: &Metrics, height: f32) -> Option<(i32, i32, i
 pub fn draw(
     pm: &mut Pixmap,
     slots: &[Slot],
-    sep_after: Option<usize>,
-    apps: &[App],
+    seps: &[usize],
+    apps: &[&App],
     m: &Metrics,
     theme: &Theme,
     hover: f32,
@@ -156,7 +151,7 @@ pub fn draw(
         pm.stroke_path(&border, &solid(theme.border), &stroke, id, None);
     }
 
-    if let Some(s) = sep_after.and_then(|s| slots.get(s)) {
+    for s in seps.iter().filter_map(|&s| slots.get(s)) {
         let x = (s.x + s.size + (m.gap + m.sep) / 2.0).round() + 0.5;
         if let Some(rect) = Rect::from_xywh(x - 0.5, t + m.pad * 1.3, 1.0, b - t - m.pad * 2.6) {
             pm.fill_rect(rect, &solid(theme.divider), id, None);
@@ -165,95 +160,45 @@ pub fn draw(
 
     let icon_paint = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
     for (i, (slot, app)) in slots.iter().zip(apps).enumerate() {
+        // Ícone arrastado: desenhado fora do lugar (o espaço dele continua no layout).
+        let sx = slot.x + slot.dx;
+        // App pedindo atenção: pula no espaço livre acima (até meio ícone).
+        let (lift, alert) = crate::attention::state(&app.windows);
         let y = icon_bottom - slot.size;
-        let tile = rounded_rect(slot.x, y, slot.size, slot.size, slot.size * TILE_RADIUS);
+        let y = y - lift * y.min(slot.size * 0.5);
         match &app.icon {
-            // Ícone que já é um azulejo: preenche a caixa inteira, recortado no mesmo formato.
-            Some(icon) if app.full => {
-                let (sx, sy) = (slot.size / icon.width() as f32, slot.size / icon.height() as f32);
-                let shader = Pattern::new(
-                    icon.as_ref(),
-                    SpreadMode::Pad,
-                    FilterQuality::Bicubic,
-                    1.0,
-                    Transform::from_row(sx, 0.0, 0.0, sy, slot.x, y),
-                );
-                if let Some(tile) = &tile {
-                    let paint = Paint { shader, anti_alias: true, ..Default::default() };
-                    pm.fill_path(tile, &paint, FillRule::Winding, id, None);
-                }
-            }
-            // Demais: caixinha 1:1 pastel com o ícone centralizado dentro, com margem.
+            // O ícone como ele é, ocupando o espaço do app (sem caixa por trás).
             Some(icon) => {
-                if let Some(tile) = &tile {
-                    // Degradê vertical sutil: topo mais claro, base um pouco mais escura.
-                    let paint = gradient(app.tile, y, y + slot.size);
-                    pm.fill_path(tile, &paint, FillRule::Winding, id, None);
-                }
-                // Contorno fino para a caixinha não "sumir" em fundos claros.
-                if let Some(edge) = rounded_rect(
-                    slot.x + 0.5,
-                    y + 0.5,
-                    slot.size - 1.0,
-                    slot.size - 1.0,
-                    slot.size * TILE_RADIUS - 0.5,
-                ) {
-                    let stroke = Stroke { width: 1.0, ..Default::default() };
-                    pm.stroke_path(&edge, &solid([0, 0, 0, 28]), &stroke, id, None);
-                }
-                let inner = slot.size * ICON_IN_TILE;
                 let (iw, ih) = (icon.width() as f32, icon.height() as f32);
-                let s = inner / iw.max(ih);
-                let ox = slot.x + (slot.size - iw * s) / 2.0;
+                let s = slot.size / iw.max(ih);
+                let ox = sx + (slot.size - iw * s) / 2.0;
                 let oy = y + (slot.size - ih * s) / 2.0;
-                // Sombra leve: o próprio ícone em preto, transparente, 1 px abaixo.
-                if let Some(shadow) = app.shadow.as_ref() {
-                    let sp = PixmapPaint { opacity: 0.18, ..icon_paint };
-                    let tr = Transform::from_row(s, 0.0, 0.0, s, ox, oy + slot.size * 0.025);
-                    pm.draw_pixmap(0, 0, shadow.as_ref(), &sp, tr, None);
-                }
                 let tr = Transform::from_row(s, 0.0, 0.0, s, ox, oy);
                 pm.draw_pixmap(0, 0, icon.as_ref(), &icon_paint, tr, None);
             }
             None => {
-                if let Some(p) = rounded_rect(slot.x, y, slot.size, slot.size, slot.size * 0.22) {
+                if let Some(p) = rounded_rect(sx, y, slot.size, slot.size, slot.size * 0.22) {
                     pm.fill_path(&p, &solid([120, 120, 128, 220]), FillRule::Winding, id, None);
                 }
+            }
+        }
+        if alert {
+            let r = m.dot * 2.5;
+            if let Some(badge) = PathBuilder::from_circle(sx + slot.size - r, y + r, r) {
+                pm.fill_path(&badge, &solid([255, 59, 48, 255]), FillRule::Winding, id, None);
             }
         }
         // Um pontinho por janela (até 3), centralizados; no app em foco, na cor de destaque.
         let n = app.windows.len().min(3);
         let color = if focus == Some(i) { theme.accent } else { theme.dot };
         let step = m.dot * 4.0; // 2× o diâmetro entre os centros
-        let x0 = slot.x + slot.size / 2.0 - step * (n as f32 - 1.0) / 2.0;
+        let x0 = sx + slot.size / 2.0 - step * (n as f32 - 1.0) / 2.0;
         let cy = icon_bottom + m.pad / 2.0 + 0.5;
         for k in 0..n {
             if let Some(dot) = PathBuilder::from_circle(x0 + k as f32 * step, cy, m.dot) {
                 pm.fill_path(&dot, &solid(color), FillRule::Winding, id, None);
             }
         }
-    }
-}
-
-fn gradient([r, g, b, a]: [u8; 4], top: f32, bottom: f32) -> Paint<'static> {
-    let shade = |k: f32| {
-        let f = |c: u8| (c as f32 * k).clamp(0.0, 255.0) as u8;
-        Color::from_rgba8(f(r), f(g), f(b), a)
-    };
-    let top_c = {
-        let f = |c: u8| (c as f32 + (255.0 - c as f32) * 0.5) as u8;
-        Color::from_rgba8(f(r), f(g), f(b), a)
-    };
-    let shader = LinearGradient::new(
-        Point::from_xy(0.0, top),
-        Point::from_xy(0.0, bottom),
-        vec![GradientStop::new(0.0, top_c), GradientStop::new(1.0, shade(0.94))],
-        SpreadMode::Pad,
-        Transform::identity(),
-    );
-    match shader {
-        Some(shader) => Paint { shader, anti_alias: true, ..Default::default() },
-        None => solid([r, g, b, a]),
     }
 }
 

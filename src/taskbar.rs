@@ -9,6 +9,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, GetSystemMetrics, GetWindowThreadProcessId, IsWindowVisible, SM_CXSCREEN,
     SM_CYSCREEN, SW_HIDE, SW_SHOW, ShowWindow,
 };
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CHILDID_SELF, EVENT_OBJECT_SHOW, GetClassNameW, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS,
+};
 use windows::core::w;
 
 fn state_file() -> PathBuf {
@@ -69,6 +74,52 @@ pub fn hide() {
     }
     set_state(ABS_AUTOHIDE);
     ensure_hidden();
+    watch_show();
+}
+
+/// O Explorer mostra a barra de novo em várias situações (print, Win+T, tela cheia...).
+/// Em vez de esperar o timer, esconde no mesmo instante em que ela aparece.
+fn watch_show() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HOOKED: AtomicBool = AtomicBool::new(false);
+    if HOOKED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        let _ = SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_SHOW,
+            None,
+            Some(on_show),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+    }
+}
+
+unsafe extern "system" fn on_show(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    obj: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if hwnd.is_invalid() || obj != OBJID_WINDOW.0 || child != CHILDID_SELF as i32 {
+        return;
+    }
+    let mut buf = [0u16; 32];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
+    let class = &buf[..n];
+    if class == "Shell_TrayWnd".encode_utf16().collect::<Vec<_>>()
+        || class == "Shell_SecondaryTrayWnd".encode_utf16().collect::<Vec<_>>()
+    {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
 }
 
 /// O Explorer às vezes mostra a barra de novo; chamado periodicamente.
@@ -80,6 +131,11 @@ pub fn ensure_hidden() {
             }
         }
     }
+}
+
+/// O dock escondeu a barra e ainda não restaurou (o arquivo de estado só existe nesse intervalo).
+pub fn needs_restore() -> bool {
+    state_file().exists()
 }
 
 pub fn restore() {
