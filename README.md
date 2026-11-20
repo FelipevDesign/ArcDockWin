@@ -54,6 +54,19 @@ No visual do macOS Tahoe, com cartões arredondados:
 
 ## 🚀 Instalação
 
+### Baixar pronto
+
+1. Baixe o `arcdockwin.exe` da [última versão](https://github.com/claudsondouglas/ArcDockWin/releases/latest)
+   (ou o `.zip`, que já vem com os scripts de ícones).
+2. Coloque numa pasta fixa (por exemplo `C:\Programas\ArcDockWin`) e abra.
+
+> O `.exe` não é assinado digitalmente, então o Windows pode mostrar **"O Windows protegeu o computador"**.
+> Clique em **Mais informações → Executar assim mesmo**.
+
+Requisito: **Windows 11**.
+
+### Compilar do código
+
 Requisitos: **Windows 11** e o [Rust](https://rustup.rs) (toolchain MSVC).
 
 ```powershell
@@ -63,7 +76,8 @@ cargo build --release
 .\target\release\arcdockwin.exe
 ```
 
-Na primeira execução o ArcDockWin se registra para **iniciar com o Windows** (em `HKCU\...\Run`).
+Na primeira execução o ArcDockWin se registra para **iniciar com o Windows** (em `HKCU\...\Run`), apontando para o
+`.exe` no lugar onde ele está: por isso, não deixe ele na pasta Downloads.
 
 ### Como sair
 Clique com o botão direito num espaço vazio da dock → **Sair do ArcDockWin**. A barra de tarefas do Windows volta
