@@ -24,6 +24,7 @@ Windows taskbar in daily use.
 ### Dock
 - Real blurred glass (what is behind the dock shows through blurred), rounded corners and a soft shadow.
 - Icon magnification on hover and a small dot under running apps.
+- Smooth magnification follows pointer movement; use the mouse wheel over an app with multiple windows to cycle through them.
 - **Bouncing icon** when an app asks for attention, with a red dot until you open the app.
 - **Drag to reorder**: drop a running app between the pinned ones to pin it, or drag it upwards to unpin it.
   The launcher is always the last app.
