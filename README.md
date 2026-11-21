@@ -2,12 +2,12 @@
 
 # ArcDockWin
 
-[繁體中文說明](README.zh-TW.md)
+[Português (Brasil)](README.pt-BR.md) · [繁體中文](README.zh-TW.md)
 
-**Dock e barra de menus no estilo do macOS para o Windows 11, em Rust.**
+**A macOS-style dock and menu bar for Windows 11, written in Rust.**
 
-Leve (um único `.exe`, sem runtime), nativo (Win32 + Direct2D + Composition) e feito para
-substituir a barra de tarefas do Windows no dia a dia.
+Lightweight (a single `.exe`, no runtime), native (Win32 + Direct2D + Composition) and built to replace the
+Windows taskbar in daily use.
 
 ![ArcDockWin](docs/screenshots/desktop.png)
 
@@ -15,61 +15,71 @@ substituir a barra de tarefas do Windows no dia a dia.
 
 ---
 
-## ✨ Recursos
+> **A personal project.** ArcDockWin is a hobby project I build for my own use and share in case it is useful to
+> someone else. It is not a commercial product: there is no support or warranty, and things may change or break
+> between versions. Issues and pull requests are welcome, but I answer on my own time.
+
+## ✨ Features
 
 ### Dock
-- Vidro desfocado de verdade (o que está atrás aparece borrado), cantos arredondados e sombra suave.
-- Ampliação dos ícones ao passar o mouse e pontinho embaixo dos apps abertos.
-- **Ícone pulando** quando um app pede atenção, com um pontinho vermelho até você abrir o app.
-- **Arrastar para reordenar**: solte um app aberto entre os fixados para fixar, ou arraste para cima para desafixar.
-  O lançador fica sempre como último app.
-- **Lixeira e Downloads** no fim da dock, com painel de arquivos recentes.
-- Esconde sozinha quando uma janela encosta nela.
-- Segue o **Modo Escuro/Claro** do Windows.
+- Real blurred glass (what is behind the dock shows through blurred), rounded corners and a soft shadow.
+- Icon magnification on hover and a small dot under running apps.
+- **Bouncing icon** when an app asks for attention, with a red dot until you open the app.
+- **Drag to reorder**: drop a running app between the pinned ones to pin it, or drag it upwards to unpin it.
+  The launcher is always the last app.
+- **Trash and Downloads** at the end of the dock, with a panel of recent files.
+- Hides itself when a window touches it.
+- Follows the Windows **Dark/Light mode**.
 
-### Barra do topo
-- Aparece em **todos os monitores** (a dock fica só no principal).
-- **Assume a cor do app em foco** (10% mais escura, para separar a barra do app), na hora em que você troca de janela.
-- CPU e RAM à esquerda; relógio no centro, com calendário ao clicar.
-- Ícones da bandeja à direita, com painel dos ícones ocultos e escolha de quais ficam na barra.
+### Top bar
+- Shown on **every monitor** (the dock stays on the main one only).
+- **Takes the colour of the focused app** (10% darker, to separate the bar from the app), the moment you switch windows.
+- CPU and RAM on the left; clock in the centre, with a calendar when clicked.
+- Tray icons on the right, with a panel for hidden icons and a choice of which ones stay on the bar.
 
-### Central de Controle
-No visual do macOS Tahoe, com cartões arredondados:
-- Wi‑Fi / Rede, Bluetooth, Modo Escuro e Energia (bateria, desligar, reiniciar…).
-- **Tocando agora** (capa, título e botões de qualquer player que fale com o Windows: Spotify, navegador…).
-- **Brilho** por DDC/CI do monitor onde está a barra que você clicou, e **volume**.
+### Control Center
+macOS Tahoe look, with rounded cards:
+- Wi‑Fi / Network, Bluetooth, Dark Mode and Power (battery, shut down, restart…).
+- **Now playing** (cover, title and buttons for any player that talks to Windows: Spotify, browser…).
+- **Brightness** through DDC/CI for the monitor of the bar you clicked, and **volume**.
 
-### Segurança
-- A barra de tarefas do Windows fica escondida enquanto o ArcDockWin roda, inclusive quando o Windows tenta
-  mostrá-la de novo (ao tirar print, por exemplo).
-- Um processo **vigia** restaura a barra do Windows se o ArcDockWin travar ou for encerrado à força.
+### Languages
+ArcDockWin follows the Windows display language. Portuguese (Brazil) is the default; when Windows is set to
+Chinese, the built-in Traditional Chinese (Taiwan) pack is used. The language is re-checked while the app runs, so
+changing it needs no restart. The translation table is [`locales/zh-TW.tsv`](locales/zh-TW.tsv). Other languages
+are welcome through pull requests.
 
-## 📸 Prints
+### Safety
+- The Windows taskbar stays hidden while ArcDockWin runs, even when Windows tries to show it again (when you take a
+  screenshot, for example).
+- A **watchdog** process restores the Windows taskbar if ArcDockWin crashes or is killed.
 
-| Central de Controle | Dock |
+## 📸 Screenshots
+
+| Control Center | Dock |
 | :---: | :---: |
-| ![Central de Controle](docs/screenshots/central.png) | ![Dock](docs/screenshots/dock.png) |
+| ![Control Center](docs/screenshots/central.png) | ![Dock](docs/screenshots/dock.png) |
 
-| Barra do topo | Lançador |
+| Top bar | Launcher |
 | :---: | :---: |
-| ![Barra do topo](docs/screenshots/topbar.png) | ![Lançador](docs/screenshots/launcher.png) |
+| ![Top bar](docs/screenshots/topbar.png) | ![Launcher](docs/screenshots/launcher.png) |
 
-## 🚀 Instalação
+## 🚀 Installation
 
-### Baixar pronto
+### Download a build
 
-1. Baixe o `arcdockwin.exe` da [última versão](https://github.com/claudsondouglas/ArcDockWin/releases/latest)
-   (ou o `.zip`, que já vem com os scripts de ícones).
-2. Coloque numa pasta fixa (por exemplo `C:\Programas\ArcDockWin`) e abra.
+1. Download `arcdockwin.exe` from the [latest release](https://github.com/claudsondouglas/ArcDockWin/releases/latest)
+   (or the `.zip`, which also contains the icon scripts).
+2. Put it in a permanent folder (for example `C:\Programs\ArcDockWin`) and run it.
 
-> O `.exe` não é assinado digitalmente, então o Windows pode mostrar **"O Windows protegeu o computador"**.
-> Clique em **Mais informações → Executar assim mesmo**.
+> The `.exe` is not digitally signed, so Windows may show **"Windows protected your PC"**.
+> Click **More info → Run anyway**.
 
-Requisito: **Windows 11**.
+Requirement: **Windows 11**.
 
-### Compilar do código
+### Build from source
 
-Requisitos: **Windows 11** e o [Rust](https://rustup.rs) (toolchain MSVC).
+Requirements: **Windows 11** and [Rust](https://rustup.rs) (MSVC toolchain).
 
 ```powershell
 git clone https://github.com/claudsondouglas/ArcDockWin.git
@@ -78,129 +88,133 @@ cargo build --release
 .\target\release\arcdockwin.exe
 ```
 
-Na primeira execução o ArcDockWin se registra para **iniciar com o Windows** (em `HKCU\...\Run`), apontando para o
-`.exe` no lugar onde ele está: por isso, não deixe ele na pasta Downloads.
+On the first run ArcDockWin registers itself to **start with Windows** (in `HKCU\...\Run`), pointing to the `.exe`
+where it currently is, so do not leave it in the Downloads folder.
 
-### Como sair
-Clique com o botão direito num espaço vazio da dock → **Sair do ArcDockWin**. A barra de tarefas do Windows volta
-na hora.
+### How to quit
+Right-click an empty spot on the dock → **Sair do ArcDockWin** (Quit ArcDockWin). The Windows taskbar comes back
+immediately.
 
-> Se algo der errado e a barra do Windows não voltar, abra o ArcDockWin de novo e saia pelo menu, ou reinicie o
-> Explorer (Gerenciador de Tarefas → Windows Explorer → Reiniciar).
+> If something goes wrong and the Windows taskbar does not come back, open ArcDockWin again and quit from the menu,
+> or restart Explorer (Task Manager → Windows Explorer → Restart).
 
-### Configuração
-Tudo fica em `%APPDATA%\ArcDockWin\`:
+### Configuration
+Everything lives in `%APPDATA%\ArcDockWin\`:
 
-| Arquivo | O que guarda |
+| File | What it stores |
 | --- | --- |
-| `pinned.txt` | Apps fixados na dock, um caminho por linha (pode editar à mão). |
-| `icons.txt` | Ícones trocados por app (`nome.exe=C:\caminho\icone.ico`), veja abaixo. |
-| `colors.db` | Cor de cada app na barra do topo e quais ícones da bandeja ficam visíveis (SQLite). |
+| `pinned.txt` | Apps pinned to the dock, one path per line (you can edit it by hand). |
+| `icons.txt` | Per-app icon overrides (`name.exe=C:\path\icon.ico`), see below. |
+| `colors.db` | Each app's colour on the top bar and which tray icons are visible (SQLite). |
 
-## 🎨 Ícones do macOS (MacTahoe)
+## 🎨 macOS icons (MacTahoe)
 
-A dock usa o ícone do próprio app por padrão. Para deixar tudo com cara de Mac, a pasta [`icons/`](icons) tem dois
-scripts que aplicam o tema [**MacTahoe**](https://github.com/vinceliuice/MacTahoe-icon-theme) de
-[vinceliuice](https://github.com/vinceliuice) na dock **e no Windows inteiro**: atalhos da área de trabalho e do menu
-Iniciar, pastas comuns e conhecidas do Explorer (Área de Trabalho, Documentos, Downloads, Imagens, Música e Vídeos),
-discos, Lixeira e Este Computador. O script usa os pontos de personalização do Windows Shell e salva um backup para
-restaurar as associações originais.
+The dock uses each app's own icon by default. To give everything a Mac look, the [`icons/`](icons) folder has two
+scripts that apply the [**MacTahoe**](https://github.com/vinceliuice/MacTahoe-icon-theme) theme by
+[vinceliuice](https://github.com/vinceliuice) to the dock **and to all of Windows**: desktop and Start menu
+shortcuts, well-known Explorer folders (Desktop, Documents, Downloads, Pictures, Music and Videos), drives, Recycle
+Bin and This PC. The script uses Windows Shell customisation points and saves a backup so the original associations
+can be restored.
 
-![Ícones MacTahoe](docs/screenshots/icones.png)
+![MacTahoe icons](docs/screenshots/icones.png)
 
-### 1. Instale o ImageMagick
+### 1. Install ImageMagick
 
 ```powershell
 winget install ImageMagick.ImageMagick
 ```
 
-Depois **feche e abra o terminal** para o comando `magick` passar a existir.
+Then **close and reopen the terminal** so the `magick` command exists.
 
-### 2. Baixe e converta os ícones
+### 2. Download and convert the icons
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\icons\Converter.ps1
 ```
 
-O script baixa o tema, converte os ~1400 ícones de SVG para `.ico` (leva cerca de 1 minuto) e monta tudo em
-`C:\Icones\MacTahoe`:
+The script downloads the theme, converts the ~1400 icons from SVG to `.ico` (about 1 minute) and builds everything
+in `C:\Icones\MacTahoe`:
 
 ```
 C:\Icones\MacTahoe\
-├── apps\          ícones de apps (google-chrome.ico, spotify.ico, …)
-├── sistema\       pastas, Lixeira, discos e Este Computador
-├── aliases.txt    nomes alternativos de cada ícone
+├── apps\          app icons (google-chrome.ico, spotify.ico, …)
+├── sistema\       folders, Recycle Bin, drives and This PC
+├── aliases.txt    alternative names for each icon
 └── IconesTahoe.ps1
 ```
 
-> Use essa pasta: os ícones da Lixeira e de Downloads da dock são lidos de `C:\Icones\MacTahoe\sistema`.
+> Use that folder: the dock's Trash and Downloads icons are read from `C:\Icones\MacTahoe\sistema`.
 
-### 3. Aplique
+### 3. Apply
 
 ```powershell
 cd C:\Icones\MacTahoe
-powershell -ExecutionPolicy Bypass -File .\IconesTahoe.ps1 -Testar     # só mostra qual ícone cada atalho vai ganhar
-powershell -ExecutionPolicy Bypass -File .\IconesTahoe.ps1 -Instalar   # aplica e fica na bandeja
+powershell -ExecutionPolicy Bypass -File .\IconesTahoe.ps1 -Testar     # only shows which icon each shortcut will get
+powershell -ExecutionPolicy Bypass -File .\IconesTahoe.ps1 -Instalar   # applies and stays in the tray
 ```
 
-O `-Instalar` pede permissão de administrador (pastas e discos são configurações do sistema) e cria uma tarefa
-agendada que abre o **Ícones Tahoe** na bandeja a cada logon. Ele reaplica os ícones de tempos em tempos, para pegar
-apps novos e atalhos que as atualizações recriam. Pelo menu da bandeja dá para:
+`-Instalar` asks for administrator permission (folders and drives are system settings) and creates a scheduled task
+that opens **Ícones Tahoe** in the tray at every logon. It re-applies the icons from time to time, to catch new apps
+and shortcuts that updates recreate. From the tray menu you can:
 
-- **Aplicar agora** (ou dar dois cliques no ícone);
-- escolher o intervalo em **Aplicar automaticamente** (1 h a 24 h, ou desligado);
-- **Restaurar ícones do Windows**.
+- **Apply now** (or double-click the icon);
+- choose the interval under **Apply automatically** (1 h to 24 h, or off);
+- **Restore Windows icons**.
 
-A dock recebe os ícones pelo arquivo `%APPDATA%\ArcDockWin\icons.txt`, que o script escreve. O botão Iniciar ganha
-o ícone de grade de apps.
+The dock gets the icons through `%APPDATA%\ArcDockWin\icons.txt`, which the script writes. The Start button gets
+the app-grid icon.
 
-### Ícone errado ou faltando?
+### Wrong or missing icon?
 
-O tema é feito para Linux, então o script procura o ícone pelo nome do `.exe`, pelo nome do atalho e pelos aliases do
-tema. Quando o nome do programa no Windows não bate, adicione uma linha na tabela `$Extra` no começo do
+The theme was made for Linux, so the script looks for the icon by the `.exe` name, by the shortcut name and by the
+theme's aliases. When a program's name on Windows does not match, add a line to the `$Extra` table at the top of
 `IconesTahoe.ps1`:
 
 ```powershell
 $Extra = @{
-  msedge = 'microsoft-edge'   # nome do .exe (sem .exe) = nome do ícone em apps\ (sem .ico)
+  msedge = 'microsoft-edge'   # .exe name (without .exe) = icon name in apps\ (without .ico)
   code   = 'visual-studio-code'
   # ...
 }
 ```
 
-Para trocar o ícone de um único app na dock, sem script, edite `%APPDATA%\ArcDockWin\icons.txt`:
+To change the icon of a single app on the dock, without the script, edit `%APPDATA%\ArcDockWin\icons.txt`:
 
 ```
 spotify.exe=C:\Icones\MacTahoe\apps\spotify.ico
 ```
 
-### Desfazer
+### Undo
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\Icones\MacTahoe\IconesTahoe.ps1 -Desinstalar
 ```
 
-Isso volta todos os ícones originais (o script guarda um backup do que trocou) e remove a tarefa agendada.
+This brings back all the original icons (the script keeps a backup of what it changed) and removes the scheduled
+task.
 
-## 🛠️ Como funciona
+## 🛠️ How it works
 
-| Parte | Tecnologia |
+| Part | Technology |
 | --- | --- |
-| Desenho | [tiny-skia](https://github.com/RazrFalcon/tiny-skia) + Direct2D/DirectWrite, janelas em camadas (`UpdateLayeredWindow`) |
-| Vidro | `Windows.UI.Composition` (backdrop do DWM) |
-| Reserva de espaço | AppBar (`SHAppBarMessage`) |
-| Janelas e foco | `SetWinEventHook` e `RegisterShellHookWindow` |
-| Mídia | `Windows.Media.Control` (GSMTC) |
-| Brilho | DDC/CI (`dxva2`) |
-| Cores e bandeja | SQLite do próprio Windows (`winsqlite3.dll`) |
+| Drawing | [tiny-skia](https://github.com/RazrFalcon/tiny-skia) + Direct2D/DirectWrite, layered windows (`UpdateLayeredWindow`) |
+| Glass | `Windows.UI.Composition` (DWM backdrop) |
+| Space reservation | AppBar (`SHAppBarMessage`) |
+| Windows and focus | `SetWinEventHook` and `RegisterShellHookWindow` |
+| Media | `Windows.Media.Control` (GSMTC) |
+| Brightness | DDC/CI (`dxva2`) |
+| Colours and tray | Windows' own SQLite (`winsqlite3.dll`) |
 
-## 🙏 Créditos
+## 🙏 Credits
 
-- Ícones: [MacTahoe icon theme](https://github.com/vinceliuice/MacTahoe-icon-theme) por vinceliuice (GPL-3.0). Eles não
-  vêm neste repositório: o `Converter.ps1` baixa direto do projeto original.
-- Ideia da rede de segurança da barra de tarefas: [Lemxy/WinRust](https://github.com/Lemxy/WinRust).
-- Inspirado no macOS. Não é afiliado à Apple.
+- Icons: [MacTahoe icon theme](https://github.com/vinceliuice/MacTahoe-icon-theme) by vinceliuice (GPL-3.0). They
+  are not part of this repository: `Converter.ps1` downloads them straight from the original project.
+- Traditional Chinese translation and Explorer folder icons: [popuchoco](https://github.com/popuchoco)
+  ([#1](https://github.com/claudsondouglas/ArcDockWin/pull/1)). Thank you!
+- Idea for the taskbar safety net: [Lemxy/WinRust](https://github.com/Lemxy/WinRust).
+- Inspired by macOS. Not affiliated with Apple.
 
-## 📄 Licença
+## 📄 License
 
-[MIT](LICENSE). Os ícones MacTahoe, baixados à parte pelo `Converter.ps1`, seguem a licença GPL-3.0 do projeto original.
+[MIT](LICENSE). The MacTahoe icons, downloaded separately by `Converter.ps1`, follow the GPL-3.0 license of the
+original project.
