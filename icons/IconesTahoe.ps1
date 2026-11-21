@@ -10,6 +10,24 @@ $ConfigFile = Join-Path $Base 'config.json'
 $TaskName   = 'Icones Tahoe'
 $DockPinned = "$env:APPDATA\ArcDockWin\pinned.txt"
 $DockIcons  = "$env:APPDATA\ArcDockWin\icons.txt"
+$UseZhTw    = [Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'zh'
+$UiText = @{
+  'Ícones Tahoe' = 'Tahoe 圖示'
+  'Aplicar agora' = '立即套用'
+  'Aplicar automaticamente' = '自動套用'
+  'Desligado' = '關閉'
+  'A cada 1 hora' = '每 1 小時'
+  'Restaurar ícones do Windows' = '還原 Windows 圖示'
+  'Sair' = '結束'
+  'aplicando...' = '正在套用…'
+  'atalho(s) trocado(s)' = '個捷徑已更新'
+  'com erro' = '個失敗'
+  'Ícones originais do Windows restaurados' = '已還原 Windows 原始圖示'
+}
+function Get-UiText([string]$Text) {
+  if ($UseZhTw -and $UiText.ContainsKey($Text)) { return $UiText[$Text] }
+  return $Text
+}
 
 # Executáveis do Windows cujo nome não bate com os nomes do tema (que é de Linux)
 $Extra = @{
@@ -21,7 +39,19 @@ $Extra = @{
   notepad = 'accessories-text-editor'; charmap = 'accessories-character-map'
   mstsc = 'remote-desktop'; cleanmgr = 'accessories-system-cleaner'; dfrgui = 'gnome-disks'
   zapfast = 'whatsapp'; osk = 'preferences-desktop-keyboard'; msconfig = 'preferences-system'; msinfo32 = 'preferences-system'
+  firefox = 'firefox'; outlook = 'ms-outlook'; winword = 'ms-word'; excel = 'ms-excel'
+  powerpnt = 'ms-powerpoint'; onenote = 'ms-onenote'; discord = 'discord'; obsidian = 'obsidian'
 }
+
+# CLSIDs de pastas conhecidas: o Explorer mostra ícones distintos para cada localização.
+$ExplorerFolders = @(
+  @{ Id = '{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}'; Icon = 'user-desktop' },
+  @{ Id = '{d3162b92-9365-467a-956b-92703aca08af}'; Icon = 'folder-documents' },
+  @{ Id = '{374DE290-123F-4565-9164-39C4925E467B}'; Icon = 'folder-download' },
+  @{ Id = '{24ad3ad4-a569-4530-98e1-ab02f9417aa8}'; Icon = 'folder-images' },
+  @{ Id = '{3dfdf296-dbec-4fb4-81d1-6a3438bcf4de}'; Icon = 'folder-music' },
+  @{ Id = '{f86fa3ab-70d2-4fc7-9c99-fcbf05467f3a}'; Icon = 'folder-videos' }
+)
 
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 
@@ -110,6 +140,15 @@ function Invoke-Aplicar([switch]$SoTestar) {
   Set-Reg $b $lix '(default)' "$Sis\user-trash-full.ico,0"
   Set-Reg $b $lix 'Empty' "$Sis\user-trash.ico,0"
   Set-Reg $b $lix 'Full' "$Sis\user-trash-full.ico,0"
+  # File Explorer: Downloads, Desktop, Documents, Pictures, Music and Videos use
+  # individual Tahoe icons; these are per-user shell overrides and are backed up too.
+  foreach ($folder in $ExplorerFolders) {
+    $icon = Join-Path $Sis "$($folder.Icon).ico"
+    if (Test-Path $icon) {
+      $key = "HKCU:\Software\Classes\CLSID\$($folder.Id)\DefaultIcon"
+      Set-Reg $b $key '(default)' "$icon,0"
+    }
+  }
   $si = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Icons'
   Set-Reg $b $si '3' "$Sis\folder.ico,0"
   Set-Reg $b $si '4' "$Sis\folder-open.ico,0"
@@ -137,6 +176,10 @@ function Invoke-Aplicar([switch]$SoTestar) {
 
   Save-Backup $b
   Update-Explorer
+  if ($UseZhTw) {
+    $suffix = if ($erros) { ", $erros $($UiText['com erro'])" } else { '' }
+    return "$trocados $($UiText['atalho(s) trocado(s)'])$suffix"
+  }
   "{0} atalho(s) trocado(s){1}" -f $trocados, $(if ($erros) { ", $erros com erro" } else { '' })
 }
 
@@ -153,7 +196,7 @@ function Invoke-Restaurar {
   }
   Remove-Item $BackupFile, $DockIcons -ErrorAction SilentlyContinue
   Update-Explorer
-  'Ícones originais do Windows restaurados'
+  Get-UiText 'Ícones originais do Windows restaurados'
 }
 
 if ($Testar) { Invoke-Aplicar -SoTestar; return }
@@ -192,15 +235,15 @@ if (Test-Path $ConfigFile) { $horas = (Get-Content $ConfigFile -Raw | ConvertFro
 
 $tray = New-Object Windows.Forms.NotifyIcon
 $tray.Icon = New-Object Drawing.Icon (Join-Path $Apps 'preferences-desktop-icons.ico')
-$tray.Text = 'Ícones Tahoe'
+$tray.Text = Get-UiText 'Ícones Tahoe'
 $tray.Visible = $true
 $timer = New-Object Windows.Forms.Timer
 
 function Aplicar-Agora {
-  $tray.Text = 'Ícones Tahoe: aplicando...'
+  $tray.Text = "$(Get-UiText 'Ícones Tahoe'): $(Get-UiText 'aplicando...')"
   $msg = Invoke-Aplicar
-  $tray.Text = 'Ícones Tahoe'
-  $tray.ShowBalloonTip(3000, 'Ícones Tahoe', $msg, 'Info')
+  $tray.Text = Get-UiText 'Ícones Tahoe'
+  $tray.ShowBalloonTip(3000, (Get-UiText 'Ícones Tahoe'), $msg, 'Info')
 }
 
 function Set-Intervalo($h) {
@@ -212,10 +255,10 @@ function Set-Intervalo($h) {
 }
 
 $menu = New-Object Windows.Forms.ContextMenuStrip
-$menu.Items.Add('Aplicar agora', $null, { Aplicar-Agora }) | Out-Null
-$menuIntervalo = New-Object Windows.Forms.ToolStripMenuItem 'Aplicar automaticamente'
+$menu.Items.Add((Get-UiText 'Aplicar agora'), $null, { Aplicar-Agora }) | Out-Null
+$menuIntervalo = New-Object Windows.Forms.ToolStripMenuItem (Get-UiText 'Aplicar automaticamente')
 foreach ($h in 1, 3, 6, 12, 24, 0) {
-  $txt = if ($h -eq 0) { 'Desligado' } elseif ($h -eq 1) { 'A cada 1 hora' } else { "A cada $h horas" }
+  $txt = if ($h -eq 0) { Get-UiText 'Desligado' } elseif ($h -eq 1) { Get-UiText 'A cada 1 hora' } elseif ($UseZhTw) { "每 $h 小時" } else { "A cada $h horas" }
   $it = New-Object Windows.Forms.ToolStripMenuItem $txt
   $it.Tag = $h
   $it.Add_Click({ param($s) Set-Intervalo $s.Tag })
@@ -223,11 +266,11 @@ foreach ($h in 1, 3, 6, 12, 24, 0) {
 }
 $menu.Items.Add($menuIntervalo) | Out-Null
 $menu.Items.Add('-') | Out-Null
-$menu.Items.Add('Restaurar ícones do Windows', $null, {
+$menu.Items.Add((Get-UiText 'Restaurar ícones do Windows'), $null, {
   $timer.Stop(); foreach ($i in $menuIntervalo.DropDownItems) { $i.Checked = $false }
-  $tray.ShowBalloonTip(3000, 'Ícones Tahoe', (Invoke-Restaurar), 'Info')
+  $tray.ShowBalloonTip(3000, (Get-UiText 'Ícones Tahoe'), (Invoke-Restaurar), 'Info')
 }) | Out-Null
-$menu.Items.Add('Sair', $null, { $timer.Stop(); $tray.Visible = $false; [Windows.Forms.Application]::Exit() }) | Out-Null
+$menu.Items.Add((Get-UiText 'Sair'), $null, { $timer.Stop(); $tray.Visible = $false; [Windows.Forms.Application]::Exit() }) | Out-Null
 $tray.ContextMenuStrip = $menu
 $tray.Add_MouseDoubleClick({ Aplicar-Agora })
 $timer.Add_Tick({ Aplicar-Agora })

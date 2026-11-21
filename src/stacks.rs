@@ -136,11 +136,13 @@ const MENU_EMPTY: usize = 2;
 pub fn context_menu(hwnd: HWND, source: &str, anchor: POINT) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Abrir"));
+        let open = HSTRING::from(crate::i18n::tr("Abrir"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, &open);
         if source == TRASH {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let flags = if trash_full() { MF_STRING } else { MF_STRING | windows::Win32::UI::WindowsAndMessaging::MF_GRAYED };
-            let _ = AppendMenuW(menu, flags, MENU_EMPTY, w!("Esvaziar Lixeira"));
+            let empty = HSTRING::from(crate::i18n::tr("Esvaziar Lixeira"));
+            let _ = AppendMenuW(menu, flags, MENU_EMPTY, &empty);
         }
         let _ = SetForegroundWindow(hwnd);
         let flags = TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_CENTERALIGN;

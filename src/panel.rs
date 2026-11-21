@@ -97,7 +97,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_DOWN, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
 
 use crate::glass;
@@ -242,6 +242,38 @@ pub enum CellStyle {
     Dim,
     /// Círculo na cor de destaque (ex.: hoje).
     Accent,
+}
+
+fn localize_widgets(widgets: &mut [Widget]) {
+    let translate = |value: &mut String| *value = crate::i18n::tr(value);
+    for widget in widgets {
+        match widget {
+            Widget::Title(text) | Widget::Text(text) | Widget::Label(text) => translate(text),
+            Widget::Heading { text, .. } | Widget::Toggle { text, .. } | Widget::Button { text, .. } => translate(text),
+            Widget::Row { text, sub, .. } | Widget::RowBadge { text, sub, .. } => {
+                translate(text);
+                if let Some(text) = sub { translate(text); }
+            }
+            Widget::Field { placeholder, .. } | Widget::Search { placeholder, .. } => translate(placeholder),
+            Widget::Grid { cells, .. } => cells.iter_mut().for_each(|cell| translate(&mut cell.text)),
+            Widget::Footer { left, hints } => {
+                if let Some((_, text)) = left { translate(text); }
+                for (text, _) in hints { translate(text); }
+            }
+            Widget::Cards(cards) => {
+                for card in cards {
+                    match card {
+                        Card::Tile(tile) => { translate(&mut tile.title); translate(&mut tile.sub); }
+                        Card::Slider { title, .. } => translate(title),
+                        // Titles and artists come from the active player, not the UI.
+                        Card::Media { .. } => {}
+                    }
+                }
+            }
+            // App names, Wi-Fi SSIDs, and filenames are user/system content, not UI labels.
+            Widget::Icons { .. } | Widget::List { .. } | Widget::Slider { .. } | Widget::Separator => {}
+        }
+    }
 }
 
 /// O que o usuário fez num controle (o `u32` é o id dado no [`Widget`]).
@@ -625,6 +657,8 @@ impl Panel {
                 coll.as_ref().is_some_and(|f| f.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool())
             };
             let family = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
+            let locale = HSTRING::from(crate::i18n::text_locale());
+            let locale_ptr = PCWSTR::from_raw(locale.as_ptr());
             let format = |family: PCWSTR, weight: DWRITE_FONT_WEIGHT, size: f32| -> windows::core::Result<IDWriteTextFormat> {
                 let f = dwrite.CreateTextFormat(
                     family,
@@ -633,7 +667,7 @@ impl Panel {
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
                     size * scale,
-                    w!("pt-BR"),
+                    locale_ptr,
                 )?;
                 f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
@@ -743,7 +777,8 @@ impl Panel {
     /// Pede os controles ao conteúdo, refaz o layout e redesenha.
     fn rebuild(&mut self) {
         let s = self.scale;
-        let widgets = self.content.build();
+        let mut widgets = self.content.build();
+        localize_widgets(&mut widgets);
 
         // Campos de texto: mantém o texto dos que continuam; o primeiro novo ganha o foco.
         let ids: Vec<u32> =
@@ -1678,6 +1713,11 @@ pub fn any_open() -> bool {
 #[allow(dead_code)]
 pub fn refresh() {
     with_panel(|p| p.rebuild());
+}
+
+/// Rebuild an open panel after a Windows UI-language change.
+pub fn language_changed() {
+    refresh();
 }
 
 /// Repassa uma mensagem ao conteúdo aberto ([`PanelContent::notify`]).

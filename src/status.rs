@@ -32,14 +32,18 @@ pub fn clock() -> (String, u32) {
     const MONTHS: [&str; 12] =
         ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
     let t = unsafe { GetLocalTime() };
-    let text = format!(
-        "{} {} {}  {:02}:{:02}",
-        DAYS[t.wDayOfWeek as usize % 7],
-        t.wDay,
-        MONTHS[(t.wMonth as usize + 11) % 12],
-        t.wHour,
-        t.wMinute
-    );
+    let text = if crate::i18n::is_traditional_chinese() {
+        format!("{}月{}日  {:02}:{:02}", t.wMonth, t.wDay, t.wHour, t.wMinute)
+    } else {
+        format!(
+            "{} {} {}  {:02}:{:02}",
+            DAYS[t.wDayOfWeek as usize % 7],
+            t.wDay,
+            MONTHS[(t.wMonth as usize + 11) % 12],
+            t.wHour,
+            t.wMinute
+        )
+    };
     // Um pouco depois da virada, para não acordar ainda no minuto anterior.
     let ms = (60 - t.wSecond as u32 % 60) * 1000 - (t.wMilliseconds as u32).min(999) + 20;
     (text, ms)

@@ -36,7 +36,7 @@ use windows::Win32::UI::Shell::{
     APPBARDATA, SHAppBarMessage, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
 
 use crate::glass;
@@ -221,6 +221,8 @@ impl Bar {
                 fonts.as_ref().is_some_and(|f| f.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool())
             };
             let family = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
+            let locale = HSTRING::from(crate::i18n::text_locale());
+            let locale_ptr = PCWSTR::from_raw(locale.as_ptr());
             let format = |family: PCWSTR, size: f32| -> windows::core::Result<IDWriteTextFormat> {
                 let f = dwrite.CreateTextFormat(
                     family,
@@ -229,7 +231,7 @@ impl Bar {
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
                     size * scale,
-                    w!("pt-BR"),
+                    locale_ptr,
                 )?;
                 f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
@@ -713,6 +715,12 @@ fn update_clock() {
     let (text, ms) = status::clock();
     unsafe { SetTimer(Some(MAIN.get()), TIMER_CLOCK, ms, None) };
     for_bars(|b| b.set_clock(&text));
+}
+
+/// Repaint date labels and any open panel after a Windows UI-language change.
+pub fn language_changed() {
+    update_clock();
+    panel::language_changed();
 }
 
 fn update_stats() {
