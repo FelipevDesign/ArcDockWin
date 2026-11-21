@@ -2,6 +2,8 @@
 
 # ArcDockWin
 
+[繁體中文說明](README.zh-TW.md)
+
 **Dock e barra de menus no estilo do macOS para o Windows 11, em Rust.**
 
 Leve (um único `.exe`, sem runtime), nativo (Win32 + Direct2D + Composition) e feito para
@@ -100,7 +102,9 @@ Tudo fica em `%APPDATA%\ArcDockWin\`:
 A dock usa o ícone do próprio app por padrão. Para deixar tudo com cara de Mac, a pasta [`icons/`](icons) tem dois
 scripts que aplicam o tema [**MacTahoe**](https://github.com/vinceliuice/MacTahoe-icon-theme) de
 [vinceliuice](https://github.com/vinceliuice) na dock **e no Windows inteiro**: atalhos da área de trabalho e do menu
-Iniciar, pastas, discos, Lixeira e Este Computador.
+Iniciar, pastas comuns e conhecidas do Explorer (Área de Trabalho, Documentos, Downloads, Imagens, Música e Vídeos),
+discos, Lixeira e Este Computador. O script usa os pontos de personalização do Windows Shell e salva um backup para
+restaurar as associações originais.
 
 ![Ícones MacTahoe](docs/screenshots/icones.png)
 

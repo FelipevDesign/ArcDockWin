@@ -10,6 +10,7 @@ mod brightness;
 mod calendar;
 mod glass;
 mod guard;
+mod i18n;
 mod launcher;
 mod media;
 mod panel;
@@ -682,21 +683,23 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
                 }
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             }
-            let pin = if *pinned { w!("Desafixar do dock") } else { w!("Fixar no dock") };
-            let _ = AppendMenuW(menu, MF_STRING, MENU_PIN, pin);
+            let pin = HSTRING::from(crate::i18n::tr(if *pinned { "Desafixar do dock" } else { "Fixar no dock" }));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_PIN, &pin);
             match windows.len() {
                 0 => {}
                 1 => {
-                    let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, w!("Fechar janela"));
+                    let text = HSTRING::from(crate::i18n::tr("Fechar janela"));
+                    let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, &text);
                 }
                 n => {
-                    let text = HSTRING::from(format!("Fechar {n} janelas"));
+                    let text = HSTRING::from(crate::i18n::tr(&format!("Fechar {n} janelas")));
                     let _ = AppendMenuW(menu, MF_STRING, MENU_CLOSE, &text);
                 }
             }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
-        let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair do ArcDockWin"));
+        let quit = HSTRING::from(crate::i18n::tr("Sair do ArcDockWin"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, &quit);
 
         let (pt, align) = match anchor {
             Some(p) => (p, TPM_CENTERALIGN),
@@ -798,6 +801,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         d.nudge_glass();
                     },
                     TIMER_REFRESH => {
+                        if i18n::refresh_language() {
+                            topbar::language_changed();
+                            d.redraw();
+                        }
                         taskbar::ensure_hidden();
                         if d.refresh() {
                             d.redraw();
@@ -943,6 +950,7 @@ fn main() -> windows::core::Result<()> {
     if guard::run_if_requested() {
         return Ok(());
     }
+    i18n::initialize();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

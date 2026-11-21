@@ -53,17 +53,28 @@ impl PanelContent for Calendar {
     fn build(&mut self) -> Vec<Widget> {
         let t = unsafe { GetLocalTime() };
         let (ty, tm, td) = (t.wYear as i32, t.wMonth as u32, t.wDay as u32);
-        let title = format!(
-            "{}, {} de {} de {}",
-            DAYS[weekday(ty, tm, td)],
-            td,
-            MONTHS[tm as usize - 1],
-            ty
-        );
+        let title = if crate::i18n::is_traditional_chinese() {
+            const DAYS_ZH: [&str; 7] = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+            format!("{ty}年{tm}月{td}日 {}", DAYS_ZH[weekday(ty, tm, td)])
+        } else {
+            format!(
+                "{}, {} de {} de {}",
+                DAYS[weekday(ty, tm, td)],
+                td,
+                MONTHS[tm as usize - 1],
+                ty
+            )
+        };
 
         let (y, m) = (self.year, self.month);
-        let mut cells: Vec<Cell> =
-            SHORT.iter().map(|d| Cell { text: (*d).into(), style: CellStyle::Header, id: None }).collect();
+        let mut cells: Vec<Cell> = if crate::i18n::is_traditional_chinese() {
+            ["日", "一", "二", "三", "四", "五", "六"]
+                .iter()
+                .map(|d| Cell { text: (*d).into(), style: CellStyle::Header, id: None })
+                .collect()
+        } else {
+            SHORT.iter().map(|d| Cell { text: (*d).into(), style: CellStyle::Header, id: None }).collect()
+        };
         // Sempre 6 semanas (a altura não muda ao trocar de mês), com os dias vizinhos apagados.
         let first = weekday(y, m, 1) as u32;
         let (py, pm) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
@@ -82,10 +93,15 @@ impl PanelContent for Calendar {
             cells.push(Cell { text: text.to_string(), style, id: None });
         }
 
+        let month_title = if crate::i18n::is_traditional_chinese() {
+            format!("{y}年{m}月")
+        } else {
+            format!("{} de {}", MONTHS[m as usize - 1], y)
+        };
         vec![
             Widget::Title(title),
             Widget::Heading {
-                text: format!("{} de {}", MONTHS[m as usize - 1], y),
+                text: month_title,
                 buttons: vec![(glyph::CHEVRON_LEFT, PREV), (glyph::CHEVRON_RIGHT, NEXT)],
             },
             Widget::Grid { cols: 7, cells },

@@ -23,17 +23,17 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(scale: f32) -> Self {
-        let (base, gap) = (48.0 * scale, 8.0 * scale);
+        let (base, gap) = (48.0 * scale, 9.0 * scale);
         Self {
             base,
-            max: base * 1.25,
+            max: base * 1.35,
             gap,
-            sep: 9.0 * scale, // 8 px + linha de 1 px: 8 px de cada lado da linha
+            sep: 10.0 * scale, // espaçamento simétrico em torno do divisor
             pad: 8.0 * scale,
             margin: 6.0 * scale,
             range: 2.0 * (base + gap), // 2 slots de cada lado
-            radius: 18.0 * scale,
-            dot: 2.0 * scale,
+            radius: 20.0 * scale,
+            dot: 1.7 * scale,
         }
     }
 
@@ -54,9 +54,9 @@ pub struct Theme {
 impl Theme {
     pub fn new(light: bool, accent: Option<[u8; 4]>) -> Self {
         let (tint, border, dot, divider) = if light {
-            ([250, 250, 252, 120], [255, 255, 255, 150], [0, 0, 0, 170], [0, 0, 0, 45])
+            ([250, 250, 252, 108], [255, 255, 255, 178], [0, 0, 0, 170], [0, 0, 0, 45])
         } else {
-            ([40, 40, 44, 130], [255, 255, 255, 45], [255, 255, 255, 210], [255, 255, 255, 60])
+            ([40, 40, 44, 116], [255, 255, 255, 58], [255, 255, 255, 210], [255, 255, 255, 60])
         };
         Self { tint, border, dot, divider, accent: accent.unwrap_or(dot) }
     }
@@ -188,15 +188,15 @@ pub fn draw(
                 pm.fill_path(&badge, &solid([255, 59, 48, 255]), FillRule::Winding, id, None);
             }
         }
-        // Um pontinho por janela (até 3), centralizados; no app em foco, na cor de destaque.
-        let n = app.windows.len().min(3);
-        let color = if focus == Some(i) { theme.accent } else { theme.dot };
-        let step = m.dot * 4.0; // 2× o diâmetro entre os centros
-        let x0 = sx + slot.size / 2.0 - step * (n as f32 - 1.0) / 2.0;
-        let cy = icon_bottom + m.pad / 2.0 + 0.5;
-        for k in 0..n {
-            if let Some(dot) = PathBuilder::from_circle(x0 + k as f32 * step, cy, m.dot) {
-                pm.fill_path(&dot, &solid(color), FillRule::Winding, id, None);
+        // macOS-style single running-app indicator; the focused app uses the system accent.
+        if !app.windows.is_empty() {
+            let color = if focus == Some(i) { theme.accent } else { theme.dot };
+            let w = m.dot * 3.6;
+            let h = m.dot * 1.5;
+            let x = sx + slot.size / 2.0 - w / 2.0;
+            let y = icon_bottom + m.pad / 2.0 + 0.5 - h / 2.0;
+            if let Some(indicator) = rounded_rect(x, y, w, h, h / 2.0) {
+                pm.fill_path(&indicator, &solid(color), FillRule::Winding, id, None);
             }
         }
     }
