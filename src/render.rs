@@ -127,6 +127,7 @@ pub fn draw(
     theme: &Theme,
     hover: f32,
     focus: Option<usize>,
+    fast: bool,
 ) {
     pm.fill(Color::TRANSPARENT);
     let Some((l, t, r, b)) = box_rect(slots, m, pm.height() as f32) else {
@@ -160,7 +161,9 @@ pub fn draw(
         }
     }
 
-    let icon_paint = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
+    // Bilinear nos quadros intermediários da animação (~2,5x mais barato); o quadro final sai em Bicubic.
+    let quality = if fast { FilterQuality::Bilinear } else { FilterQuality::Bicubic };
+    let icon_paint = PixmapPaint { quality, ..Default::default() };
     for (i, (slot, app)) in slots.iter().zip(apps).enumerate() {
         // Ícone arrastado: desenhado fora do lugar (o espaço dele continua no layout).
         let sx = slot.x + slot.dx;

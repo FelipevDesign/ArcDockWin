@@ -7,13 +7,15 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use tiny_skia::Pixmap;
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{HANDLE, HWND, POINT, RECT};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_UP};
 use windows::Win32::UI::Shell::{
-    FOLDERID_Downloads, KF_FLAG_DEFAULT, SHEmptyRecycleBinW, SHGetKnownFolderPath, SHQUERYRBINFO,
-    SHQueryRecycleBinW, ShellExecuteW,
+    FOLDERID_Downloads, FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, SHCNE_ALLEVENTS, SHCNRF_InterruptLevel,
+    SHCNRF_NewDelivery, SHCNRF_ShellLevel, SHChangeNotification_Lock, SHChangeNotification_Unlock,
+    SHChangeNotifyEntry, SHChangeNotifyRegister, SHEmptyRecycleBinW, SHGetKnownFolderIDList, SHGetKnownFolderPath,
+    SHQUERYRBINFO, SHQueryRecycleBinW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, MF_SEPARATOR, MF_STRING, SW_SHOWNORMAL, SetForegroundWindow,
@@ -60,9 +62,10 @@ impl Stacks {
     }
 
     /// Lixeira mudou de vazia para cheia (ou o contrário), ou os ícones do tema mudaram.
+    /// `trash`: consultar a Lixeira (~0,5 ms; só quando o shell avisou ou na varredura).
     /// Retorna true se precisa redesenhar.
-    pub fn refresh(&mut self, icons_changed: bool) -> bool {
-        let full = trash_full();
+    pub fn refresh(&mut self, icons_changed: bool, trash: bool) -> bool {
+        let full = if trash { trash_full() } else { self.trash_full };
         if full == self.trash_full && !icons_changed {
             return false;
         }
@@ -79,6 +82,27 @@ fn themed(name: &str, fallback: &str, size: i32) -> Option<Pixmap> {
         .then(|| load_icon(&ico.to_string_lossy(), size))
         .flatten()
         .or_else(|| load_icon(fallback, size))
+}
+
+/// Pede ao shell um aviso (`msg` em `hwnd`) a cada mudança na Lixeira.
+pub fn watch_trash(hwnd: HWND, msg: u32) {
+    unsafe {
+        // O PIDL fica vivo enquanto o registro existir (o processo todo).
+        let Ok(pidl) = SHGetKnownFolderIDList(&FOLDERID_RecycleBinFolder, 0, None) else { return };
+        let entry = SHChangeNotifyEntry { pidl, fRecursive: true.into() };
+        let sources = SHCNRF_ShellLevel | SHCNRF_InterruptLevel | SHCNRF_NewDelivery;
+        SHChangeNotifyRegister(hwnd, sources, SHCNE_ALLEVENTS.0 as i32, msg, 1, &entry);
+    }
+}
+
+/// Libera o aviso do shell (`wp`/`lp` da mensagem de `watch_trash`).
+pub fn trash_notified(wp: usize, lp: isize) {
+    unsafe {
+        let lock = SHChangeNotification_Lock(HANDLE(wp as _), lp as u32, None, None);
+        if !lock.is_invalid() {
+            let _ = SHChangeNotification_Unlock(lock);
+        }
+    }
 }
 
 fn trash_full() -> bool {
