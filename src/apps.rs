@@ -352,10 +352,10 @@ unsafe fn is_app_window(hwnd: HWND) -> bool {
         if GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid()) {
             return false;
         }
-        // As janelas do próprio dock (topbar, painéis...) não são apps.
+        // As janelas do próprio dock (topbar, painéis...) não são apps; a de Configurações é.
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+        if pid == windows::Win32::System::Threading::GetCurrentProcessId() && hwnd != crate::settings::hwnd() {
             return false;
         }
         if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
@@ -411,6 +411,7 @@ pub fn activate(source: &str, windows: &[HWND]) {
         let fg = GetForegroundWindow();
         match windows.iter().position(|&h| h == fg) {
             Some(_) if windows.len() == 1 => {
+                crate::minimize::capture(fg); // foto antes de sumir (animação até o ícone)
                 let _ = ShowWindow(fg, SW_MINIMIZE);
             }
             // Várias janelas: a próxima na ordem estável, em ciclo.

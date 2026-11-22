@@ -32,11 +32,34 @@ Windows taskbar in daily use.
 - Hides itself when a window touches it.
 - Follows the Windows **Dark/Light mode**.
 
+### Minimize animation
+Windows shrink into their app's icon on the dock with a **Genie** or **Scale** effect, fading out as they get close
+to the icon, at 60 fps. It works when you click a window's minimize button, press **Win+↓**, or click the app's
+icon on the dock to minimize it.
+
+To avoid a double animation, ArcDockWin turns off the native Windows minimize animation for the short moment its own
+animation runs. The original value is restored afterwards, when ArcDockWin quits, and by the watchdog if the dock
+crashes.
+
 ### Top bar
-- Shown on **every monitor** (the dock stays on the main one only).
+- Shown on **every monitor** by default (the dock stays on the main one only); can be limited to the main monitor.
 - **Takes the colour of the focused app** (10% darker, to separate the bar from the app), the moment you switch windows.
-- CPU and RAM on the left; clock in the centre, with a calendar when clicked.
-- Tray icons on the right, with a panel for hidden icons and a choice of which ones stay on the bar.
+- Built from **modules**: CPU/RAM, Clock, Tray and Control Center. Each one can be turned off, placed in the left,
+  centre or right zone, and ordered inside its zone.
+- Clock with a calendar when clicked; 24 h or 12 h, optional seconds and date.
+- Tray icons with a panel for hidden icons and a choice of which ones stay on the bar. When the bar runs out of
+  room, tray icons fold into the arrow on their own (your choice of visible icons is kept) and CPU/RAM is the last
+  thing to go.
+- The item whose panel is open stays highlighted.
+
+### Performance panel
+Click CPU/RAM on the top bar to see CPU, memory and GPU usage (with video memory) and the CPU and GPU temperatures,
+plus a button to open Task Manager. GPU and temperature readings only run while the panel is open.
+
+Temperatures depend on the hardware: the CPU temperature comes from the AMD library and only works on Ryzen APUs;
+the GPU temperature works on Radeon (AMD) and NVIDIA cards. Anything that cannot be read shows "—".
+
+![Performance panel](docs/screenshots/performance.png)
 
 ### Control Center
 macOS Tahoe look, with rounded cards:
@@ -44,11 +67,31 @@ macOS Tahoe look, with rounded cards:
 - **Now playing** (cover, title and buttons for any player that talks to Windows: Spotify, browser…).
 - **Brightness** through DDC/CI for the monitor of the bar you clicked, and **volume**.
 
+### Settings
+Right-click an empty spot on the dock → **Settings…** It opens as a normal window (title bar, Alt+Tab, icon on the
+dock) with a Mica background that follows the Windows light/dark theme. Changes apply immediately.
+
+| Page | Options |
+| --- | --- |
+| Dock | Icon size (32–72 px), magnification on hover on/off and its size (1.1×–2.0×), auto-hide, show Downloads and Trash |
+| Animations | Minimize animation on/off, Genie or Scale effect |
+| Top bar | Live preview of the bar; each module on/off, zone (Left/Centre/Right) and order (▲▼); clock format (24 h, seconds, date); show on all monitors |
+| General | Start with Windows; About |
+
+| Dock page (light) | Top bar page (dark) |
+| :---: | :---: |
+| ![Settings, Dock page](docs/screenshots/settings-dock.png) | ![Settings, Top bar page](docs/screenshots/settings-topbar.png) |
+
+The same bar with the clock moved to the left and CPU/RAM to the right:
+
+![Top bar with rearranged modules](docs/screenshots/topbar-modules.png)
+
 ### Languages
-ArcDockWin follows the Windows display language. Portuguese (Brazil) is the default; when Windows is set to
-Chinese, the built-in Traditional Chinese (Taiwan) pack is used. The language is re-checked while the app runs, so
-changing it needs no restart. The translation table is [`locales/zh-TW.tsv`](locales/zh-TW.tsv). Other languages
-are welcome through pull requests.
+ArcDockWin follows the Windows display language: Portuguese (Brazil), English and Traditional Chinese (Taiwan) are
+built in. Windows in Portuguese gets Portuguese, Windows in Chinese gets Traditional Chinese, and any other language
+falls back to English. The language is re-checked while the app runs, so changing it needs no restart. The
+translation tables are [`locales/en.tsv`](locales/en.tsv) and [`locales/zh-TW.tsv`](locales/zh-TW.tsv). Other
+languages are welcome through pull requests.
 
 ### Safety
 - The Windows taskbar stays hidden while ArcDockWin runs, even when Windows tries to show it again (when you take a
@@ -90,11 +133,10 @@ cargo build --release
 ```
 
 On the first run ArcDockWin registers itself to **start with Windows** (in `HKCU\...\Run`), pointing to the `.exe`
-where it currently is, so do not leave it in the Downloads folder.
+where it currently is, so do not leave it in the Downloads folder. You can turn this off in Settings → General.
 
 ### How to quit
-Right-click an empty spot on the dock → **Sair do ArcDockWin** (Quit ArcDockWin). The Windows taskbar comes back
-immediately.
+Right-click an empty spot on the dock → **Quit ArcDockWin**. The Windows taskbar comes back immediately.
 
 > If something goes wrong and the Windows taskbar does not come back, open ArcDockWin again and quit from the menu,
 > or restart Explorer (Task Manager → Windows Explorer → Restart).
@@ -107,6 +149,14 @@ Everything lives in `%APPDATA%\ArcDockWin\`:
 | `pinned.txt` | Apps pinned to the dock, one path per line (you can edit it by hand). |
 | `icons.txt` | Per-app icon overrides (`name.exe=C:\path\icon.ico`), see below. |
 | `colors.db` | Each app's colour on the top bar and which tray icons are visible (SQLite). |
+| `settings.txt` | Options from the Settings window (`key=value`, e.g. `icon_size=48`, `mod.clock=center,0,on`). Missing keys use the defaults. |
+| `animation.txt` | Minimize animation: `enabled=1` or `0`, `effect=genie` or `scale`. |
+
+### Known limitations
+- Apps that draw their own title bar (no standard minimize button) are detected by a heuristic, so clicking their
+  "_" may minimize without the animation. Win+↓ and the dock icon still animate.
+- Temperatures depend on the hardware and drivers (see the Performance panel above).
+- On a very narrow bar, tray icons and then CPU/RAM are hidden to make room.
 
 ## 🎨 macOS icons (MacTahoe)
 
@@ -205,6 +255,8 @@ task.
 | Media | `Windows.Media.Control` (GSMTC) |
 | Brightness | DDC/CI (`dxva2`) |
 | Colours and tray | Windows' own SQLite (`winsqlite3.dll`) |
+| Minimize animation | Low-level mouse/keyboard hooks to grab the window before it minimizes (no DLL injection) |
+| Performance | PDH counters, DXGI, AMD ADL (`atiadlxx.dll`) and NVIDIA NVML (`nvml.dll`), loaded only while the panel is open |
 
 ## 🙏 Credits
 

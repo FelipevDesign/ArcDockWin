@@ -31,11 +31,32 @@ substituir a barra de tarefas do Windows no dia a dia.
 - Esconde sozinha quando uma janela encosta nela.
 - Segue o **Modo Escuro/Claro** do Windows.
 
+### Animação ao minimizar
+As janelas encolhem até o ícone do app na dock com efeito **Gênio** ou **Escala**, sumindo aos poucos conforme
+chegam perto do ícone, a 60 fps. Funciona ao clicar no botão de minimizar da janela, no atalho **Win+↓** e ao clicar
+no ícone do app na dock para minimizá-lo.
+
+Para não ter animação dobrada, o ArcDockWin desliga a animação nativa de minimizar do Windows só durante a dele. O
+valor original volta logo depois, quando o ArcDockWin é fechado e também pelo vigia, se a dock travar.
+
 ### Barra do topo
-- Aparece em **todos os monitores** (a dock fica só no principal).
+- Aparece em **todos os monitores** por padrão (a dock fica só no principal); dá para deixar só no principal.
 - **Assume a cor do app em foco** (10% mais escura, para separar a barra do app), na hora em que você troca de janela.
-- CPU e RAM à esquerda; relógio no centro, com calendário ao clicar.
-- Ícones da bandeja à direita, com painel dos ícones ocultos e escolha de quais ficam na barra.
+- Montada em **módulos**: CPU/RAM, Relógio, Bandeja e Central de Controle. Cada um pode ser desligado, ir para a
+  zona da esquerda, do centro ou da direita e mudar de ordem dentro da zona.
+- Relógio com calendário ao clicar; 24 h ou 12 h, segundos e data opcionais.
+- Ícones da bandeja com painel dos ocultos e escolha de quais ficam na barra. Quando falta espaço, os ícones se
+  recolhem sozinhos para a seta (sem mudar a sua escolha) e o CPU/RAM é o último a sumir.
+- O item com o painel aberto fica destacado.
+
+### Painel Desempenho
+Clique no CPU/RAM da barra do topo para ver o uso de CPU, memória e GPU (com a memória de vídeo) e as temperaturas
+de CPU e GPU, com um botão para abrir o Gerenciador de Tarefas. GPU e temperatura só são lidas com o painel aberto.
+
+As temperaturas dependem do hardware: a da CPU vem da biblioteca da AMD e só funciona em APUs Ryzen; a da GPU
+funciona em placas Radeon (AMD) e NVIDIA. O que não dá para ler aparece como "—".
+
+![Painel Desempenho](docs/screenshots/performance.png)
 
 ### Central de Controle
 No visual do macOS Tahoe, com cartões arredondados:
@@ -43,10 +64,31 @@ No visual do macOS Tahoe, com cartões arredondados:
 - **Tocando agora** (capa, título e botões de qualquer player que fale com o Windows: Spotify, navegador…).
 - **Brilho** por DDC/CI do monitor onde está a barra que você clicou, e **volume**.
 
+### Configurações
+Botão direito num espaço vazio da dock → **Configurações…** Abre como uma janela normal (barra de título, Alt+Tab,
+ícone na dock), com fundo Mica que segue o tema claro/escuro do Windows. As mudanças valem na hora.
+
+| Página | Opções |
+| --- | --- |
+| Dock | Tamanho dos ícones (32–72 px), ampliação ao passar o mouse e o tamanho dela (1,1×–2,0×), ocultar automaticamente, mostrar Downloads e Lixeira |
+| Animações | Animação ao minimizar ligada/desligada, efeito Gênio ou Escala |
+| Barra do topo | Prévia da barra; cada módulo ligado/desligado, zona (Esquerda/Centro/Direita) e ordem (▲▼); relógio (24 h, segundos, data); mostrar em todos os monitores |
+| Geral | Iniciar com o Windows; Sobre |
+
+| Página Dock (tema claro) | Página Barra do topo (tema escuro) |
+| :---: | :---: |
+| ![Configurações, página Dock](docs/screenshots/settings-dock.png) | ![Configurações, página Barra do topo](docs/screenshots/settings-topbar.png) |
+
+A mesma barra com o relógio na esquerda e o CPU/RAM na direita:
+
+![Barra do topo com os módulos reorganizados](docs/screenshots/topbar-modules.png)
+
 ### Idiomas
-O ArcDockWin segue o idioma do Windows. Português (Brasil) é o padrão; com o Windows em chinês, usa o pacote
-embutido de chinês tradicional (Taiwan). O idioma é verificado enquanto o app roda, então trocar não exige reiniciar.
-A tabela de tradução está em [`locales/zh-TW.tsv`](locales/zh-TW.tsv). Outros idiomas são bem-vindos por pull request.
+O ArcDockWin segue o idioma do Windows e já vem em português (Brasil), inglês e chinês tradicional (Taiwan). Windows
+em português fica em português, em chinês fica em chinês tradicional, e qualquer outro idioma cai no inglês. O
+idioma é verificado enquanto o app roda, então trocar não exige reiniciar. As tabelas de tradução estão em
+[`locales/en.tsv`](locales/en.tsv) e [`locales/zh-TW.tsv`](locales/zh-TW.tsv). Outros idiomas são bem-vindos por
+pull request.
 
 ### Segurança
 - A barra de tarefas do Windows fica escondida enquanto o ArcDockWin roda, inclusive quando o Windows tenta
@@ -88,7 +130,7 @@ cargo build --release
 ```
 
 Na primeira execução o ArcDockWin se registra para **iniciar com o Windows** (em `HKCU\...\Run`), apontando para o
-`.exe` no lugar onde ele está: por isso, não deixe ele na pasta Downloads.
+`.exe` no lugar onde ele está: por isso, não deixe ele na pasta Downloads. Dá para desligar em Configurações → Geral.
 
 ### Como sair
 Clique com o botão direito num espaço vazio da dock → **Sair do ArcDockWin**. A barra de tarefas do Windows volta
@@ -105,6 +147,14 @@ Tudo fica em `%APPDATA%\ArcDockWin\`:
 | `pinned.txt` | Apps fixados na dock, um caminho por linha (pode editar à mão). |
 | `icons.txt` | Ícones trocados por app (`nome.exe=C:\caminho\icone.ico`), veja abaixo. |
 | `colors.db` | Cor de cada app na barra do topo e quais ícones da bandeja ficam visíveis (SQLite). |
+| `settings.txt` | Opções da janela de Configurações (`chave=valor`, ex.: `icon_size=48`, `mod.clock=center,0,on`). Chave ausente usa o padrão. |
+| `animation.txt` | Animação ao minimizar: `enabled=1` ou `0`, `effect=genie` ou `scale`. |
+
+### Limitações conhecidas
+- Apps que desenham a própria barra de título (sem o botão de minimizar padrão) são detectados por heurística, então
+  clicar no "_" deles pode minimizar sem animação. Win+↓ e o ícone da dock continuam animando.
+- As temperaturas dependem do hardware e dos drivers (veja o painel Desempenho acima).
+- Numa barra muito estreita, os ícones da bandeja e depois o CPU/RAM são escondidos para caber.
 
 ## 🎨 Ícones do macOS (MacTahoe)
 
@@ -202,6 +252,8 @@ Isso volta todos os ícones originais (o script guarda um backup do que trocou) 
 | Mídia | `Windows.Media.Control` (GSMTC) |
 | Brilho | DDC/CI (`dxva2`) |
 | Cores e bandeja | SQLite do próprio Windows (`winsqlite3.dll`) |
+| Animação ao minimizar | Ganchos de mouse e teclado de baixo nível para capturar a janela antes de minimizar (sem injetar DLL) |
+| Desempenho | Contadores PDH, DXGI, ADL da AMD (`atiadlxx.dll`) e NVML da NVIDIA (`nvml.dll`), carregados só com o painel aberto |
 
 ## 🙏 Créditos
 

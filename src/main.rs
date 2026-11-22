@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod animcfg;
 mod apps;
 mod attention;
 mod colordb;
+mod config;
 mod control;
 mod drag;
 mod bluetooth;
@@ -13,9 +15,12 @@ mod guard;
 mod i18n;
 mod launcher;
 mod media;
+mod minimize;
 mod panel;
+mod perf;
 mod power;
 mod render;
+mod settings;
 mod stacks;
 mod status;
 mod taskbar;
@@ -35,14 +40,14 @@ use tiny_skia::Pixmap;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, HDC, HGDIOBJ, ScreenToClient, SelectObject,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HDC, HGDIOBJ, ScreenToClient, SelectObject,
 };
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute};
 use windows::core::BOOL;
 use windows::Win32::Foundation::{FALSE, TRUE};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RegGetValueW, RegSetKeyValueW};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_DWORD, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
@@ -67,6 +72,7 @@ const HOVER_TIME: f32 = 0.14;
 const MENU_QUIT: usize = 1;
 const MENU_PIN: usize = 2;
 const MENU_CLOSE: usize = 3;
+const MENU_SETTINGS: usize = 4;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -129,24 +135,9 @@ impl Dock {
             // A barra do Windows fica escondida: o dock ocupa a base da tela.
             let (w, screen_h) = taskbar::screen_size();
             let h = m.window_height();
-
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits: *mut c_void = std::ptr::null_mut();
-            let dib = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-                .expect("CreateDIBSection");
+            let (dib, bits) = dib(w, h);
             let memdc = CreateCompatibleDC(None);
-            SelectObject(memdc, HGDIOBJ(dib.0));
+            SelectObject(memdc, dib);
 
             let icon_size = m.max.ceil() as i32;
             Self {
@@ -162,7 +153,7 @@ impl Dock {
                 theme: Theme::new(light_theme(), accent_color()),
                 pixmap: Pixmap::new(w as u32, h as u32).expect("pixmap"),
                 memdc,
-                bits: bits as *mut u8,
+                bits,
                 pos: POINT { x: 0, y: screen_h - h },
                 mx: 0.0,
                 mx_target: 0.0,
@@ -195,12 +186,44 @@ impl Dock {
 
     /// Separadores: fixados | abertos e apps | pilhas.
     fn seps(&self) -> Vec<usize> {
-        self.sep_after().into_iter().chain(self.apps.len().checked_sub(1)).collect()
+        let stacks = self.apps.len().checked_sub(1).filter(|_| !self.stack_items().is_empty());
+        self.sep_after().into_iter().chain(stacks).collect()
     }
 
     /// Quantos itens o dock desenha (apps e pilhas).
     fn count(&self) -> usize {
-        self.apps.len() + self.stacks.items.len()
+        self.apps.len() + self.stack_items().len()
+    }
+
+    /// Pilhas da ponta direita (nenhuma se desligadas nas Configurações).
+    fn stack_items(&self) -> &[App] {
+        if config::stacks() { &self.stacks.items } else { &[] }
+    }
+
+    /// Opções do dock mudaram (Configurações): refaz métricas, superfície e layout.
+    /// `reload`: recarrega os ícones no tamanho novo (no fim do arrasto do controle).
+    fn apply_settings(&mut self, reload: bool) {
+        self.m = Metrics::new(unsafe { GetDpiForWindow(self.hwnd) } as f32 / 96.0);
+        let (w, screen_h) = taskbar::screen_size();
+        let h = self.m.window_height();
+        if h as u32 != self.pixmap.height() {
+            let (dib, bits) = dib(w, h);
+            unsafe {
+                let _ = DeleteObject(SelectObject(self.memdc, dib));
+            }
+            self.bits = bits;
+            self.pixmap = Pixmap::new(w as u32, h as u32).expect("pixmap");
+            self.pos.y = screen_h - h;
+        }
+        let size = self.m.max.ceil() as i32;
+        if reload && size != self.icon_size {
+            self.icon_size = size;
+            apps::reload_icons(&mut self.apps, size);
+            self.stacks = stacks::Stacks::new(size);
+        }
+        self.glass_rect = None;
+        self.edge_tick();
+        self.redraw();
     }
 
     fn slots(&self) -> Vec<render::Slot> {
@@ -210,7 +233,7 @@ impl Dock {
 
     /// Pilha (source) sob o índice `i` e o ponto acima do ícone, se `i` for uma pilha.
     fn stack_at(&self, i: usize) -> Option<(String, POINT)> {
-        let s = self.stacks.items.get(i.checked_sub(self.apps.len())?)?;
+        let s = self.stack_items().get(i.checked_sub(self.apps.len())?)?;
         Some((s.source.clone(), self.menu_anchor(i)?))
     }
 
@@ -248,7 +271,8 @@ impl Dock {
         }
         let fg = HWND(LAST_FG.load(Ordering::Relaxed) as *mut c_void);
         let focus = self.apps.iter().position(|a| a.windows.contains(&fg));
-        let items: Vec<&App> = self.apps.iter().chain(&self.stacks.items).collect();
+        let stack: &[App] = if config::stacks() { &self.stacks.items } else { &[] };
+        let items: Vec<&App> = self.apps.iter().chain(stack).collect();
         render::draw(&mut self.pixmap, &slots, &seps, &items, &self.m, &self.theme, self.hover, focus);
         self.update_glass(render::box_rect(&slots, &self.m, self.pixmap.height() as f32));
 
@@ -412,7 +436,7 @@ impl Dock {
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
         let now = Instant::now();
-        if self.tracking || self.drag.busy() || MENU_OPEN.load(Ordering::Relaxed) || self.at_edge() || !self.covered() {
+        if !config::autohide() || self.tracking || self.drag.busy() || MENU_OPEN.load(Ordering::Relaxed) || minimize::busy() || self.at_edge() || !self.covered() {
             self.last_inside = Some(now);
         }
         // Aparecer é imediato; esconder espera a carência.
@@ -528,8 +552,54 @@ unsafe extern "system" fn cover_proc(hwnd: HWND, lp: LPARAM) -> BOOL {
     }
 }
 
+/// Bitmap 32 bits (BGRA) de `w` × `h` para a janela em camadas e os bytes dele.
+fn dib(w: i32, h: i32) -> (HGDIOBJ, *mut u8) {
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let dib = unsafe { CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }.expect("CreateDIBSection");
+    (HGDIOBJ(dib.0), bits as *mut u8)
+}
+
+/// Aplica as opções do dock mudadas nas Configurações (ver `Dock::apply_settings`).
+pub fn apply_settings(reload: bool) {
+    with_dock(|d| d.apply_settings(reload));
+}
+
 fn icons_mtime() -> Option<std::time::SystemTime> {
     std::fs::metadata(apps::icons_path()).and_then(|m| m.modified()).ok()
+}
+
+/// Destino da animação de minimizar (minimize.rs): quadrado do ícone do app dono de `win`
+/// na tela, com o dock em repouso. Faz o dock aparecer se estiver escondido.
+fn minimize_target(win: HWND) -> Option<RECT> {
+    with_dock(|d| {
+        d.edge_tick();
+        if !d.apps.iter().any(|a| a.windows.contains(&win)) && d.refresh() {
+            d.redraw();
+        }
+        let slots = d.slots();
+        let (l, _, r, b) = render::box_rect(&slots, &d.m, d.pixmap.height() as f32)?;
+        // Janela sem ícone no dock: vai para o meio dele.
+        let (x, size) = match d.apps.iter().position(|a| a.windows.contains(&win)).and_then(|i| slots.get(i)) {
+            Some(s) => (s.x, s.size),
+            None => ((l + r) as f32 / 2.0 - d.m.base / 2.0, d.m.base),
+        };
+        let bottom = d.pos.y + (b as f32 - d.m.pad).round() as i32;
+        let (x, size) = (d.pos.x + x.round() as i32, size.round() as i32);
+        Some(RECT { left: x, top: bottom - size, right: x + size, bottom })
+    })
+    .flatten()
 }
 
 fn with_dock<R>(f: impl FnOnce(&mut Dock) -> R) -> Option<R> {
@@ -558,7 +628,7 @@ fn start_tray() {
                 let mut icon = t.icon.or_else(|| tiny_skia::Pixmap::new(px, px))?;
                 grayscale(&mut icon);
                 let shown = colordb::tray_shown(&t.key).unwrap_or(true);
-                Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown })
+                Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown, visible: shown })
             })
             .collect();
         topbar::set_tray(icons);
@@ -587,11 +657,18 @@ fn start_tray() {
     }
 }
 
-/// Inicia com o Windows: grava o caminho deste exe em HKCU\...\Run (só se mudou).
-fn autostart() {
+/// Inicia com o Windows (opção das Configurações): ligado, grava o caminho deste exe em
+/// HKCU\...\Run (só se mudou); desligado, apaga o valor.
+pub fn autostart() {
+    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
+    if !config::autostart() {
+        unsafe {
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, w!("ArcDockWin"));
+        }
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else { return };
     let value: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain([0]).collect();
-    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let mut buf = [0u16; 1024];
     let mut size = size_of_val(&buf) as u32;
     unsafe {
@@ -619,7 +696,7 @@ fn autostart() {
     }
 }
 
-fn light_theme() -> bool {
+pub fn light_theme() -> bool {
     let mut value: u32 = 0;
     let mut size = size_of::<u32>() as u32;
     let ok = unsafe {
@@ -710,6 +787,9 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
             }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         }
+        let settings = HSTRING::from(crate::i18n::tr("Configurações…"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, &settings);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let quit = HSTRING::from(crate::i18n::tr("Sair do ArcDockWin"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, &quit);
 
@@ -738,6 +818,10 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
         let cmd = cmd.0 as usize;
         if cmd == MENU_QUIT {
             let _ = DestroyWindow(hwnd);
+            return;
+        }
+        if cmd == MENU_SETTINGS {
+            settings::open();
             return;
         }
         let Some((key, pinned, windows)) = target else { return };
@@ -918,6 +1002,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     tray::stop();
                     topbar::shutdown();
                     taskbar::restore();
+                    minimize::shutdown();
                 }
                 LRESULT(0)
             }
@@ -925,6 +1010,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 tray::stop();
                 topbar::shutdown();
                 taskbar::restore();
+                minimize::shutdown();
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -1048,6 +1134,7 @@ fn main() -> windows::core::Result<()> {
 
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         topbar::create();
+        minimize::init();
         start_tray();
         autostart();
         SetTimer(Some(hwnd), TIMER_REFRESH, 1000, None);
@@ -1076,7 +1163,7 @@ fn main() -> windows::core::Result<()> {
         // espera o próximo quadro do compositor), na taxa do monitor (60, 120, 144 Hz...).
         let mut msg = MSG::default();
         loop {
-            if with_dock(|d| d.animating).unwrap_or(false) {
+            if with_dock(|d| d.animating).unwrap_or(false) || minimize::busy() {
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                     if msg.message == WM_QUIT {
                         return Ok(());
@@ -1085,6 +1172,7 @@ fn main() -> windows::core::Result<()> {
                     DispatchMessageW(&msg);
                 }
                 with_dock(|d| if d.animating { d.step() });
+                minimize::frame();
                 let _ = DwmFlush();
             } else {
                 if !GetMessageW(&mut msg, None, 0, 0).as_bool() {

@@ -165,6 +165,12 @@ pub enum Widget {
     /// Cartões da Central de Controle numa grade de 2 colunas, com margem própria (use em
     /// painel sem margem). Cada cartão ocupa o primeiro lugar livre, da esquerda para a direita.
     Cards(Vec<Card>),
+    /// Cabeçalho de painel: glifo num quadrado à esquerda, título e subtítulo pequeno.
+    Banner { glyph: u16, text: String, sub: String },
+    /// Medidor só de leitura: glifo num quadrado à esquerda, rótulo e valor na mesma linha,
+    /// detalhe pequeno embaixo e uma barra fina (`frac` 0..1; `None` = barra vazia).
+    /// `level`: 0 normal (destaque), 1 alto (laranja), 2 crítico (vermelho).
+    Meter { glyph: u16, label: String, value: String, detail: Option<String>, frac: Option<f32>, level: u8 },
 }
 
 /// Cartão de [`Widget::Cards`]; todos em pílula translúcida.
@@ -250,6 +256,12 @@ fn localize_widgets(widgets: &mut [Widget]) {
         match widget {
             Widget::Title(text) | Widget::Text(text) | Widget::Label(text) => translate(text),
             Widget::Heading { text, .. } | Widget::Toggle { text, .. } | Widget::Button { text, .. } => translate(text),
+            Widget::Banner { text, sub, .. } => { translate(text); translate(sub); }
+            Widget::Meter { label, value, detail, .. } => {
+                translate(label);
+                translate(value);
+                if let Some(text) = detail { translate(text); }
+            }
             Widget::Row { text, sub, .. } | Widget::RowBadge { text, sub, .. } => {
                 translate(text);
                 if let Some(text) = sub { translate(text); }
@@ -358,6 +370,9 @@ const CARD_RADIUS: f32 = 18.0;
 thread_local! {
     static PANEL: RefCell<Option<Panel>> = const { RefCell::new(None) };
     static OPEN_HWND: cell::Cell<isize> = const { cell::Cell::new(0) };
+    /// Chave e item do painel aberto, legíveis mesmo com PANEL emprestado (a barra redesenha
+    /// durante eventos do painel).
+    static OPEN_ITEM: cell::Cell<Option<(&'static str, RECT)>> = const { cell::Cell::new(None) };
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -385,7 +400,7 @@ struct Field {
 }
 
 #[derive(Clone, Copy)]
-enum Font {
+pub(crate) enum Font {
     Body,
     Bold,
     Title,
@@ -394,42 +409,45 @@ enum Font {
     Large,
     /// Glifos maiores (botões da mídia).
     IconLarge,
+    /// Título de página (janela de Configurações).
+    Header,
 }
 
 /// Texto a desenhar com DirectWrite depois das formas (coordenadas da janela).
-struct TextOp {
-    text: Vec<u16>,
-    font: Font,
-    rect: [f32; 4],
-    align: DWRITE_TEXT_ALIGNMENT,
-    color: [f32; 4],
-    wrap: bool,
-    clip: Option<[f32; 4]>,
+pub(crate) struct TextOp {
+    pub(crate) text: Vec<u16>,
+    pub(crate) font: Font,
+    pub(crate) rect: [f32; 4],
+    pub(crate) align: DWRITE_TEXT_ALIGNMENT,
+    pub(crate) color: [f32; 4],
+    pub(crate) wrap: bool,
+    pub(crate) clip: Option<[f32; 4]>,
 }
 
-struct Palette {
+/// Cores do tema claro/escuro (também usadas pela janela de Configurações).
+pub(crate) struct Palette {
     tint: [u8; 4],
     border: [u8; 4],
-    line: [u8; 4],
-    hover: [u8; 4],
-    control: [u8; 4],
-    strong: [u8; 4],
+    pub(crate) line: [u8; 4],
+    pub(crate) hover: [u8; 4],
+    pub(crate) control: [u8; 4],
+    pub(crate) strong: [u8; 4],
     shadow: u8,
-    accent: [u8; 4],
-    ink: [f32; 4],
-    dim: [f32; 4],
+    pub(crate) accent: [u8; 4],
+    pub(crate) ink: [f32; 4],
+    pub(crate) dim: [f32; 4],
     /// Tinta do vidro em [`PanelContent::liquid`].
     glass: [u8; 4],
     /// Cartões de [`Widget::Cards`]: fundo, contorno, círculo desligado, trilho e preenchimento.
-    card: [u8; 4],
-    card_line: [u8; 4],
+    pub(crate) card: [u8; 4],
+    pub(crate) card_line: [u8; 4],
     circle: [u8; 4],
     track: [u8; 4],
     fill: [u8; 4],
 }
 
 impl Palette {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let accent = crate::accent_color().unwrap_or([0, 120, 212, 255]);
         if crate::light_theme() {
             Self {
@@ -473,32 +491,169 @@ impl Palette {
     }
 }
 
-const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+pub(crate) const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-fn rgba(c: [u8; 4]) -> [f32; 4] {
+pub(crate) fn rgba(c: [u8; 4]) -> [f32; 4] {
     [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, c[3] as f32 / 255.0]
 }
 
 /// Tinta para o tiny-skia desenhando direto na DIB (BGRA): troca vermelho e azul.
-fn paint(c: [u8; 4]) -> Paint<'static> {
+pub(crate) fn paint(c: [u8; 4]) -> Paint<'static> {
     let mut p = Paint::default();
     p.set_color_rgba8(c[2], c[1], c[0], c[3]);
     p.anti_alias = true;
     p
 }
 
+/// Retângulo arredondado preenchido (BGRA, ver [`paint`]).
+fn fill_rr(pm: &mut PixmapMut, tf: Transform, x: f32, y: f32, w: f32, h: f32, r: f32, c: [u8; 4]) {
+    if let Some(p) = rounded_rect(x, y, w, h, r) {
+        pm.fill_path(&p, &paint(c), FillRule::Winding, tf, None);
+    }
+}
+
+/// Interruptor com a borda direita em `right`, centrado em `cy`; devolve a borda esquerda.
+pub(crate) fn switch(pm: &mut PixmapMut, tf: Transform, pal: &Palette, right: f32, cy: f32, s: f32, on: bool) -> f32 {
+    let (sw, sh) = (36.0 * s, 20.0 * s);
+    let sx = right - sw;
+    fill_rr(pm, tf, sx, cy - sh / 2.0, sw, sh, sh / 2.0, if on { pal.accent } else { pal.strong });
+    let kr = sh / 2.0 - 3.0 * s;
+    let kx = if on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 };
+    fill_rr(pm, tf, kx - kr, cy - kr, 2.0 * kr, 2.0 * kr, kr, [255, 255, 255, 255]);
+    sx
+}
+
+/// Controle deslizante: trilho de `tl` a `tr` em `cy`, valor `v` (0..1) preenchido com `color`.
+pub(crate) fn slider(pm: &mut PixmapMut, tf: Transform, pal: &Palette, tl: f32, tr: f32, cy: f32, s: f32, v: f32, color: [u8; 4]) {
+    let (th, kr) = (4.0 * s, 8.0 * s);
+    let kx = tl + v * (tr - tl);
+    fill_rr(pm, tf, tl, cy - th / 2.0, tr - tl, th, th / 2.0, pal.strong);
+    fill_rr(pm, tf, tl, cy - th / 2.0, kx - tl, th, th / 2.0, color);
+    if let Some(p) = rounded_rect(kx - kr, cy - kr, 2.0 * kr, 2.0 * kr, kr) {
+        pm.fill_path(&p, &paint([255, 255, 255, 255]), FillRule::Winding, tf, None);
+        let stroke = Stroke { width: 1.0, ..Default::default() };
+        pm.stroke_path(&p, &paint([0, 0, 0, 50]), &stroke, tf, None);
+    }
+}
+
+/// Fontes do DirectWrite na escala do monitor e o alvo do Direct2D que desenha o texto na DIB.
+pub(crate) struct Text {
+    target: ID2D1DCRenderTarget,
+    dwrite: IDWriteFactory,
+    fonts: [IDWriteTextFormat; 8],
+}
+
+impl Text {
+    pub(crate) fn new(scale: f32) -> windows::core::Result<Self> {
+        unsafe {
+            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                ..Default::default()
+            };
+            let target = factory.CreateDCRenderTarget(&props)?;
+            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let mut coll: Option<IDWriteFontCollection> = None;
+            dwrite.GetSystemFontCollection(&mut coll, false)?;
+            let has = |name: PCWSTR| {
+                let (mut i, mut exists) = (0u32, BOOL(0));
+                coll.as_ref().is_some_and(|f| f.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool())
+            };
+            let family = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
+            let locale = HSTRING::from(crate::i18n::text_locale());
+            let locale_ptr = PCWSTR::from_raw(locale.as_ptr());
+            let format = |family: PCWSTR, weight: DWRITE_FONT_WEIGHT, size: f32| -> windows::core::Result<IDWriteTextFormat> {
+                let f = dwrite.CreateTextFormat(
+                    family,
+                    None::<&IDWriteFontCollection>,
+                    weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size * scale,
+                    locale_ptr,
+                )?;
+                f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                Ok(f)
+            };
+            let fonts = [
+                format(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0)?,
+                format(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0)?,
+                format(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0)?,
+                format(family, DWRITE_FONT_WEIGHT_NORMAL, 11.0)?,
+                format(w!("Segoe Fluent Icons"), DWRITE_FONT_WEIGHT_NORMAL, 16.0)?,
+                format(family, DWRITE_FONT_WEIGHT_NORMAL, 15.0)?,
+                format(w!("Segoe Fluent Icons"), DWRITE_FONT_WEIGHT_NORMAL, 20.0)?,
+                format(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 24.0)?,
+            ];
+            Ok(Self { target, dwrite, fonts })
+        }
+    }
+
+    fn font(&self, f: Font) -> &IDWriteTextFormat {
+        &self.fonts[f as usize]
+    }
+
+    fn layout(&self, text: &[u16], font: Font, w: f32, h: f32) -> Option<IDWriteTextLayout> {
+        unsafe { self.dwrite.CreateTextLayout(text, self.font(font), w.max(1.0), h.max(1.0)).ok() }
+    }
+
+    /// Desenha os textos direto na DIB `memdc` (`w` × `h`).
+    pub(crate) fn draw(&self, memdc: HDC, w: i32, h: i32, texts: &[TextOp]) {
+        unsafe {
+            if self.target.BindDC(memdc, &RECT { left: 0, top: 0, right: w, bottom: h }).is_err() {
+                return;
+            }
+            let Ok(brush) = self.target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, None) else {
+                return;
+            };
+            let sign = self.dwrite.CreateEllipsisTrimmingSign(self.font(Font::Body)).ok();
+            let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
+            self.target.BeginDraw();
+            for op in texts {
+                let [x, y, tw, th] = op.rect;
+                let Some(layout) = self.layout(&op.text, op.font, tw, th) else { continue };
+                let _ = layout.SetTextAlignment(op.align);
+                if op.wrap {
+                    let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                } else if op.clip.is_none() {
+                    let _ = layout.SetTrimming(&trim, sign.as_ref());
+                }
+                let [r, g, b, a] = op.color;
+                brush.SetColor(&D2D1_COLOR_F { r, g, b, a });
+                if let Some([l, t, r, b]) = op.clip {
+                    self.target.PushAxisAlignedClip(&D2D_RECT_F { left: l, top: t, right: r, bottom: b }, D2D1_ANTIALIAS_MODE_ALIASED);
+                }
+                self.target.DrawTextLayout(Vector2 { X: x, Y: y }, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                if op.clip.is_some() {
+                    self.target.PopAxisAlignedClip();
+                }
+            }
+            let _ = self.target.EndDraw(None, None);
+        }
+    }
+}
+
 /// DIB em que o painel é desenhado (tiny-skia e Direct2D) e que vai para a janela.
-struct Buffer {
-    memdc: HDC,
+pub(crate) struct Buffer {
+    pub(crate) memdc: HDC,
     dib: HBITMAP,
     old: HGDIOBJ,
-    bits: *mut u8,
-    w: i32,
-    h: i32,
+    pub(crate) bits: *mut u8,
+    pub(crate) w: i32,
+    pub(crate) h: i32,
 }
 
 impl Buffer {
-    fn new(w: i32, h: i32) -> Option<Self> {
+    pub(crate) fn new(w: i32, h: i32) -> Option<Self> {
         unsafe {
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -547,9 +702,7 @@ struct Panel {
     w: i32,
     h: i32,
     buf: Option<Buffer>,
-    target: ID2D1DCRenderTarget,
-    dwrite: IDWriteFactory,
-    fonts: [IDWriteTextFormat; 7],
+    text: Text,
     content: Box<dyn PanelContent>,
     /// Controles com y e altura (panel-local).
     widgets: Vec<(Widget, f32, f32)>,
@@ -635,53 +788,7 @@ impl Panel {
             let radius = if content.liquid() { LIQUID_RADIUS } else { RADIUS };
             let glass_fx = glass::Glass::new(glass, radius * scale).ok();
 
-            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                ..Default::default()
-            };
-            let target = factory.CreateDCRenderTarget(&props)?;
-            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let mut coll: Option<IDWriteFontCollection> = None;
-            dwrite.GetSystemFontCollection(&mut coll, false)?;
-            let has = |name: PCWSTR| {
-                let (mut i, mut exists) = (0u32, BOOL(0));
-                coll.as_ref().is_some_and(|f| f.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool())
-            };
-            let family = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
-            let locale = HSTRING::from(crate::i18n::text_locale());
-            let locale_ptr = PCWSTR::from_raw(locale.as_ptr());
-            let format = |family: PCWSTR, weight: DWRITE_FONT_WEIGHT, size: f32| -> windows::core::Result<IDWriteTextFormat> {
-                let f = dwrite.CreateTextFormat(
-                    family,
-                    None::<&IDWriteFontCollection>,
-                    weight,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    size * scale,
-                    locale_ptr,
-                )?;
-                f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                Ok(f)
-            };
-            let fonts = [
-                format(family, DWRITE_FONT_WEIGHT_NORMAL, 13.0)?,
-                format(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0)?,
-                format(family, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0)?,
-                format(family, DWRITE_FONT_WEIGHT_NORMAL, 11.0)?,
-                format(w!("Segoe Fluent Icons"), DWRITE_FONT_WEIGHT_NORMAL, 16.0)?,
-                format(family, DWRITE_FONT_WEIGHT_NORMAL, 15.0)?,
-                format(w!("Segoe Fluent Icons"), DWRITE_FONT_WEIGHT_NORMAL, 20.0)?,
-            ];
+            let text = Text::new(scale)?;
 
             Ok(Self {
                 key,
@@ -697,9 +804,7 @@ impl Panel {
                 w: 0,
                 h: 0,
                 buf: None,
-                target,
-                dwrite,
-                fonts,
+                text,
                 content,
                 widgets: Vec::new(),
                 zones: Vec::new(),
@@ -716,12 +821,8 @@ impl Panel {
         }
     }
 
-    fn font(&self, f: Font) -> &IDWriteTextFormat {
-        &self.fonts[f as usize]
-    }
-
     fn layout_text(&self, text: &[u16], font: Font, w: f32, h: f32) -> Option<IDWriteTextLayout> {
-        unsafe { self.dwrite.CreateTextLayout(text, self.font(font), w.max(1.0), h.max(1.0)).ok() }
+        self.text.layout(text, font, w, h)
     }
 
     /// Margens da janela em volta do painel: (lados/baixo, cima).
@@ -763,6 +864,8 @@ impl Panel {
             Widget::Slider { .. } => 44.0,
             Widget::Button { .. } => 40.0,
             Widget::Separator => 9.0,
+            Widget::Banner { .. } => 52.0,
+            Widget::Meter { .. } => 56.0,
             Widget::Field { .. } => 40.0,
             Widget::Grid { cols, cells } => 32.0 * cells.len().div_ceil((*cols).max(1)) as f32,
             Widget::Icons { items } => ICON_CELL * items.len().div_ceil(self.icon_cols()) as f32,
@@ -842,8 +945,11 @@ impl Panel {
             }
         }
         self.hot = None;
-        self.pressed = None;
+        // Botão apertado continua apertado se a zona dele não mudou (painéis que se
+        // atualizam sozinhos, como o de desempenho, reconstroem no meio do clique).
+        let pressed = self.pressed.take().and_then(|i| self.zones.get(i).map(|z| (i, z.kind)));
         self.redraw();
+        self.pressed = pressed.filter(|&(i, k)| self.zones.get(i).is_some_and(|z| z.kind == k)).map(|(i, _)| i);
         if let Some((x, y)) = self.mouse {
             self.hover(x, y);
         }
@@ -999,12 +1105,7 @@ impl Panel {
                         radius: 6.0 * s,
                         kind: ZoneKind::Toggle(*tid, *on),
                     });
-                    let (sw, sh) = (36.0 * s, 20.0 * s);
-                    let (sx, sy) = (right - inset - sw, y + (wh - sh) / 2.0);
-                    fill(&mut pm, sx, sy, sw, sh, sh / 2.0, if *on { pal.accent } else { pal.strong });
-                    let kr = sh / 2.0 - 3.0 * s;
-                    let kx = if *on { sx + sw - sh / 2.0 } else { sx + sh / 2.0 };
-                    fill(&mut pm, kx - kr, sy + sh / 2.0 - kr, 2.0 * kr, 2.0 * kr, kr, [255, 255, 255, 255]);
+                    let sx = switch(&mut pm, tf, &pal, right - inset, y + wh / 2.0, s, *on);
                     let mut tx = left + inset;
                     if let Some(icon) = icon {
                         draw_icon(&mut pm, icon, tx + 10.0 * s, y + wh / 2.0);
@@ -1214,16 +1315,7 @@ impl Panel {
                         Some((d, v)) if d == *sid => v,
                         _ => value.clamp(0.0, 1.0),
                     };
-                    let cy = y + wh / 2.0;
-                    let th = 4.0 * s;
-                    let kx = tl + v * (tr - tl);
-                    fill(&mut pm, tl, cy - th / 2.0, tr - tl, th, th / 2.0, pal.strong);
-                    fill(&mut pm, tl, cy - th / 2.0, kx - tl, th, th / 2.0, pal.accent);
-                    if let Some(p) = rounded_rect(kx - kr, cy - kr, 2.0 * kr, 2.0 * kr, kr) {
-                        pm.fill_path(&p, &paint([255, 255, 255, 255]), FillRule::Winding, tf, None);
-                        let stroke = Stroke { width: 1.0, ..Default::default() };
-                        pm.stroke_path(&p, &paint([0, 0, 0, 50]), &stroke, tf, None);
-                    }
+                    slider(&mut pm, tf, &pal, tl, tr, y + wh / 2.0, s, v, pal.accent);
                     zones.push(Zone {
                         x: tl - kr,
                         y,
@@ -1240,6 +1332,40 @@ impl Panel {
                     zones.push(Zone { x: left, y: by, w: right - left, h: bh, radius: 6.0 * s, kind: ZoneKind::Click(*bid) });
                     let color = if *primary { WHITE } else { pal.ink };
                     texts.push(mk(t, Font::Body, [left, by, right - left, bh], DWRITE_TEXT_ALIGNMENT_CENTER, color));
+                }
+                Widget::Banner { glyph: g, text: t, sub } => {
+                    let bs = 36.0 * s;
+                    let by = y + (wh - bs) / 2.0;
+                    fill(&mut pm, left + inset, by, bs, bs, 8.0 * s, pal.control);
+                    texts.push(mk(&glyph(*g), Font::IconLarge, [left + inset, by, bs, bs], DWRITE_TEXT_ALIGNMENT_CENTER, pal.ink));
+                    let tx = left + inset + bs + 10.0 * s;
+                    texts.push(mk(t, Font::Bold, [tx, by - 1.0 * s, right - inset - tx, 20.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
+                    texts.push(mk(sub, Font::Small, [tx, by + 19.0 * s, right - inset - tx, 18.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.dim));
+                }
+                Widget::Meter { glyph: g, label, value, detail, frac, level } => {
+                    // Cores de alerta do sistema da Apple (laranja e vermelho).
+                    let color = match level {
+                        0 => pal.accent,
+                        1 => [255, 159, 10, 255],
+                        _ => [255, 69, 58, 255],
+                    };
+                    let (bs, r) = (32.0 * s, right - inset);
+                    let by = y + (wh - bs) / 2.0;
+                    fill(&mut pm, left + inset, by, bs, bs, 8.0 * s, pal.control);
+                    let ink = if *level == 0 { pal.ink } else { rgba(color) };
+                    texts.push(mk(&glyph(*g), Font::Icon, [left + inset, by, bs, bs], DWRITE_TEXT_ALIGNMENT_CENTER, ink));
+                    let l = left + inset + bs + 10.0 * s;
+                    let vw = (r - l) * 0.45;
+                    texts.push(mk(label, Font::Body, [l, y + 5.0 * s, r - l - vw, 20.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
+                    texts.push(mk(value, Font::Bold, [r - vw, y + 5.0 * s, vw, 20.0 * s], DWRITE_TEXT_ALIGNMENT_TRAILING, ink));
+                    if let Some(d) = detail {
+                        texts.push(mk(d, Font::Small, [l, y + 24.0 * s, r - l, 16.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.dim));
+                    }
+                    let (ty, th) = (y + 43.0 * s, 4.0 * s);
+                    fill(&mut pm, l, ty, r - l, th, th / 2.0, pal.strong);
+                    if let Some(f) = frac.map(|f| f.clamp(0.0, 1.0)).filter(|&f| f > 0.0) {
+                        fill(&mut pm, l, ty, ((r - l) * f).max(th), th, th / 2.0, color);
+                    }
                 }
                 Widget::Separator => {
                     if let Some(r) = Rect::from_xywh(left + inset, y + 4.0 * s, right - left - 2.0 * inset, 1.0) {
@@ -1346,35 +1472,7 @@ impl Panel {
         drop(pm);
 
         // Texto e glifos por cima, direto na DIB.
-        unsafe {
-            if self.target.BindDC(memdc, &RECT { left: 0, top: 0, right: bw, bottom: bh }).is_ok()
-                && let Ok(brush) = self.target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, None)
-            {
-                let sign = self.dwrite.CreateEllipsisTrimmingSign(self.font(Font::Body)).ok();
-                let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
-                self.target.BeginDraw();
-                for op in &texts {
-                    let [x, y, tw, th] = op.rect;
-                    let Some(layout) = self.layout_text(&op.text, op.font, tw, th) else { continue };
-                    let _ = layout.SetTextAlignment(op.align);
-                    if op.wrap {
-                        let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-                    } else if op.clip.is_none() {
-                        let _ = layout.SetTrimming(&trim, sign.as_ref());
-                    }
-                    let [r, g, b, a] = op.color;
-                    brush.SetColor(&D2D1_COLOR_F { r, g, b, a });
-                    if let Some([l, t, r, b]) = op.clip {
-                        self.target.PushAxisAlignedClip(&D2D_RECT_F { left: l, top: t, right: r, bottom: b }, D2D1_ANTIALIAS_MODE_ALIASED);
-                    }
-                    self.target.DrawTextLayout(Vector2 { X: x, Y: y }, &layout, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-                    if op.clip.is_some() {
-                        self.target.PopAxisAlignedClip();
-                    }
-                }
-                let _ = self.target.EndDraw(None, None);
-            }
-        }
+        self.text.draw(memdc, bw, bh, &texts);
         self.present();
     }
 
@@ -1608,14 +1706,17 @@ impl Drop for Panel {
     fn drop(&mut self) {
         // Composição antes da janela dela.
         self.glass_fx = None;
-        OPEN_HWND.with(|h| {
-            if h.get() == self.hwnd.0 as isize {
-                h.set(0);
-            }
-        });
+        let current = OPEN_HWND.with(|h| h.get() == self.hwnd.0 as isize);
+        if current {
+            OPEN_HWND.with(|h| h.set(0));
+            OPEN_ITEM.with(|o| o.set(None));
+        }
         unsafe {
             let _ = DestroyWindow(self.hwnd);
             let _ = DestroyWindow(self.glass);
+        }
+        if current {
+            crate::topbar::panel_visibility_changed();
         }
     }
 }
@@ -1672,11 +1773,13 @@ fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: 
     }
     p.start = Instant::now();
     OPEN_HWND.with(|h| h.set(hwnd.0 as isize));
+    OPEN_ITEM.with(|o| o.set(Some((key, item))));
     PANEL.with(|c| *c.borrow_mut() = Some(p));
     // Ativa para receber o teclado; fecha ao perder a ativação (WM_ACTIVATE).
     unsafe {
         let _ = SetForegroundWindow(hwnd);
     }
+    crate::topbar::panel_visibility_changed();
 }
 
 /// Fecha o painel aberto, se houver. Seguro de chamar de dentro de [`PanelContent::event`].
@@ -1702,6 +1805,15 @@ pub fn close() {
 #[allow(dead_code)]
 pub fn is_open(key: &str) -> bool {
     with_panel(|p| p.key == key).unwrap_or(false)
+}
+
+/// Se o painel `key` está aberto e foi aberto por um item dentro de `area` (a barra de um
+/// monitor). Compara a área, não o retângulo exato: o item pode andar (relógio muda de largura).
+pub fn is_open_in(key: &str, area: RECT) -> bool {
+    OPEN_ITEM.with(|o| o.get()).is_some_and(|(k, item)| {
+        let (cx, cy) = ((item.left + item.right) / 2, (item.top + item.bottom) / 2);
+        k == key && (area.left..area.right).contains(&cx) && (area.top..area.bottom).contains(&cy)
+    })
 }
 
 /// Se há algum painel aberto.

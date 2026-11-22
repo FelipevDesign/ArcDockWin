@@ -6,7 +6,7 @@ ArcDockWin 以原生 Win32、Direct2D 與 Windows Composition 實作，無須額
 
 ## 繁體中文與語言切換
 
-ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言。Windows 使用中文介面時，程式自動套用內建的繁體中文（台灣）語言包；其他語言則使用專案原有的葡萄牙文介面。程式每秒重新檢查一次 Windows 語言，偵測到變更後會更新選單列、已開啟的面板、日曆和選單，不必重新啟動。翻譯表位於 [`locales/zh-TW.tsv`](locales/zh-TW.tsv)。
+ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言，內建葡萄牙文（巴西）、英文與繁體中文（台灣）。Windows 使用中文介面時套用繁體中文，使用葡萄牙文時套用葡萄牙文，其他語言一律使用英文。程式每秒重新檢查一次 Windows 語言，偵測到變更後會更新選單列、已開啟的面板、日曆和選單，不必重新啟動。翻譯表位於 [`locales/zh-TW.tsv`](locales/zh-TW.tsv) 與 [`locales/en.tsv`](locales/en.tsv)。
 
 ## 功能
 
@@ -20,11 +20,34 @@ ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言。Windows 使用中文
 - Dock 尾端附有「下載項目」堆疊與垃圾桶，支援自動隱藏，並跟隨 Windows 淺色／深色模式。
 - 可透過 `icons.txt` 將 Dock 圖示換成 MacTahoe 圖示主題中的 `.ico`。
 
+### 最小化動畫
+
+視窗最小化時會縮進 Dock 上對應的 App 圖示，可選「精靈」或「縮放」效果，接近圖示時逐漸淡出（60 fps）。點選視窗的最小化按鈕、按 **Win+↓**，或點選 Dock 上的 App 圖示來最小化時都會播放。動畫進行期間會暫時關閉 Windows 原生的最小化動畫，結束後、程式結束時，以及 Dock 當機時由守護程序還原。
+
 ### 頂端選單列與控制中心
 
-- 每個螢幕都有選單列，包含日期／時間、CPU／記憶體、系統匣圖示及控制中心。
+- 預設每個螢幕都有選單列，也可只顯示在主螢幕。
+- 選單列由模組組成：CPU／記憶體、時鐘、系統匣與控制中心。每個模組可開關、放在左／中／右區，並調整區內順序。
+- 時鐘可選 24／12 小時制、秒數與日期；點選時鐘會開啟日曆。
+- 系統匣圖示可選擇固定在選單列或收納到溢位面板；空間不足時會自動收進箭頭，CPU／記憶體最後才隱藏。
 - 控制中心提供 Wi‑Fi、藍牙、淺色／深色模式、電源、亮度、音量與媒體控制。
-- 系統匣圖示可選擇固定在選單列或收納到溢位面板。
+
+### 效能面板
+
+點選選單列上的 CPU／記憶體，可查看 CPU、記憶體與 GPU（含顯示記憶體）使用率，以及 CPU 與 GPU 溫度，並可開啟工作管理員。GPU 與溫度只在面板開啟時讀取。CPU 溫度透過 AMD 程式庫讀取，僅支援 Ryzen APU；GPU 溫度支援 Radeon 與 NVIDIA 顯示卡；無法讀取時顯示「—」。
+
+### 設定
+
+在 Dock 空白處按右鍵 → **設定…**。設定是一般視窗（Mica 背景，跟隨 Windows 淺色／深色主題），變更立即生效：
+
+- **Dock**：圖示大小（32–72 px）、滑鼠移過時放大及放大倍率（1.1×–2.0×）、自動隱藏、顯示下載項目與垃圾桶。
+- **動畫**：開關最小化動畫，選擇精靈或縮放。
+- **頂端選單列**：選單列預覽、各模組的開關／區域／順序、時鐘格式、顯示在所有螢幕。
+- **一般**：隨 Windows 啟動、關於。
+
+| Dock（淺色） | 頂端選單列（深色） |
+| :---: | :---: |
+| ![設定：Dock](docs/screenshots/settings-dock.png) | ![設定：頂端選單列](docs/screenshots/settings-topbar.png) |
 
 ### 檔案總管的 Tahoe 圖示
 
@@ -85,7 +108,9 @@ spotify.exe=C:\Icones\MacTahoe\apps\spotify.ico
 
 ## 設定與還原
 
-ArcDockWin 的使用者設定位於 `%APPDATA%\ArcDockWin\`：`pinned.txt` 管理 Dock 固定項目，`icons.txt` 管理自訂圖示，`colors.db` 儲存選單列 App 色彩與系統匣顯示選項。
+ArcDockWin 的使用者設定位於 `%APPDATA%\ArcDockWin\`：`pinned.txt` 管理 Dock 固定項目，`icons.txt` 管理自訂圖示，`colors.db` 儲存選單列 App 色彩與系統匣顯示選項，`settings.txt` 儲存設定視窗的選項，`animation.txt` 儲存最小化動畫（`enabled=1|0`、`effect=genie|scale`）。
+
+已知限制：自繪標題列的 App 以啟發式方式偵測最小化按鈕，可能沒有動畫（Win+↓ 與 Dock 圖示仍有動畫）；溫度讀取取決於硬體與驅動程式。
 
 要還原 Explorer、捷徑及磁碟的原始圖示：
 

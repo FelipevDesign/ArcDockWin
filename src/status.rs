@@ -26,26 +26,39 @@ use windows::core::{PCWSTR, Result, implement};
 /// 1 = dispositivo de saída padrão trocou, 2 = um dispositivo entrou, saiu ou mudou de estado.
 pub const WM_AUDIO: u32 = WM_APP + 2;
 
-/// Texto do relógio (ex.: "qua 19 nov  14:32") e quantos ms faltam para o próximo minuto.
+/// Texto do relógio (ex.: "qua 19 nov  14:32") e quantos ms faltam para a próxima troca
+/// (próximo minuto, ou próximo segundo com os segundos ligados). Formato pelas Configurações.
 pub fn clock() -> (String, u32) {
     const DAYS: [&str; 7] = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
     const MONTHS: [&str; 12] =
         ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
     let t = unsafe { GetLocalTime() };
-    let text = if crate::i18n::is_traditional_chinese() {
-        format!("{}月{}日  {:02}:{:02}", t.wMonth, t.wDay, t.wHour, t.wMinute)
+    let (h24, secs) = (crate::config::clock_24h(), crate::config::clock_seconds());
+    let zh = crate::i18n::is_traditional_chinese();
+    let sec = if secs { format!(":{:02}", t.wSecond) } else { String::new() };
+    let time = if h24 {
+        format!("{:02}:{:02}{sec}", t.wHour, t.wMinute)
     } else {
-        format!(
-            "{} {} {}  {:02}:{:02}",
-            DAYS[t.wDayOfWeek as usize % 7],
-            t.wDay,
-            MONTHS[(t.wMonth as usize + 11) % 12],
-            t.wHour,
-            t.wMinute
-        )
+        let h = (t.wHour + 11) % 12 + 1;
+        let pm = t.wHour >= 12;
+        match zh {
+            true => format!("{}{h}:{:02}{sec}", if pm { "下午 " } else { "上午 " }, t.wMinute),
+            false => format!("{h}:{:02}{sec} {}", t.wMinute, if pm { "PM" } else { "AM" }),
+        }
     };
-    // Um pouco depois da virada, para não acordar ainda no minuto anterior.
-    let ms = (60 - t.wSecond as u32 % 60) * 1000 - (t.wMilliseconds as u32).min(999) + 20;
+    let date = if zh {
+        format!("{}月{}日", t.wMonth, t.wDay)
+    } else if crate::i18n::is_english() {
+        const D: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const M: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        format!("{} {} {}", D[t.wDayOfWeek as usize % 7], M[(t.wMonth as usize + 11) % 12], t.wDay)
+    } else {
+        format!("{} {} {}", DAYS[t.wDayOfWeek as usize % 7], t.wDay, MONTHS[(t.wMonth as usize + 11) % 12])
+    };
+    let text = if crate::config::clock_date() { format!("{date}  {time}") } else { time };
+    // Um pouco depois da virada, para não acordar ainda no minuto (segundo) anterior.
+    let ms = (t.wMilliseconds as u32).min(999);
+    let ms = if secs { 1000 - ms + 20 } else { (60 - t.wSecond as u32 % 60) * 1000 - ms + 20 };
     (text, ms)
 }
 

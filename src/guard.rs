@@ -30,8 +30,14 @@ pub fn run_if_requested() -> bool {
         WaitForSingleObject(process, INFINITE);
         let _ = CloseHandle(process);
     }
-    // Saída normal já restaurou (e apagou o arquivo de estado); outro dock já aberto cuida da barra.
-    if !crate::taskbar::needs_restore() || unsafe { FindWindowW(w!("ArcDockWin"), None) }.is_ok() {
+    // Outro dock já aberto cuida da barra e da animação.
+    if unsafe { FindWindowW(w!("ArcDockWin"), None) }.is_ok() {
+        return true;
+    }
+    // Animação nativa de minimizar desligada no meio de uma animação nossa (minimize.rs).
+    crate::minimize::restore_native();
+    // Saída normal já restaurou (e apagou o arquivo de estado).
+    if !crate::taskbar::needs_restore() {
         return true;
     }
     crate::taskbar::restore();

@@ -5,6 +5,11 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use crate::panel::{Cell, CellStyle, Event, PanelContent, Widget, glyph};
 
 const DAYS: [&str; 7] = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
+const DAYS_EN: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const SHORT_EN: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS_EN: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December",
+];
 const SHORT: [&str; 7] = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
 const MONTHS: [&str; 12] = [
     "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro",
@@ -56,6 +61,8 @@ impl PanelContent for Calendar {
         let title = if crate::i18n::is_traditional_chinese() {
             const DAYS_ZH: [&str; 7] = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
             format!("{ty}年{tm}月{td}日 {}", DAYS_ZH[weekday(ty, tm, td)])
+        } else if crate::i18n::is_english() {
+            format!("{}, {} {}, {}", DAYS_EN[weekday(ty, tm, td)], MONTHS_EN[tm as usize - 1], td, ty)
         } else {
             format!(
                 "{}, {} de {} de {}",
@@ -72,6 +79,8 @@ impl PanelContent for Calendar {
                 .iter()
                 .map(|d| Cell { text: (*d).into(), style: CellStyle::Header, id: None })
                 .collect()
+        } else if crate::i18n::is_english() {
+            SHORT_EN.iter().map(|d| Cell { text: (*d).into(), style: CellStyle::Header, id: None }).collect()
         } else {
             SHORT.iter().map(|d| Cell { text: (*d).into(), style: CellStyle::Header, id: None }).collect()
         };
@@ -95,6 +104,8 @@ impl PanelContent for Calendar {
 
         let month_title = if crate::i18n::is_traditional_chinese() {
             format!("{y}年{m}月")
+        } else if crate::i18n::is_english() {
+            format!("{} {}", MONTHS_EN[m as usize - 1], y)
         } else {
             format!("{} de {}", MONTHS[m as usize - 1], y)
         };

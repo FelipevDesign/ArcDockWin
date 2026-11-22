@@ -33,12 +33,13 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
     ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_FULLSCREENAPP, ABN_POSCHANGED,
-    APPBARDATA, SHAppBarMessage, ShellExecuteW,
+    APPBARDATA, SHAppBarMessage,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
 
+use crate::config::{self, Module};
 use crate::glass;
 use crate::panel::{self, PanelContent};
 use crate::status::{self, Audio};
@@ -58,8 +59,10 @@ pub struct TrayEntry {
     pub tip: String,
     /// Chave no banco (`exe#uid`).
     pub key: String,
-    /// Na barra (`true`) ou dentro da bandeja.
+    /// Preferência do usuário: na barra (`true`) ou dentro da bandeja.
     pub shown: bool,
+    /// Na barra de fato: `shown` menos os recolhidos por falta de espaço (refeito em `relayout`).
+    pub visible: bool,
 }
 
 /// Callback de clique na bandeja: índice do ícone, botão e ponto (tela) onde menus devem abrir.
@@ -83,7 +86,7 @@ const REBUILD_MS: u32 = 300;
 const STATS_MS: u32 = 2000;
 /// Largura (px) de cada fatia do brilho do wallpaper.
 const LUMA_BUCKET: usize = 16;
-const GLYPH_CPU: u16 = 0xE950;
+pub(crate) const GLYPH_CPU: u16 = 0xE950;
 const GLYPH_RAM: u16 = 0xE964;
 const TINT_DEBOUNCE_MS: u32 = 120;
 const TINT_REFRESH_MS: u32 = 1500;
@@ -105,6 +108,8 @@ thread_local! {
     static AUDIO: RefCell<Option<Audio>> = const { RefCell::new(None) };
     static USAGE: RefCell<Option<status::Usage>> = const { RefCell::new(None) };
     static TRAY_CLICK: Cell<Option<TrayClick>> = const { Cell::new(None) };
+    /// Barra cuja seta abriu a bandeja: cada barra recolhe ícones conforme a própria largura.
+    static TRAY_BAR: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -417,75 +422,161 @@ impl Bar {
         unsafe { self.dwrite.CreateTextLayout(text, fmt, w, h).ok() }
     }
 
-    /// Item de glifos (sobrepostos) com a borda direita em `x`; devolve a nova borda.
+    /// Item de glifos (sobrepostos) com a borda esquerda em `x`; devolve a nova borda direita.
     fn glyph_item(&self, items: &mut Vec<Item>, x: f32, kind: Kind, glyphs: &[(u16, f32)]) -> f32 {
         let (pad, w) = (PAD * self.scale, GLYPH_W * self.scale);
-        let l = x - w - 2.0 * pad;
         let text = glyphs
             .iter()
-            .filter_map(|&(g, alpha)| self.text_layout(&[g], &self.icon_fmt, w).map(|t| (t, l + pad, alpha)))
+            .filter_map(|&(g, alpha)| self.text_layout(&[g], &self.icon_fmt, w).map(|t| (t, x + pad, alpha)))
             .collect();
-        items.push(Item { kind, l, r: x, text });
-        l
+        let r = x + w + 2.0 * pad;
+        items.push(Item { kind, l: x, r, text });
+        r
     }
 
-    /// Posições dos itens, alinhados à direita (da direita para a esquerda).
-    fn relayout(&mut self) {
+    /// Largura do texto de um layout.
+    fn text_width(t: &IDWriteTextLayout) -> f32 {
+        let mut m = DWRITE_TEXT_METRICS::default();
+        let _ = unsafe { t.GetMetrics(&mut m) };
+        m.width.ceil()
+    }
+
+    /// Itens de um módulo a partir de x = 0 (a posição vem depois, em `relayout`).
+    /// Módulo novo: um braço aqui.
+    fn module_items(&self, m: Module) -> Vec<Item> {
         let s = self.scale;
         let pad = PAD * s;
         let mut items = Vec::new();
-        let mut x = self.pixmap.width() as f32 - 6.0 * s;
-
-        // CPU e RAM à esquerda: glifo apagado + valor; o valor tem largura mínima ("00%")
-        // para o texto não pular quando o número muda.
-        {
-            let mut lx = 6.0 * s + pad;
-            let mut text = Vec::new();
-            let width = |t: &IDWriteTextLayout| {
-                let mut m = DWRITE_TEXT_METRICS::default();
-                let _ = unsafe { t.GetMetrics(&mut m) };
-                m.width.ceil()
-            };
-            let value_w = self
-                .text_layout(&"00%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
-                .map(|t| width(&t))
-                .unwrap_or(30.0 * s);
-            let gw = GLYPH_W * s;
-            for (glyph, v) in [(GLYPH_CPU, self.cpu), (GLYPH_RAM, self.ram)] {
-                let value = v.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
-                if let Some(t) = self.text_layout(&[glyph], &self.icon_fmt, gw) {
-                    text.push((t, lx, 0.75));
-                    lx += gw + 2.0 * s;
+        match m {
+            // Glifo apagado + valor; o valor tem largura mínima ("00%") para o texto não pular
+            // quando o número muda.
+            Module::Stats => {
+                let mut lx = pad;
+                let mut text = Vec::new();
+                let value_w = self
+                    .text_layout(&"00%".encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
+                    .map(|t| Self::text_width(&t))
+                    .unwrap_or(30.0 * s);
+                let gw = GLYPH_W * s;
+                for (glyph, v) in [(GLYPH_CPU, self.cpu), (GLYPH_RAM, self.ram)] {
+                    let value = v.map(|v| format!("{v}%")).unwrap_or_else(|| "–".into());
+                    if let Some(t) = self.text_layout(&[glyph], &self.icon_fmt, gw) {
+                        text.push((t, lx, 0.75));
+                        lx += gw + 2.0 * s;
+                    }
+                    if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
+                        let w = Self::text_width(&t).max(value_w);
+                        text.push((t, lx, 1.0));
+                        lx += w + 8.0 * s;
+                    }
                 }
-                if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
-                    let w = width(&t).max(value_w);
-                    text.push((t, lx, 1.0));
-                    lx += w + 8.0 * s;
+                items.push(Item { kind: Kind::Stats, l: 0.0, r: lx - 8.0 * s + pad, text });
+            }
+            Module::Clock => {
+                let clock: Vec<u16> = self.clock.encode_utf16().collect();
+                if let Some(t) = self.text_layout(&clock, &self.text_fmt, 1000.0) {
+                    let cw = Self::text_width(&t) + 2.0 * pad;
+                    items.push(Item { kind: Kind::Clock, l: 0.0, r: cw, text: vec![(t, pad, 1.0)] });
                 }
             }
-            items.push(Item { kind: Kind::Stats, l: 6.0 * s, r: lx - 8.0 * s + pad, text });
+            // Seta dos ocultos (sempre: a engrenagem dela escolhe quem fica na barra) e depois
+            // os ícones visíveis, índice 0 mais à esquerda.
+            Module::Tray if !self.tray.is_empty() => {
+                let mut x = self.glyph_item(&mut items, 0.0, Kind::Overflow, &[(panel::glyph::CHEVRON_DOWN, 0.8)]);
+                for (i, e) in self.tray.iter().enumerate().filter(|(_, e)| e.visible) {
+                    let r = x + e.icon.width() as f32 + 2.0 * TRAY_PAD * s;
+                    items.push(Item { kind: Kind::Tray(i), l: x, r, text: Vec::new() });
+                    x = r;
+                }
+            }
+            Module::Tray => {}
+            Module::Control => {
+                self.glyph_item(&mut items, 0.0, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
+            }
         }
+        items
+    }
 
-        // Data e hora no centro da barra.
-        let clock: Vec<u16> = self.clock.encode_utf16().collect();
-        if let Some(t) = self.text_layout(&clock, &self.text_fmt, 1000.0) {
-            let mut m = DWRITE_TEXT_METRICS::default();
-            let _ = unsafe { t.GetMetrics(&mut m) };
-            let cw = m.width.ceil() + 2.0 * pad;
-            let l = ((self.pixmap.width() as f32 - cw) / 2.0).round();
-            items.push(Item { kind: Kind::Clock, l, r: l + cw, text: vec![(t, l + pad, 1.0)] });
+    /// Monta a barra pelos módulos das Configurações: a zona esquerda empilha a partir da
+    /// margem, a direita encosta na margem direita e o centro fica centralizado como grupo.
+    ///
+    /// Falta de espaço: como o centro desliza entre as laterais, tudo cabe enquanto
+    /// margens + módulos + um `gap` entre módulos vizinhos (inclusive de zonas vizinhas)
+    /// <= largura; o espaço da bandeja é o que sobra disso, esteja ela em qualquer zona.
+    /// Se faltar, os ícones da bandeja vão para a seta um a um, do maior índice (ponta
+    /// direita, longe da seta) para o menor; zerada a bandeja, sai o CPU/RAM se estiver na
+    /// mesma zona dela; só então o centro perde módulos, como antes. As preferências
+    /// (`shown`, módulos ligados) não mudam: com espaço de volta, tudo reaparece.
+    fn relayout(&mut self) {
+        let s = self.scale;
+        let (margin, gap) = (6.0 * s, 4.0 * s);
+        let width = self.pixmap.width() as f32;
+        for e in &mut self.tray {
+            e.visible = e.shown;
         }
-        x = self.glyph_item(&mut items, x, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
-
-        // Bandeja: à esquerda da central, índice 0 mais à esquerda.
-        x -= 4.0 * s;
-        for (i, e) in self.tray.iter().enumerate().rev().filter(|(_, e)| e.shown) {
-            let l = x - e.icon.width() as f32 - 2.0 * TRAY_PAD * s;
-            items.push(Item { kind: Kind::Tray(i), l, r: x, text: Vec::new() });
-            x = l;
+        let slots: Vec<_> = config::modules().into_iter().filter(|s| s.on).collect();
+        let tray_zone = slots.iter().find(|s| s.module == Module::Tray).map(|s| s.zone);
+        let mut mods: Vec<(config::Zone, Module, Vec<Item>)> = slots
+            .iter()
+            .map(|s| (s.zone, s.module, self.module_items(s.module)))
+            .filter(|m| !m.2.is_empty())
+            .collect();
+        let mod_w = |it: &[Item]| it.last().map_or(0.0, |i| i.r);
+        let mut excess = 2.0 * margin + mods.iter().map(|m| mod_w(&m.2)).sum::<f32>()
+            + gap * mods.len().saturating_sub(1) as f32
+            - width;
+        let mut collapsed = false;
+        while excess > 0.0 {
+            if let Some(e) = self.tray.iter_mut().rev().find(|e| e.visible).filter(|_| tray_zone.is_some()) {
+                e.visible = false;
+                excess -= e.icon.width() as f32 + 2.0 * TRAY_PAD * s;
+                collapsed = true;
+            } else if let Some(i) = mods.iter().position(|m| m.1 == Module::Stats && Some(m.0) == tray_zone) {
+                excess -= mod_w(&mods.remove(i).2) + gap;
+            } else {
+                break;
+            }
         }
-        if !self.tray.is_empty() {
-            self.glyph_item(&mut items, x, Kind::Overflow, &[(panel::glyph::CHEVRON_DOWN, 0.8)]);
+        if collapsed && let Some(m) = mods.iter_mut().find(|m| m.1 == Module::Tray) {
+            m.2 = self.module_items(Module::Tray);
+        }
+        // Itens de cada módulo, por zona, e a largura do grupo.
+        let mut zones: [Vec<Vec<Item>>; 3] = Default::default();
+        for (zone, _, items) in mods {
+            zones[zone as usize].push(items);
+        }
+        let group_w = |mods: &[Vec<Item>]| -> f32 {
+            let w: f32 = mods.iter().map(|it| it.last().map_or(0.0, |i| i.r)).sum();
+            w + gap * mods.len().saturating_sub(1) as f32
+        };
+        let [left, mut center, right] = zones;
+        let left_end = margin + group_w(&left);
+        let right_start = width - margin - group_w(&right);
+        // Centro: centralizado; se bate nas laterais, desliza para o lado livre e, se ainda
+        // não couber, perde módulos do fim até caber.
+        let mut cl = 0.0;
+        while !center.is_empty() {
+            let cw = group_w(&center);
+            let (lo, hi) = (if left.is_empty() { margin } else { left_end + gap }, if right.is_empty() { width - margin } else { right_start - gap });
+            cl = ((width - cw) / 2.0).round().max(lo).min(hi - cw);
+            if cl >= lo {
+                break;
+            }
+            center.pop();
+        }
+        let mut items = Vec::new();
+        for (mods, start) in [(left, margin), (center, cl), (right, right_start)] {
+            let mut x = start.round();
+            for mut m in mods {
+                let w = m.last().map_or(0.0, |i| i.r);
+                for it in &mut m {
+                    it.l += x;
+                    it.r += x;
+                    it.text.iter_mut().for_each(|t| t.1 += x);
+                }
+                items.extend(m);
+                x += w + gap;
+            }
         }
         self.items = items;
     }
@@ -543,7 +634,12 @@ impl Bar {
         if let Some(r) = Rect::from_xywh(0.0, h - 1.0, w, 1.0) {
             pm.fill_rect(r, &solid(line), id, None);
         }
-        if let Some((i, it)) = self.items.iter().enumerate().find(|(_, i)| Some(i.kind) == self.hot) {
+        // Item cujo painel está aberto nesta barra fica realçado como no hover.
+        let bar = self.rect;
+        let active =
+            self.items.iter().map(|it| it.kind).find(|&k| panel_for(k).is_some_and(|(key, _)| panel::is_open_in(key, bar)));
+        let highlighted = self.hot.or(active);
+        if let Some((i, it)) = self.items.iter().enumerate().find(|(_, i)| Some(i.kind) == highlighted) {
             let hover = if item_light[i] { [0, 0, 0, 24] } else { [255, 255, 255, 36] };
             let m = 2.0 * s;
             if let Some(p) = rounded_rect(it.l, m, it.r - it.l, h - 1.0 - 2.0 * m, 5.0 * s) {
@@ -686,13 +782,19 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Clock => ("clock", || Box::new(crate::calendar::Calendar::new())),
         Kind::Control => ("control", || Box::new(crate::control::ControlCenter::new())),
         Kind::Overflow => ("tray", || Box::new(crate::overflow::Overflow::new())),
-        Kind::Tray(_) | Kind::Stats => return None,
+        Kind::Stats => ("stats", || Box::new(crate::perf::PerfPanel::new())),
+        Kind::Tray(_) => return None,
     })
 }
 
 /// Janela da barra principal (destino das mensagens de trabalho feito em outra thread).
 pub fn hwnd() -> HWND {
     MAIN.get()
+}
+
+/// Um painel abriu ou fechou: refaz o realce do item dono dele nas barras.
+pub fn panel_visibility_changed() {
+    for_bars(|b| b.redraw());
 }
 
 /// Barra da janela `hwnd`.
@@ -710,7 +812,7 @@ fn for_bars(mut f: impl FnMut(&mut Bar)) {
     });
 }
 
-/// Relógio agora em todas as barras e timer até a virada do próximo minuto.
+/// Relógio agora em todas as barras e timer até a próxima virada (minuto ou segundo).
 fn update_clock() {
     let (text, ms) = status::clock();
     unsafe { SetTimer(Some(MAIN.get()), TIMER_CLOCK, ms, None) };
@@ -723,7 +825,20 @@ pub fn language_changed() {
     panel::language_changed();
 }
 
+/// Módulos ou relógio mudaram nas Configurações: relógio (e o timer dele) e todas as barras.
+pub fn settings_changed() {
+    update_clock();
+    update_stats();
+    for_bars(|b| {
+        b.relayout();
+        b.redraw();
+    });
+}
+
 fn update_stats() {
+    if !config::module_on(Module::Stats) {
+        return;
+    }
     let Some((cpu, ram)) = USAGE.with(|u| u.borrow_mut().as_mut().map(|u| (u.cpu(), u.ram()))) else { return };
     for_bars(|b| b.set_stats(cpu, ram));
 }
@@ -749,9 +864,10 @@ pub fn set_tray(icons: Vec<TrayEntry>) {
     }
 }
 
-/// Ícones da bandeja, na ordem dos índices de clique.
+/// Ícones da bandeja, na ordem dos índices de clique; `visible` é o da barra que abriu a
+/// seta (ou da principal).
 pub fn tray_list() -> Vec<TrayEntry> {
-    with_bar(MAIN.get(), |b| b.tray.clone()).unwrap_or_default()
+    with_bar(TRAY_BAR.get(), |b| b.tray.clone()).or_else(|| with_bar(MAIN.get(), |b| b.tray.clone())).unwrap_or_default()
 }
 
 /// Põe o ícone `i` na barra (`true`) ou dentro da bandeja, e guarda a escolha.
@@ -841,13 +957,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let hit = with_bar(hwnd, |b| b.hit(mouse_x(lp)).map(|k| (k, b.item_rect(k)))).flatten();
                 match hit {
                     Some((Kind::Tray(_), _)) => tray_click(hwnd, lp, TrayButton::Left),
-                    Some((Kind::Stats, _)) => {
-                        ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), None, None, SW_SHOWNORMAL);
-                    }
                     // Fora do borrow da barra: abrir o painel ativa outra janela.
                     // O painel abre no monitor do item (rect em coordenadas de tela).
                     Some((kind, Some(rect))) => {
                         if let Some((key, make)) = panel_for(kind) {
+                            if kind == Kind::Overflow {
+                                TRAY_BAR.set(hwnd);
+                            }
                             panel::toggle(key, rect, make);
                         }
                     }
@@ -891,6 +1007,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         let _ = KillTimer(Some(hwnd), TIMER_REBUILD);
                         rebuild();
                     }
+                    // Com a animação de minimizar na tela, espera ela acabar (ler a cor custa quadros).
+                    TIMER_TINT | TIMER_TINT_EVENT if crate::minimize::busy() => {}
                     TIMER_TINT => {
                         with_bar(hwnd, |b| b.update_tint());
                     }
@@ -1060,7 +1178,10 @@ fn remove(mut bar: Bar) {
 /// Uma barra por monitor. A do principal é sempre a primeira e mantém a janela (MAIN);
 /// barras de monitores que mudaram de área ou escala são refeitas nas mesmas janelas.
 fn rebuild() {
-    let mons = monitors();
+    let mut mons = monitors();
+    if !config::bar_all_monitors() {
+        mons.truncate(1);
+    }
     if mons.is_empty() {
         return;
     }
@@ -1110,6 +1231,11 @@ fn rebuild() {
         MAIN.set(b.hwnd);
     }
     BARS.with(|b| *b.borrow_mut() = bars);
+}
+
+/// Opção "todos os monitores" mudou: cria ou tira as barras dos outros monitores.
+pub fn monitors_changed() {
+    rebuild();
 }
 
 /// Cria as topbars (depois do dock: reaproveita a classe da janela de vidro dele).
@@ -1171,7 +1297,8 @@ unsafe extern "system" fn on_window_event(
         return;
     }
     let ours = BARS.with(|b| b.try_borrow().ok().map(|g| g.iter().any(|b| hwnd == b.hwnd || hwnd == b.glass)));
-    if ours != Some(false) {
+    // A animação de minimizar (minimize.rs) gera um evento por quadro.
+    if ours != Some(false) || hwnd == crate::minimize::overlay() {
         return;
     }
     // Só janelas de topo: as internas dos apps (vídeo, progresso...) geram eventos sem parar.

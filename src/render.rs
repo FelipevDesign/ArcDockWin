@@ -22,11 +22,13 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// Tamanho dos ícones e ampliação vêm das Configurações (config.rs).
     pub fn new(scale: f32) -> Self {
-        let (base, gap) = (48.0 * scale, 9.0 * scale);
+        let (base, gap) = (crate::config::icon_size() * scale, 9.0 * scale);
+        let zoom = if crate::config::magnify() { crate::config::magnify_scale() } else { 1.0 };
         Self {
             base,
-            max: base * 1.35,
+            max: base * zoom,
             gap,
             sep: 10.0 * scale, // espaçamento simétrico em torno do divisor
             pad: 8.0 * scale,
