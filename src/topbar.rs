@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Transform};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -92,6 +93,10 @@ const TINT_DEBOUNCE_MS: u32 = 120;
 const TINT_REFRESH_MS: u32 = 1500;
 /// Segunda leitura antes de gravar a cor de um app novo no banco.
 const TINT_CONFIRM_MS: u32 = 400;
+/// Wallpaper sob a barra: relido a cada evento durante WALL_SETTLE depois de a área ficar
+/// livre; depois, no máximo a cada WALL_REFRESH.
+const WALL_SETTLE: Duration = Duration::from_millis(1000);
+const WALL_REFRESH: Duration = Duration::from_secs(5);
 
 /// Altura da barra, espaço interno de cada item e largura de um glifo (px antes da escala).
 const HEIGHT: f32 = 24.0;
@@ -132,6 +137,38 @@ struct Item {
     text: Vec<(IDWriteTextLayout, f32, f32)>,
 }
 
+/// Direct2D em software desenha direto na DIB, por cima do que já está nela, sem dispositivo
+/// de GPU (96 dpi: 1 DIP = 1 px; a escala vai nos tamanhos). Um render target e uma fábrica
+/// DirectWrite para todas as barras (mesma thread; BindDC troca a DIB a cada desenho): cada
+/// render target em software custa ~2 MB.
+fn shared_d2d() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFactory)> {
+    thread_local! {
+        static D2D: std::cell::RefCell<Option<(ID2D1DCRenderTarget, IDWriteFactory)>> = const { std::cell::RefCell::new(None) };
+    }
+    D2D.with_borrow_mut(|slot| {
+        if let Some(pair) = slot {
+            return Ok(pair.clone());
+        }
+        unsafe {
+            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                ..Default::default()
+            };
+            let target = factory.CreateDCRenderTarget(&props)?;
+            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            Ok(slot.insert((target, dwrite)).clone())
+        }
+    })
+}
+
 struct Bar {
     hwnd: HWND,
     /// Janela atrás que só fornece o desfoque (vidro).
@@ -165,6 +202,10 @@ struct Bar {
     wall: Vec<f32>,
     /// Primeira leitura de um app ainda sem cor no banco: (app, cor), esperando confirmação.
     tint_pending: Option<(String, [u8; 3])>,
+    /// Desde quando a área sob a barra está livre (None = coberta ou ainda não vista) e a
+    /// última leitura do wallpaper.
+    wall_since: Option<Instant>,
+    wall_read: Option<Instant>,
     /// Releitura da cor já agendada (TIMER_TINT_EVENT).
     tint_queued: bool,
     cpu: Option<u8>,
@@ -202,23 +243,7 @@ impl Bar {
             let memdc = CreateCompatibleDC(None);
             SelectObject(memdc, HGDIOBJ(dib.0));
 
-            // Direct2D em software desenha direto na DIB, por cima do que já está nela, sem
-            // dispositivo de GPU (96 dpi: 1 DIP = 1 px; a escala vai nos tamanhos).
-            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let props = D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                ..Default::default()
-            };
-            let target = factory.CreateDCRenderTarget(&props)?;
-            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let (target, dwrite) = shared_d2d()?;
             let mut fonts: Option<IDWriteFontCollection> = None;
             dwrite.GetSystemFontCollection(&mut fonts, false)?;
             let has = |name: PCWSTR| {
@@ -277,6 +302,8 @@ impl Bar {
                 fullscreen: false,
                 app_color: None,
                 wall: Vec::new(),
+                wall_since: None,
+                wall_read: None,
                 tint_pending: None,
                 tint_queued: false,
                 clock: String::new(),
@@ -301,11 +328,14 @@ impl Bar {
     /// senão lê da tela e grava quando duas leituras seguidas concordam.
     fn update_tint(&mut self) {
         let mut next = 0;
-        let color = if panel::any_open() || self.fullscreen {
+        let hidden = panel::any_open() || self.fullscreen;
+        let below = if hidden { crate::tint::Below::Window } else { crate::tint::below(self.rect) };
+        let color = if hidden {
             // Painel aberto cobre a faixa lida: mantém a cor e tenta de novo depois.
             next = TINT_REFRESH_MS;
             self.app_color
-        } else if let crate::tint::Below::Maximized(win) = crate::tint::below(self.rect) {
+        } else if let crate::tint::Below::Maximized(win) = below {
+            self.wall_since = None;
             let key = crate::tint::app_key(win);
             if let Some(c) = key.as_deref().and_then(crate::colordb::get) {
                 self.tint_pending = None;
@@ -331,15 +361,28 @@ impl Bar {
         } else {
             self.tint_pending = None;
             // Área de trabalho livre embaixo: relê o brilho do wallpaper (com janela solta
-            // encostada, mantém a última leitura).
-            if matches!(crate::tint::below(self.rect), crate::tint::Below::Desktop)
-                && let Some(l) = crate::tint::wallpaper_luma(self.rect, LUMA_BUCKET)
-                && l != self.wall
-            {
-                self.wall = l;
-                if self.app_color.is_none() {
-                    self.redraw();
+            // encostada, mantém a última leitura). Ler a tela custa ~6 ms: a cada evento só
+            // logo depois de a área ficar livre (pega o fim das animações); depois, no máximo
+            // a cada WALL_REFRESH (arrastar uma janela gera eventos sem parar).
+            if matches!(below, crate::tint::Below::Desktop) {
+                let now = Instant::now();
+                let settling = now - *self.wall_since.get_or_insert(now) < WALL_SETTLE;
+                if settling || self.wall_read.is_none_or(|t| now - t >= WALL_REFRESH) {
+                    self.wall_read = Some(now);
+                    if settling {
+                        next = TINT_CONFIRM_MS;
+                    }
+                    if let Some(l) = crate::tint::wallpaper_luma(self.rect, LUMA_BUCKET)
+                        && l != self.wall
+                    {
+                        self.wall = l;
+                        if self.app_color.is_none() {
+                            self.redraw();
+                        }
+                    }
                 }
+            } else {
+                self.wall_since = None;
             }
             None
         };
@@ -1072,6 +1115,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_SETTINGCHANGE => {
                 // Pode ser a troca de tema claro/escuro ou de wallpaper.
                 with_bar(hwnd, |b| {
+                    b.wall_since = None;
                     b.redraw();
                     SetTimer(Some(hwnd), TIMER_TINT, 300, None);
                 });

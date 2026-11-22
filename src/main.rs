@@ -79,6 +79,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Abre/fecha o lançador. Mandada de fora (atalho do AutoHotkey) para a janela do dock
 /// (classe `ArcDockWin`): `PostMessage 0x8032`.
 const WM_LAUNCHER: u32 = WM_APP + 50;
+/// Aviso do shell: a Lixeira mudou (stacks::watch_trash).
+const WM_TRASH: u32 = WM_APP + 51;
 
 thread_local! {
     static DOCK: RefCell<Option<Dock>> = const { RefCell::new(None) };
@@ -124,6 +126,11 @@ struct Dock {
     shown: bool,
     /// Última vez que havia motivo para o dock ficar visível.
     last_inside: Option<Instant>,
+    /// Último resultado de `covered` e o retângulo testado; vale até um evento de janela
+    /// (COVER_DIRTY) ou o retângulo mudar.
+    cover: Option<(RECT, bool)>,
+    /// Tiques do TIMER_REFRESH (varredura completa a cada 5).
+    ticks: u32,
     /// Arrastar ícones para reordenar/fixar/desafixar (drag.rs).
     drag: drag::Drag,
 }
@@ -170,6 +177,8 @@ impl Dock {
                 slide_start: Instant::now(),
                 shown: true,
                 last_inside: None,
+                cover: None,
+                ticks: 0,
                 drag: drag::Drag::default(),
             }
         }
@@ -238,6 +247,20 @@ impl Dock {
     }
 
     fn refresh(&mut self) -> bool {
+        self.refresh_some(true, true)
+    }
+
+    /// Refresh do timer de 1 s: apps só depois de um evento de janela, Lixeira só depois de
+    /// um aviso do shell; a cada 5 s tudo, por segurança.
+    fn refresh_tick(&mut self) -> bool {
+        self.ticks = self.ticks.wrapping_add(1);
+        let sweep = self.ticks % 5 == 0;
+        let apps = APPS_DIRTY.swap(false, Ordering::Relaxed) || sweep;
+        let trash = TRASH_DIRTY.swap(false, Ordering::Relaxed) || sweep;
+        self.refresh_some(apps, trash)
+    }
+
+    fn refresh_some(&mut self, apps: bool, trash: bool) -> bool {
         // Durante o arrasto a lista é do arrasto (drag.rs).
         if self.drag.busy() {
             return false;
@@ -248,8 +271,8 @@ impl Dock {
             self.icons_mtime = mtime;
             apps::reload_icons(&mut self.apps, self.icon_size);
         }
-        let stacks = self.stacks.refresh(icons_changed);
-        apps::refresh(&mut self.apps, self.icon_size) || icons_changed || stacks
+        let stacks = self.stacks.refresh(icons_changed, trash);
+        (apps && apps::refresh(&mut self.apps, self.icon_size)) || icons_changed || stacks
     }
 
     /// Deslocamento vertical atual da animação de esconder.
@@ -273,7 +296,7 @@ impl Dock {
         let focus = self.apps.iter().position(|a| a.windows.contains(&fg));
         let stack: &[App] = if config::stacks() { &self.stacks.items } else { &[] };
         let items: Vec<&App> = self.apps.iter().chain(stack).collect();
-        render::draw(&mut self.pixmap, &slots, &seps, &items, &self.m, &self.theme, self.hover, focus);
+        render::draw(&mut self.pixmap, &slots, &seps, &items, &self.m, &self.theme, self.hover, focus, self.animating);
         self.update_glass(render::box_rect(&slots, &self.m, self.pixmap.height() as f32));
 
         // RGBA (tiny-skia) -> BGRA (GDI), ambos com alfa pré-multiplicado.
@@ -454,21 +477,27 @@ impl Dock {
     }
 
     /// Alguma janela encosta no fundo do dock em repouso (sem zoom), estendido até a base da tela?
-    fn covered(&self) -> bool {
+    fn covered(&mut self) -> bool {
         let w = self.pixmap.width() as f32;
         let slots = render::layout(self.count(), &self.seps(), w, &self.m, self.mx, 0.0);
         let Some((l, t, r, _)) = render::box_rect(&slots, &self.m, self.pixmap.height() as f32) else {
             return false;
         };
         let (_, sh) = taskbar::screen_size();
-        let mut s = CoverSearch {
-            rect: RECT { left: self.pos.x + l, top: self.pos.y + t, right: self.pos.x + r, bottom: sh },
-            own: [self.hwnd, self.glass],
-            hit: false,
-        };
+        let rect = RECT { left: self.pos.x + l, top: self.pos.y + t, right: self.pos.x + r, bottom: sh };
+        // Percorrer as janelas custa ~75 µs; sem evento de janela desde a última vez, o
+        // resultado não mudou.
+        if !COVER_DIRTY.swap(false, Ordering::Relaxed)
+            && let Some((last, hit)) = self.cover
+            && last == rect
+        {
+            return hit;
+        }
+        let mut s = CoverSearch { rect, own: [self.hwnd, self.glass], hit: false };
         unsafe {
             let _ = EnumWindows(Some(cover_proc), LPARAM(&mut s as *mut _ as isize));
         }
+        self.cover = Some((rect, s.hit));
         s.hit
     }
 
@@ -741,6 +770,7 @@ unsafe extern "system" fn on_foreground(
     _: u32,
     _: u32,
 ) {
+    COVER_DIRTY.store(true, Ordering::Relaxed);
     with_dock(|d| {
         // O que está atrás do vidro mudou: re-amostra depois que a animação do Windows acaba.
         unsafe {
@@ -755,6 +785,25 @@ unsafe extern "system" fn on_foreground(
         }
         d.redraw();
     });
+}
+
+/// Janela apareceu, sumiu, mexeu, mudou de título ou foi escondida pelo DWM: marca como velhos
+/// `covered` e (menos no movimento) a lista de apps.
+unsafe extern "system" fn on_window_change(
+    _: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    obj: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if !hwnd.is_invalid() && obj == OBJID_WINDOW.0 && child == CHILDID_SELF as i32 {
+        COVER_DIRTY.store(true, Ordering::Relaxed);
+        if event != EVENT_OBJECT_LOCATIONCHANGE {
+            APPS_DIRTY.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Menu do botão direito: com `target` (key, fixado, janelas), as opções do app; sempre "Sair".
@@ -851,6 +900,11 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_TRASH => {
+                stacks::trash_notified(wp.0, lp.0);
+                TRASH_DIRTY.store(true, Ordering::Relaxed);
+                LRESULT(0)
+            }
             WM_LAUNCHER => {
                 launcher::toggle();
                 LRESULT(0)
@@ -926,7 +980,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                             d.redraw();
                         }
                         taskbar::ensure_hidden();
-                        if d.refresh() {
+                        if d.refresh_tick() {
                             d.redraw();
                         }
                     }
@@ -1039,6 +1093,13 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 /// Menu do botão direito aberto: o dock não some enquanto ele estiver na tela.
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Alguma janela apareceu, sumiu, mexeu ou mudou de área de trabalho: `covered` refaz a busca.
+static COVER_DIRTY: AtomicBool = AtomicBool::new(true);
+/// Janela de app pode ter aberto, fechado, mudado de título ou de área de trabalho.
+static APPS_DIRTY: AtomicBool = AtomicBool::new(true);
+/// O shell avisou mudança na Lixeira (stacks::watch_trash).
+static TRASH_DIRTY: AtomicBool = AtomicBool::new(true);
 
 /// Última janela em primeiro plano fora do dock (HWND como número).
 static LAST_FG: AtomicIsize = AtomicIsize::new(0);
@@ -1158,6 +1219,16 @@ fn main() -> windows::core::Result<()> {
             0,
             WINEVENT_OUTOFCONTEXT,
         );
+
+        stacks::watch_trash(hwnd, WM_TRASH);
+        // O que encosta no dock (auto-esconder) e a lista de apps só mudam com estes eventos.
+        for (from, to) in [
+            (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
+            (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE),
+            (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
+        ] {
+            let _ = SetWinEventHook(from, to, None, Some(on_window_change), 0, 0, WINEVENT_OUTOFCONTEXT);
+        }
 
         // Parado: espera mensagens. Animando: um quadro por atualização da tela (DwmFlush
         // espera o próximo quadro do compositor), na taxa do monitor (60, 120, 144 Hz...).
