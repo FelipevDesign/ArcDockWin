@@ -1087,8 +1087,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             _ if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 => {
-                // O Explorer reiniciou e recriou a barra: esconde de novo.
+                // O Explorer reiniciou e recriou a barra: esconde de novo e devolve à barra de
+                // cima a reserva do topo da tela, que ele esqueceu.
                 taskbar::hide();
+                topbar::explorer_restarted();
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),

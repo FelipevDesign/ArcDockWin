@@ -1231,6 +1231,19 @@ unsafe fn new_windows() -> Option<(HWND, HWND)> {
     }
 }
 
+/// O Explorer reiniciou e esqueceu as AppBars: sem isto a área de trabalho volta a ocupar a
+/// tela toda e janelas maximizadas ficam por baixo da barra (botões de fechar escondidos).
+/// Registra cada barra de novo e repõe a reserva da borda de cima.
+pub fn explorer_restarted() {
+    for_bars(|b| {
+        let mut abd = b.appbar_data();
+        unsafe {
+            SHAppBarMessage(ABM_NEW, &mut abd);
+        }
+        b.place();
+    });
+}
+
 /// Tira a AppBar do sistema e destrói as janelas.
 fn remove(mut bar: Bar) {
     let mut abd = bar.appbar_data();
