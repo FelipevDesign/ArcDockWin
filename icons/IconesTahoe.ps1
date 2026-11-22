@@ -38,7 +38,7 @@ $Extra = @{
   control = 'preferences-system'; pythonw = 'python'; robloxplayerbeta = 'roblox'; robloxstudiobeta = 'roblox'
   notepad = 'accessories-text-editor'; charmap = 'accessories-character-map'
   mstsc = 'remote-desktop'; cleanmgr = 'accessories-system-cleaner'; dfrgui = 'gnome-disks'
-  zapfast = 'whatsapp'; osk = 'preferences-desktop-keyboard'; msconfig = 'preferences-system'; msinfo32 = 'preferences-system'
+  zapfast = 'whatsapp'; 'whatsapp.root' = 'whatsapp'; osk = 'preferences-desktop-keyboard'; msconfig = 'preferences-system'; msinfo32 = 'preferences-system'
   firefox = 'firefox'; outlook = 'ms-outlook'; winword = 'ms-word'; excel = 'ms-excel'
   powerpnt = 'ms-powerpoint'; onenote = 'ms-onenote'; discord = 'discord'; obsidian = 'obsidian'
 }
@@ -50,7 +50,11 @@ $ExplorerFolders = @(
   @{ Id = '{374DE290-123F-4565-9164-39C4925E467B}'; Icon = 'folder-download' },
   @{ Id = '{24ad3ad4-a569-4530-98e1-ab02f9417aa8}'; Icon = 'folder-images' },
   @{ Id = '{3dfdf296-dbec-4fb4-81d1-6a3438bcf4de}'; Icon = 'folder-music' },
-  @{ Id = '{f86fa3ab-70d2-4fc7-9c99-fcbf05467f3a}'; Icon = 'folder-videos' }
+  @{ Id = '{f86fa3ab-70d2-4fc7-9c99-fcbf05467f3a}'; Icon = 'folder-videos' },
+  # Barra lateral: Início, Galeria e Rede
+  @{ Id = '{f874310e-b6b7-47dc-bc84-b9e6b38f5903}'; Icon = 'user-home' },
+  @{ Id = '{e88865ea-0e1c-4e20-9aa6-edcd0212c87c}'; Icon = 'shotwell'; Dir = 'apps' },
+  @{ Id = '{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}'; Icon = 'network-workgroup'; Dir = 'apps' }
 )
 
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
@@ -143,7 +147,7 @@ function Invoke-Aplicar([switch]$SoTestar) {
   # File Explorer: Downloads, Desktop, Documents, Pictures, Music and Videos use
   # individual Tahoe icons; these are per-user shell overrides and are backed up too.
   foreach ($folder in $ExplorerFolders) {
-    $icon = Join-Path $Sis "$($folder.Icon).ico"
+    $icon = Join-Path $(if ($folder.Dir -eq 'apps') { $Apps } else { $Sis }) "$($folder.Icon).ico"
     if (Test-Path $icon) {
       $key = "HKCU:\Software\Classes\CLSID\$($folder.Id)\DefaultIcon"
       Set-Reg $b $key '(default)' "$icon,0"
@@ -169,6 +173,15 @@ function Invoke-Aplicar([switch]$SoTestar) {
     }
   }
   $dock['start'] = $idx['view-app-grid']  # botão Iniciar da dock
+  # Ajustes pessoais (nome.exe=C:\caminho\icone.ico) têm prioridade sobre o tema e
+  # sobrevivem às reaplicações, que reescrevem o icons.txt da dock do zero.
+  $custom = Join-Path $Base 'icons-custom.txt'
+  if (Test-Path $custom) {
+    foreach ($l in Get-Content $custom -Encoding UTF8) {
+      $k, $v = $l -split '=', 2
+      if ($k -and $v -and -not $k.StartsWith('#') -and (Test-Path $v.Trim())) { $dock[$k.Trim().ToLower()] = $v.Trim() }
+    }
+  }
   $txt = ($dock.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "`r`n"
   if ((Test-Path (Split-Path $DockIcons)) -and (-not (Test-Path $DockIcons) -or [IO.File]::ReadAllText($DockIcons) -ne $txt)) {
     [IO.File]::WriteAllText($DockIcons, $txt)  # sem BOM: a dock lê o arquivo direto

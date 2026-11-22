@@ -442,24 +442,29 @@ impl Dock {
         }
     }
 
-    /// Mouse encostado na borda de baixo da tela, na largura do dock.
+    /// Mouse encostado na borda de baixo da tela, em qualquer ponto da largura (como no macOS).
     fn at_edge(&self) -> bool {
         let mut pt = POINT::default();
         if unsafe { GetCursorPos(&mut pt) }.is_err() {
             return false;
         }
-        let (_, sh) = taskbar::screen_size();
-        if pt.y < sh - 2 || pt.y >= sh {
-            return false;
-        }
-        render::box_rect(&self.slots(), &self.m, self.pixmap.height() as f32)
-            .is_some_and(|(l, _, r, _)| pt.x >= self.pos.x + l && pt.x < self.pos.x + r)
+        let (sw, sh) = taskbar::screen_size();
+        pt.y >= sh - 2 && pt.y < sh && pt.x >= 0 && pt.x < sw
     }
 
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
         let now = Instant::now();
-        if !config::autohide() || self.tracking || self.drag.busy() || MENU_OPEN.load(Ordering::Relaxed) || minimize::busy() || self.at_edge() || !self.covered() {
+        // Com a pilha da Downloads aberta o dock fica à vista (como no macOS).
+        if !config::autohide()
+            || self.tracking
+            || self.drag.busy()
+            || MENU_OPEN.load(Ordering::Relaxed)
+            || minimize::busy()
+            || panel::is_open("downloads")
+            || self.at_edge()
+            || !self.covered()
+        {
             self.last_inside = Some(now);
         }
         // Aparecer é imediato; esconder espera a carência.

@@ -235,6 +235,9 @@ To change the icon of a single app on the dock, without the script, edit `%APPDA
 spotify.exe=C:\Icones\MacTahoe\apps\spotify.ico
 ```
 
+**Ícones Tahoe** rewrites `icons.txt` every time it applies the icons. To keep your own changes, put the same lines
+in `C:\Icones\MacTahoe\icons-custom.txt` instead: they take priority over the theme and are merged in on every run.
+
 ### Undo
 
 ```powershell

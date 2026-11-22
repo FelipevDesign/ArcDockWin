@@ -93,9 +93,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DELETE, VK_END, VK_ESCAPE,
-    VK_DOWN, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP,
+    GetAsyncKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
+    VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_UP,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -342,6 +343,8 @@ const CLASS: PCWSTR = w!("ArcDockWinPanel");
 const WM_PANEL_CLOSE: u32 = WM_APP + 20;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM: usize = 1;
+/// Vigia de clique fora/Esc quando o painel não conseguiu a ativação.
+const TIMER_WATCH: usize = 2;
 const ANIM_MS: f32 = 120.0;
 /// Deslize da animação de abrir (px antes da escala).
 const SLIDE: f32 = 6.0;
@@ -1778,8 +1781,37 @@ fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: 
     // Ativa para receber o teclado; fecha ao perder a ativação (WM_ACTIVATE).
     unsafe {
         let _ = SetForegroundWindow(hwnd);
+        // O Windows pode negar o primeiro plano (trava de foco), ou dar e tirar sem
+        // WA_INACTIVE: aí não chega o aviso nem o Esc, e o painel ficaria aberto. Então vigia
+        // por timer enquanto estiver aberto (morre junto com a janela).
+        SetTimer(Some(hwnd), TIMER_WATCH, 50, None);
     }
     crate::topbar::panel_visibility_changed();
+}
+
+/// Painel sem ativação: fecha com Esc, com o primeiro plano mudando para outra janela ou com
+/// clique fora. Cliques nas nossas janelas (dock, barra, o próprio painel) ficam com elas.
+fn outside(prev_fg: HWND) -> bool {
+    unsafe {
+        let down = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0;
+        if down(VK_ESCAPE) {
+            return true;
+        }
+        let ours = |h: HWND| {
+            let mut pid = 0;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            pid == GetCurrentProcessId()
+        };
+        let fg = GetForegroundWindow();
+        if fg != prev_fg && !fg.is_invalid() && !ours(fg) {
+            return true;
+        }
+        if !(down(VK_LBUTTON) || down(VK_RBUTTON) || down(VK_MBUTTON)) {
+            return false;
+        }
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt).is_ok() && !ours(WindowFromPoint(pt))
+    }
 }
 
 /// Fecha o painel aberto, se houver. Seguro de chamar de dentro de [`PanelContent::event`].
@@ -1923,6 +1955,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_TIMER if wp.0 == TIMER_ANIM => {
                 with_panel(|p| p.animate());
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == TIMER_WATCH => {
+                if with_panel(|p| outside(p.prev_fg)) == Some(true) {
+                    close_now(false);
+                }
                 LRESULT(0)
             }
             WM_SETTINGCHANGE => {
