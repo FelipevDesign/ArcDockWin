@@ -452,7 +452,10 @@ pub fn activate(source: &str, windows: &[HWND]) {
             return;
         }
         let fg = GetForegroundWindow();
-        match windows.iter().position(|&h| h == fg) {
+        // Minimizada pode continuar "em primeiro plano" (sem outra janela para ativar, o
+        // Windows deixa o foco nela): não conta como em foco, senão minimizaria de novo.
+        let focused = if IsIconic(fg).as_bool() { None } else { windows.iter().position(|&h| h == fg) };
+        match focused {
             Some(_) if windows.len() == 1 => {
                 crate::minimize::capture(fg); // foto antes de sumir (animação até o ícone)
                 let _ = ShowWindow(fg, SW_MINIMIZE);
