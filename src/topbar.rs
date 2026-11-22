@@ -928,6 +928,29 @@ pub fn set_tray_shown(i: usize, shown: bool) {
     }
 }
 
+/// Retângulo da barra principal na tela (None sem barra ou durante reentrada).
+pub fn main_rect() -> Option<RECT> {
+    with_bar(MAIN.get(), |b| b.rect)
+}
+
+/// Retângulo na tela do ícone `i` da bandeja, para Shell_NotifyIconGetRect (apps abrem o menu
+/// ali). Ícone dentro do painel Bandeja: um quadrado do tamanho da barra em volta do cursor,
+/// que acabou de clicar nele no painel. None se a barra está ocupada (reentrada) ou o módulo da
+/// bandeja está desligado.
+pub fn tray_icon_rect(i: usize) -> Option<RECT> {
+    with_bar(MAIN.get(), |b| {
+        if let Some(r) = b.item_rect(Kind::Tray(i)) {
+            return Some(r);
+        }
+        b.item_rect(Kind::Overflow)?;
+        let mut pt = POINT::default();
+        unsafe { GetCursorPos(&mut pt).ok()? };
+        let half = (b.rect.bottom - b.rect.top) / 2;
+        Some(RECT { left: pt.x - half, top: pt.y - half, right: pt.x + half, bottom: pt.y + half })
+    })
+    .flatten()
+}
+
 /// Clique no ícone `i` vindo de fora da barra (a bandeja); o menu abre no cursor.
 pub fn tray_click_index(i: usize, button: TrayButton) {
     let mut anchor = POINT::default();
