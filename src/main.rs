@@ -660,7 +660,9 @@ fn start_tray() {
             .into_iter()
             .filter_map(|t| {
                 let mut icon = t.icon.or_else(|| tiny_skia::Pixmap::new(px, px))?;
-                grayscale(&mut icon);
+                if !config::tray_color() {
+                    grayscale(&mut icon);
+                }
                 let shown = colordb::tray_shown(&t.key).unwrap_or(true);
                 Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown, visible: shown })
             })

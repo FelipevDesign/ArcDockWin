@@ -149,7 +149,7 @@ Everything lives in `%APPDATA%\ArcDockWin\`:
 | `pinned.txt` | Apps pinned to the dock, one path per line (you can edit it by hand). |
 | `icons.txt` | Per-app icon overrides (`name.exe=C:\path\icon.ico`), see below. |
 | `colors.db` | Each app's colour on the top bar and which tray icons are visible (SQLite). |
-| `settings.txt` | Options from the Settings window (`key=value`, e.g. `icon_size=48`, `mod.clock=center,0,on`). Missing keys use the defaults. |
+| `settings.txt` | Options from the Settings window (`key=value`, e.g. `icon_size=48`, `mod.clock=center,0,on`). Missing keys use the defaults. `tray_color=1` (no UI yet) keeps the app colors in tray icons instead of grayscale. |
 | `animation.txt` | Minimize animation: `enabled=1` or `0`, `effect=genie` or `scale`. |
 
 ### Known limitations
