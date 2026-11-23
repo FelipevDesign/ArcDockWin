@@ -106,6 +106,7 @@ pub fn is_open() -> bool {
 
 /// O mouse está sobre o ícone de um app (`Some` se ele tem 2+ janelas) ou sobre outra parte do dock.
 pub fn hover(target: Option<Target>) {
+    let target = target.filter(|_| crate::config::window_previews());
     if target.is_none() && ST.with(|st| st.try_borrow().map(|s| s.is_none()).unwrap_or(true)) {
         return; // nada aberto e nada a fechar: não cria a janela à toa
     }
