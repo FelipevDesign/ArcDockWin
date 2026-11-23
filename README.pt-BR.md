@@ -47,8 +47,8 @@ valor original volta logo depois, quando o ArcDockWin é fechado e também pelo 
 ### Barra do topo
 - Aparece em **todos os monitores** por padrão; dá para limitar ao principal em Configurações → Barra do topo.
 - **Assume a cor do app em foco** (10% mais escura, para separar a barra do app), na hora em que você troca de janela.
-- Montada em **módulos**: CPU/RAM, Relógio, Bandeja e Central de Controle. Cada um pode ser desligado, ir para a
-  zona da esquerda, do centro ou da direita e mudar de ordem dentro da zona.
+- Montada em **módulos**: CPU/RAM, Relógio, Bandeja, Central de Controle e os opcionais de uso do Claude e do Codex.
+  Cada um pode ser desligado, ir para a zona da esquerda, do centro ou da direita e mudar de ordem dentro da zona.
 - Relógio com calendário ao clicar; 24 h ou 12 h, segundos e data opcionais.
 - Ícones da bandeja com painel dos ocultos e escolha de quais ficam na barra. Quando falta espaço, os ícones se
   recolhem sozinhos para a seta (sem mudar a sua escolha) e o CPU/RAM é o último a sumir.
@@ -65,6 +65,22 @@ As temperaturas dependem do hardware: a da CPU vem da biblioteca da AMD e só fu
 funciona em placas Radeon (AMD) e NVIDIA. O que não dá para ler aparece como "—".
 
 ![Painel Desempenho](docs/screenshots/performance.png)
+
+### Uso do Claude e do Codex
+Dois módulos opcionais da barra do topo, desligados por padrão (ligue em Configurações → Barra do topo), para quem usa
+o [Claude Code](https://claude.com/claude-code) ou o [Codex](https://openai.com/codex). A barra mostra quanto da
+sessão de 5 horas já foi usado, e o clique abre um painel com:
+- **Limites**: a sessão de 5 horas e os limites semanais, com o tempo que falta para cada um zerar.
+- **Tokens por dia** nos últimos 7 dias e **tokens por modelo**, lidos dos registros locais das sessões.
+- Um link para a página de uso no claude.ai ou no chatgpt.com.
+
+Os limites vêm do mesmo serviço que os apps oficiais consultam, com o login que eles já salvaram no PC
+(`~/.claude/.credentials.json` e `~/.codex/auth.json`). O ArcDockWin nunca renova esse login: quando ele vence, o
+painel pede para abrir o app. Os números são atualizados a cada 5 minutos.
+
+| Claude | Codex |
+| :---: | :---: |
+| ![Painel de uso do Claude](docs/screenshots/usage-claude.png) | ![Painel de uso do Codex](docs/screenshots/usage-codex.png) |
 
 ### Central de Controle
 No visual do macOS Tahoe, com cartões arredondados:

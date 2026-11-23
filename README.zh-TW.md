@@ -31,7 +31,7 @@ ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言，內建葡萄牙文�
 ### 頂端選單列與控制中心
 
 - 預設每個螢幕都有選單列，也可只顯示在主螢幕。
-- 選單列由模組組成：CPU／記憶體、時鐘、系統匣與控制中心。每個模組可開關、放在左／中／右區，並調整區內順序。
+- 選單列由模組組成：CPU／記憶體、時鐘、系統匣、控制中心，以及選用的 Claude 與 Codex 用量。每個模組可開關、放在左／中／右區，並調整區內順序。
 - 時鐘可選 24／12 小時制、秒數與日期；點選時鐘會開啟日曆。
 - 系統匣圖示可選擇固定在選單列或收納到溢位面板；空間不足時會自動收進箭頭，CPU／記憶體最後才隱藏。
 - 系統匣 App 的選單會在選單列上的圖示旁開啟；在隱藏圖示面板中按兩下圖示，行為與 Windows 工作列相同。
@@ -41,6 +41,20 @@ ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言，內建葡萄牙文�
 ### 效能面板
 
 點選選單列上的 CPU／記憶體，可查看 CPU、記憶體與 GPU（含顯示記憶體）使用率，以及 CPU 與 GPU 溫度，並可開啟工作管理員。GPU 與溫度只在面板開啟時讀取。CPU 溫度透過 AMD 程式庫讀取，僅支援 Ryzen APU；GPU 溫度支援 Radeon 與 NVIDIA 顯示卡；無法讀取時顯示「—」。
+
+### Claude 與 Codex 用量
+
+兩個選用的選單列模組，預設關閉（在「設定 → 頂端選單列」開啟），適合使用 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex) 的人。選單列顯示 5 小時工作階段已用的比例；點選後的面板包含：
+
+- **限制**：5 小時工作階段與每週限制，以及各自重設前的剩餘時間。
+- 最近 7 天的**每日 Token** 與**各模型 Token**，從本機的工作階段記錄讀取。
+- 前往 claude.ai 或 chatgpt.com 用量頁面的連結。
+
+限制資料來自官方 App 查詢的同一服務，使用它們已存在電腦上的登入資訊（`~/.claude/.credentials.json` 與 `~/.codex/auth.json`）。ArcDockWin 不會更新登入；登入過期時，面板會請你開啟該 App。數字每 5 分鐘更新一次。
+
+| Claude | Codex |
+| :---: | :---: |
+| ![Claude 用量面板](docs/screenshots/usage-claude.png) | ![Codex 用量面板](docs/screenshots/usage-codex.png) |
 
 ### 設定
 

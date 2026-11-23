@@ -48,8 +48,8 @@ crashes.
 ### Top bar
 - Shown on **every monitor** by default; can be limited to the main monitor in Settings → Top bar.
 - **Takes the colour of the focused app** (10% darker, to separate the bar from the app), the moment you switch windows.
-- Built from **modules**: CPU/RAM, Clock, Tray and Control Center. Each one can be turned off, placed in the left,
-  centre or right zone, and ordered inside its zone.
+- Built from **modules**: CPU/RAM, Clock, Tray, Control Center and the optional Claude and Codex usage. Each one can
+  be turned off, placed in the left, centre or right zone, and ordered inside its zone.
 - Clock with a calendar when clicked; 24 h or 12 h, optional seconds and date.
 - Tray icons with a panel for hidden icons and a choice of which ones stay on the bar. When the bar runs out of
   room, tray icons fold into the arrow on their own (your choice of visible icons is kept) and CPU/RAM is the last
@@ -67,6 +67,22 @@ Temperatures depend on the hardware: the CPU temperature comes from the AMD libr
 the GPU temperature works on Radeon (AMD) and NVIDIA cards. Anything that cannot be read shows "—".
 
 ![Performance panel](docs/screenshots/performance.png)
+
+### Claude and Codex usage
+Two optional top bar modules, off by default (turn them on in Settings → Top bar), for people who use
+[Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex). The bar shows how much of the
+5-hour session has been used, and a click opens a panel with:
+- **Limits**: the 5-hour session and the weekly limits, with the time left until each one resets.
+- **Tokens per day** over the last 7 days and **tokens per model**, read from the local session logs.
+- A link to the usage page on claude.ai or chatgpt.com.
+
+The limits come from the same service the official apps query, using the login they already saved on the PC
+(`~/.claude/.credentials.json` and `~/.codex/auth.json`). ArcDockWin never renews that login: when it expires, the
+panel asks you to open the app. The numbers refresh every 5 minutes.
+
+| Claude | Codex |
+| :---: | :---: |
+| ![Claude usage panel](docs/screenshots/usage-claude.png) | ![Codex usage panel](docs/screenshots/usage-codex.png) |
 
 ### Control Center
 macOS Tahoe look, with rounded cards:
