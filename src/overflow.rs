@@ -2,6 +2,10 @@
 //! esquerdo e direito vão para o app, como na barra do Windows) e, na engrenagem, a lista de
 //! todos com um interruptor "fica na barra". A escolha vai para o SQLite (colordb).
 
+use std::time::{Duration, Instant};
+
+use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+
 use crate::panel::{Event, PanelContent, Widget, glyph};
 use crate::topbar::{self, TrayButton};
 
@@ -14,11 +18,27 @@ const SHOW: u32 = 10_000;
 
 pub struct Overflow {
     edit: bool,
+    /// Último clique esquerdo num ícone: (id, quando). Para reconhecer o duplo clique.
+    last_click: Option<(u32, Instant)>,
 }
 
 impl Overflow {
     pub fn new() -> Self {
-        Self { edit: false }
+        Self { edit: false, last_click: None }
+    }
+
+    /// Este clique em `id` completa um duplo clique? Atualiza `last_click`.
+    fn is_double(&mut self, id: u32) -> bool {
+        let now = Instant::now();
+        let limit = Duration::from_millis(unsafe { GetDoubleClickTime() } as u64);
+        // Depois de um duplo, zera: o 3º clique rápido começa outra contagem (como o Windows).
+        match self.last_click.take() {
+            Some((last, at)) if last == id && now - at <= limit => true,
+            _ => {
+                self.last_click = Some((id, now));
+                false
+            }
+        }
     }
 }
 
@@ -71,8 +91,14 @@ impl PanelContent for Overflow {
                 true
             }
             // O app que abre janela ou menu toma o primeiro plano e o painel fecha sozinho.
+            // Como a barra do Windows: o 1º clique vai como clique simples e o 2º, se vier a
+            // tempo no mesmo ícone, também como duplo (apps como o AMD Adrenalin só abrem assim).
             Event::Click(id) if (ICON..SHOW).contains(&id) => {
-                topbar::tray_click_index((id - ICON) as usize, TrayButton::Left);
+                let index = (id - ICON) as usize;
+                topbar::tray_click_index(index, TrayButton::Left);
+                if self.is_double(id) {
+                    topbar::tray_click_index(index, TrayButton::Double);
+                }
                 false
             }
             Event::RightClick(id) if (ICON..SHOW).contains(&id) => {

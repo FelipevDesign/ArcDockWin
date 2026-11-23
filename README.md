@@ -22,7 +22,7 @@ Windows taskbar in daily use.
 ## ✨ Features
 
 ### Dock
-- Shown on **every monitor** by default; can be limited to the main monitor in Settings → Dock.
+- Shown on the main monitor by default; can be shown on **every monitor** in Settings → Dock.
 - Real blurred glass (what is behind the dock shows through blurred), rounded corners and a soft shadow.
 - Icon magnification on hover and a small dot under running apps.
 - Smooth magnification follows pointer movement; use the mouse wheel over an app with multiple windows to cycle through them.
@@ -150,7 +150,7 @@ Everything lives in `%APPDATA%\ArcDockWin\`:
 | `pinned.txt` | Apps pinned to the dock, one path per line (you can edit it by hand). |
 | `icons.txt` | Per-app icon overrides (`name.exe=C:\path\icon.ico`), see below. |
 | `colors.db` | Each app's colour on the top bar and which tray icons are visible (SQLite). |
-| `settings.txt` | Options from the Settings window (`key=value`, e.g. `icon_size=48`, `mod.clock=center,0,on`). Missing keys use the defaults. |
+| `settings.txt` | Options from the Settings window (`key=value`, e.g. `icon_size=48`, `mod.clock=center,0,on`). Missing keys use the defaults. `tray_color=1` (no UI yet) keeps the app colors in tray icons instead of grayscale. |
 | `animation.txt` | Minimize animation: `enabled=1` or `0`, `effect=genie` or `scale`. |
 
 ### Known limitations
@@ -235,6 +235,9 @@ To change the icon of a single app on the dock, without the script, edit `%APPDA
 ```
 spotify.exe=C:\Icones\MacTahoe\apps\spotify.ico
 ```
+
+**Ícones Tahoe** rewrites `icons.txt` every time it applies the icons. To keep your own changes, put the same lines
+in `C:\Icones\MacTahoe\icons-custom.txt` instead: they take priority over the theme and are merged in on every run.
 
 ### Undo
 

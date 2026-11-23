@@ -95,9 +95,9 @@ pub fn set_stacks(on: bool) {
     set_flag("stacks", on);
 }
 
-/// Dock visible em todos os monitores (padrão: ligado).
+/// Dock em todos os monitores (padrão: desligado, só no principal).
 pub fn dock_all_monitors() -> bool {
-    flag("dock_all_monitors")
+    get("dock_all_monitors").is_some_and(|v| v == "1")
 }
 
 pub fn set_dock_all_monitors(on: bool) {
@@ -111,6 +111,11 @@ pub fn clock_24h() -> bool {
 
 pub fn set_clock_24h(on: bool) {
     set_flag("clock_24h", on);
+}
+
+/// Ícones da bandeja com as cores do app (`tray_color=1`); o padrão é tons de cinza.
+pub fn tray_color() -> bool {
+    get("tray_color").is_some_and(|v| v == "1")
 }
 
 /// Segundos no relógio (desligado por padrão: atualiza a cada minuto).

@@ -41,7 +41,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, S
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetMonitorInfoW,
-    HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITORINFOF_PRIMARY, MonitorFromWindow,
+    HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromWindow,
     ScreenToClient, SelectObject,
 };
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute};
@@ -464,28 +464,29 @@ impl Dock {
         }
     }
 
-    /// Mouse encostado na borda de baixo da tela, na largura do dock.
+    /// Mouse encostado na borda de baixo da tela, em qualquer ponto da largura (como no macOS).
     fn at_edge(&self) -> bool {
         let mut pt = POINT::default();
         if unsafe { GetCursorPos(&mut pt) }.is_err() {
             return false;
         }
-        let bottom = self.monitor_bounds.bottom;
-        if pt.y < bottom - 2
-            || pt.y >= bottom
-            || pt.x < self.monitor_bounds.left
-            || pt.x >= self.monitor_bounds.right
-        {
-            return false;
-        }
-        render::box_rect(&self.slots(), &self.m, self.pixmap.height() as f32)
-            .is_some_and(|(l, _, r, _)| pt.x >= self.pos.x + l && pt.x < self.pos.x + r)
+        let b = self.monitor_bounds;
+        pt.y >= b.bottom - 2 && pt.y < b.bottom && pt.x >= b.left && pt.x < b.right
     }
 
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
         let now = Instant::now();
-        if !config::autohide() || self.tracking || self.drag.busy() || MENU_OPEN.load(Ordering::Relaxed) || minimize::busy() || self.at_edge() || !self.covered() {
+        // Com a pilha da Downloads aberta o dock fica à vista (como no macOS).
+        if !config::autohide()
+            || self.tracking
+            || self.drag.busy()
+            || MENU_OPEN.load(Ordering::Relaxed)
+            || minimize::busy()
+            || panel::is_open("downloads")
+            || self.at_edge()
+            || !self.covered()
+        {
             self.last_inside = Some(now);
         }
         // Aparecer é imediato; esconder espera a carência.
@@ -803,7 +804,7 @@ fn display_monitors() -> Vec<(HMONITOR, RECT, bool)> {
         BOOL(1)
     }
 
-    let mut monitors = Vec::new();
+    let mut monitors: Vec<(HMONITOR, RECT, bool)> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(add), LPARAM(&mut monitors as *mut _ as isize));
     }
@@ -869,7 +870,9 @@ unsafe fn create_dock(monitor: HMONITOR, bounds: RECT, primary: bool) -> Option<
     }
 }
 
-fn dispose_dock(dock: Dock) {
+fn dispose_dock(mut dock: Dock) {
+    // Composição antes da janela dela.
+    dock.glass_fx = None;
     unsafe {
         let _ = KillTimer(Some(dock.hwnd), TIMER_EDGE);
         let _ = KillTimer(Some(dock.hwnd), TIMER_REFRESH);
@@ -900,7 +903,9 @@ fn start_tray() {
             .into_iter()
             .filter_map(|t| {
                 let mut icon = t.icon.or_else(|| tiny_skia::Pixmap::new(px, px))?;
-                grayscale(&mut icon);
+                if !config::tray_color() {
+                    grayscale(&mut icon);
+                }
                 let shown = colordb::tray_shown(&t.key).unwrap_or(true);
                 Some(topbar::TrayEntry { icon, tip: t.tip, key: t.key, shown, visible: shown })
             })
@@ -1350,9 +1355,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             _ if msg == TASKBAR_CREATED.load(Ordering::Relaxed) && msg != 0 => {
-                // O Explorer reiniciou e recriou a barra: esconde de novo.
+                // O Explorer reiniciou e recriou a barra: esconde de novo e devolve à barra de
+                // cima a reserva do topo da tela, que ele esqueceu (uma vez, pelo dock principal).
                 if with_dock(hwnd, |dock| dock.primary).unwrap_or(false) {
                     taskbar::hide();
+                    topbar::explorer_restarted();
                 }
                 LRESULT(0)
             }
@@ -1424,7 +1431,7 @@ fn main() -> windows::core::Result<()> {
         }
         let docks: Vec<Dock> = monitors
             .into_iter()
-            .filter_map(|(monitor, bounds, primary)| unsafe { create_dock(monitor, bounds, primary) })
+            .filter_map(|(monitor, bounds, primary)| create_dock(monitor, bounds, primary))
             .collect();
         if docks.is_empty() {
             return Ok(());
