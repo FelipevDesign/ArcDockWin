@@ -450,6 +450,35 @@ fn process_path(pid: u32) -> String {
     }
 }
 
+/// `shell:AppsFolder\<família>!<id>` de um .exe dentro de `WindowsApps` (app da Store), lido do
+/// AppxManifest.xml do pacote. Abrir o .exe direto não funciona para esses apps: com o app
+/// fechado na bandeja (ex.: WhatsApp), o clique no dock não fazia nada.
+fn store_app_id(path: &str) -> Option<String> {
+    const DIR: &str = "\\windowsapps\\";
+    let i = path.to_lowercase().find(DIR)? + DIR.len();
+    let (folder, exe) = path[i..].split_once('\\')?;
+    // Pasta do pacote: <Nome>_<Versão>_<Arquitetura>_<Recurso>_<IdDoEditor>.
+    let parts: Vec<&str> = folder.split('_').collect();
+    let [name, _, _, _, publisher] = parts[..] else { return None };
+    let manifest = std::fs::read_to_string(Path::new(&path[..i]).join(folder).join("AppxManifest.xml")).ok()?;
+    manifest.split("<Application ").skip(1).find_map(|tag| {
+        let tag = &tag[..tag.find('>')?];
+        let executable = xml_attr(tag, "Executable")?.replace('/', "\\");
+        executable
+            .eq_ignore_ascii_case(exe)
+            .then(|| xml_attr(tag, "Id").map(|id| format!("{APPS_FOLDER}{name}_{publisher}!{id}")))
+            .flatten()
+    })
+}
+
+/// Valor do atributo `name="..."` dentro de uma tag XML.
+fn xml_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!(" {name}=\"");
+    let start = format!(" {tag}").find(&key)? + key.len() - 1;
+    let len = tag[start..].find('"')?;
+    Some(&tag[start..start + len])
+}
+
 /// Clique no ícone: abre o app, alterna entre as janelas dele ou minimiza a única em foco.
 pub fn activate(source: &str, windows: &[HWND]) {
     if source == START {
@@ -458,7 +487,9 @@ pub fn activate(source: &str, windows: &[HWND]) {
     }
     unsafe {
         if windows.is_empty() {
-            ShellExecuteW(None, w!("open"), &HSTRING::from(source), None, None, SW_SHOWNORMAL);
+            // App da Store fixado pelo .exe: abre pelo AppUserModelID, como a barra do Windows.
+            let target = store_app_id(source).unwrap_or_else(|| source.to_string());
+            ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
             return;
         }
         let fg = GetForegroundWindow();
@@ -630,4 +661,29 @@ pub fn shell_menu_msg(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         unsafe { cm.HandleMenuMsg2(msg, wp, lp, Some(&mut r)) }.ok()?;
         Some(r)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_app_id_reads_the_package_manifest() {
+        let root = std::env::temp_dir().join(format!("arcdock-test-{}", std::process::id())).join("WindowsApps");
+        let pkg = root.join("5319275A.WhatsAppDesktop_2.2645.101.0_x64__cv1g1gvanyjgm");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("AppxManifest.xml"),
+            r#"<Applications><Application Id="Other" Executable="Tool.exe"></Application><Application Id="App" Executable="WhatsApp.Root.exe" EntryPoint="Windows.FullTrustApplication"></Application></Applications>"#,
+        )
+        .unwrap();
+        let exe = pkg.join("WhatsApp.Root.exe").display().to_string();
+        assert_eq!(
+            store_app_id(&exe).as_deref(),
+            Some("shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App")
+        );
+        assert_eq!(store_app_id(&pkg.join("Missing.exe").display().to_string()), None);
+        assert_eq!(store_app_id(r"C:\Program Files\App\app.exe"), None);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
 }
