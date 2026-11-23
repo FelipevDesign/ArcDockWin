@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use tiny_skia::Pixmap;
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, SIZE};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
@@ -24,7 +24,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
     GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
+    PostMessageW, SC_MINIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
+    SwitchToThisWindow, WM_SYSCOMMAND, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
 
@@ -459,6 +460,11 @@ pub fn activate(source: &str, windows: &[HWND]) {
             Some(_) if windows.len() == 1 => {
                 crate::minimize::capture(fg); // foto antes de sumir (animação até o ícone)
                 let _ = ShowWindow(fg, SW_MINIMIZE);
+                // App rodando como administrador: o UIPI nega o ShowWindow, mas deixa passar
+                // o WM_SYSCOMMAND, e a própria janela se minimiza.
+                if !IsIconic(fg).as_bool() {
+                    let _ = PostMessageW(Some(fg), WM_SYSCOMMAND, WPARAM(SC_MINIMIZE as usize), LPARAM(0));
+                }
             }
             // Várias janelas: a próxima na ordem estável, em ciclo.
             Some(i) => focus_window(windows[(i + 1) % windows.len()]),
@@ -501,6 +507,13 @@ pub fn focus_window(hwnd: HWND) {
     unsafe {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
+            // Janela de app rodando como administrador: o UIPI nega o ShowWindow (acesso
+            // negado) e ela continua minimizada. SwitchToThisWindow restaura e ativa, como
+            // o clique na barra de tarefas do Windows.
+            if IsIconic(hwnd).as_bool() {
+                SwitchToThisWindow(hwnd, true);
+                return;
+            }
         }
         let _ = SetForegroundWindow(hwnd);
     }
