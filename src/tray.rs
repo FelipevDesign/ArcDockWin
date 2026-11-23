@@ -103,6 +103,8 @@ const NOTIFYICON_VERSION_4: u32 = 4;
 const TIMER_TOPMOST: usize = 1;
 const TIMER_REBROADCAST: usize = 2;
 const TOPMOST_MS: u32 = 200;
+/// Segundo pedido de registro dos ícones depois de iniciar (ver `start`).
+const REBROADCAST_ON_START_MS: u32 = 3000;
 /// A limpeza de ícones órfãos roda a cada N ticks do timer de topo (~5 s).
 const PURGE_TICKS: u32 = 25;
 /// Tempo máximo esperando o Explorer ao repassar; SMTO_ABORTIFHUNG corta antes se ele travou.
@@ -186,6 +188,10 @@ pub fn start(icon_px: u32, on_change: fn()) -> windows::core::Result<()> {
         STATE.set(Some(State { hwnd, icon_px, on_change, icons: Vec::new(), ticks: 0 }));
         make_topmost(hwnd);
         SetTimer(Some(hwnd), TIMER_TOPMOST, TOPMOST_MS, None);
+        // Pede de novo daqui a pouco. O aviso é assíncrono e, num reinício rápido do dock, apps
+        // lentos para tratar (ex.: Teams e WhatsApp, com WebView2) ainda processam o aviso do
+        // dock anterior e acabam registrando o ícone só no Explorer.
+        SetTimer(Some(hwnd), TIMER_REBROADCAST, REBROADCAST_ON_START_MS, None);
     }
     broadcast_taskbar_created();
     Ok(())
