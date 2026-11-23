@@ -95,6 +95,15 @@ pub fn set_stacks(on: bool) {
     set_flag("stacks", on);
 }
 
+/// Dock visible em todos os monitores (padrão: ligado).
+pub fn dock_all_monitors() -> bool {
+    flag("dock_all_monitors")
+}
+
+pub fn set_dock_all_monitors(on: bool) {
+    set_flag("dock_all_monitors", on);
+}
+
 /// Relógio em 24 horas (senão 12 h com AM/PM).
 pub fn clock_24h() -> bool {
     flag("clock_24h")

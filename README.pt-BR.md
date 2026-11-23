@@ -22,6 +22,7 @@ substituir a barra de tarefas do Windows no dia a dia.
 ## ✨ Recursos
 
 ### Dock
+- Aparece em **todos os monitores** por padrão; dá para limitar ao principal em Configurações → Dock.
 - Vidro desfocado de verdade (o que está atrás aparece borrado), cantos arredondados e sombra suave.
 - Ampliação dos ícones ao passar o mouse e pontinho embaixo dos apps abertos.
 - **Ícone pulando** quando um app pede atenção, com um pontinho vermelho até você abrir o app.
@@ -40,7 +41,7 @@ Para não ter animação dobrada, o ArcDockWin desliga a animação nativa de mi
 valor original volta logo depois, quando o ArcDockWin é fechado e também pelo vigia, se a dock travar.
 
 ### Barra do topo
-- Aparece em **todos os monitores** por padrão (a dock fica só no principal); dá para deixar só no principal.
+- Aparece em **todos os monitores** por padrão; dá para limitar ao principal em Configurações → Barra do topo.
 - **Assume a cor do app em foco** (10% mais escura, para separar a barra do app), na hora em que você troca de janela.
 - Montada em **módulos**: CPU/RAM, Relógio, Bandeja e Central de Controle. Cada um pode ser desligado, ir para a
   zona da esquerda, do centro ou da direita e mudar de ordem dentro da zona.
@@ -70,7 +71,7 @@ Botão direito num espaço vazio da dock → **Configurações…** Abre como um
 
 | Página | Opções |
 | --- | --- |
-| Dock | Tamanho dos ícones (32–72 px), ampliação ao passar o mouse e o tamanho dela (1,1×–2,0×), ocultar automaticamente, mostrar Downloads e Lixeira |
+| Dock | Tamanho dos ícones (32–72 px), ampliação ao passar o mouse e o tamanho dela (1,1×–2,0×), ocultar automaticamente, mostrar Downloads e Lixeira, mostrar em todos os monitores |
 | Animações | Animação ao minimizar ligada/desligada, efeito Gênio ou Escala |
 | Barra do topo | Prévia da barra; cada módulo ligado/desligado, zona (Esquerda/Centro/Direita) e ordem (▲▼); relógio (24 h, segundos, data); mostrar em todos os monitores |
 | Geral | Iniciar com o Windows; Sobre |
