@@ -134,7 +134,7 @@ impl PanelContent for PerfPanel {
             level: level(v, 75.0, 90.0),
         };
         vec![
-            Widget::Banner { glyph: crate::topbar::GLYPH_CPU, text: "Desempenho".into(), sub: self.cpu_name.clone() },
+            Widget::Banner { glyph: crate::topbar::GLYPH_CPU, image: None, text: "Desempenho".into(), sub: self.cpu_name.clone() },
             Widget::Separator,
             Widget::Label("Recursos".into()),
             meter(crate::topbar::GLYPH_CPU, "CPU", cpu, s.clock.map(|c| format!("{:.2} GHz", c / 1000.0))),

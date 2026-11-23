@@ -167,11 +167,16 @@ pub enum Widget {
     /// painel sem margem). Cada cartão ocupa o primeiro lugar livre, da esquerda para a direita.
     Cards(Vec<Card>),
     /// Cabeçalho de painel: glifo num quadrado à esquerda, título e subtítulo pequeno.
-    Banner { glyph: u16, text: String, sub: String },
+    /// `image`: desenha a imagem (RGBA; recebe o lado em px já na escala e a cor do texto) no
+    /// lugar do glifo.
+    Banner { glyph: u16, image: Option<fn(u32, [u8; 4]) -> Option<Pixmap>>, text: String, sub: String },
     /// Medidor só de leitura: glifo num quadrado à esquerda, rótulo e valor na mesma linha,
     /// detalhe pequeno embaixo e uma barra fina (`frac` 0..1; `None` = barra vazia).
     /// `level`: 0 normal (destaque), 1 alto (laranja), 2 crítico (vermelho).
     Meter { glyph: u16, label: String, value: String, detail: Option<String>, frac: Option<f32>, level: u8 },
+    /// Linha compacta só de leitura: rótulo à esquerda, barra fina no meio e valor à direita
+    /// (`frac` 0..1). `strong`: rótulo forte e barra na cor de destaque (ex.: hoje).
+    Bar { label: String, value: String, frac: f32, strong: bool },
 }
 
 /// Cartão de [`Widget::Cards`]; todos em pílula translúcida.
@@ -258,6 +263,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
             Widget::Title(text) | Widget::Text(text) | Widget::Label(text) => translate(text),
             Widget::Heading { text, .. } | Widget::Toggle { text, .. } | Widget::Button { text, .. } => translate(text),
             Widget::Banner { text, sub, .. } => { translate(text); translate(sub); }
+            Widget::Bar { label, .. } => translate(label),
             Widget::Meter { label, value, detail, .. } => {
                 translate(label);
                 translate(value);
@@ -934,6 +940,7 @@ impl Panel {
             Widget::Separator => 9.0,
             Widget::Banner { .. } => 52.0,
             Widget::Meter { .. } => 56.0,
+            Widget::Bar { .. } => 26.0,
             Widget::Field { .. } => 40.0,
             Widget::Grid { cols, cells } => 32.0 * cells.len().div_ceil((*cols).max(1)) as f32,
             Widget::Icons { items } => ICON_CELL * items.len().div_ceil(self.icon_cols()) as f32,
@@ -1401,11 +1408,14 @@ impl Panel {
                     let color = if *primary { WHITE } else { pal.ink };
                     texts.push(mk(t, Font::Body, [left, by, right - left, bh], DWRITE_TEXT_ALIGNMENT_CENTER, color));
                 }
-                Widget::Banner { glyph: g, text: t, sub } => {
+                Widget::Banner { glyph: g, image, text: t, sub } => {
                     let bs = 36.0 * s;
                     let by = y + (wh - bs) / 2.0;
                     fill(&mut pm, left + inset, by, bs, bs, 8.0 * s, pal.control);
-                    texts.push(mk(&glyph(*g), Font::IconLarge, [left + inset, by, bs, bs], DWRITE_TEXT_ALIGNMENT_CENTER, pal.ink));
+                    match image.and_then(|f| f((22.0 * s).round() as u32, pal.ink.map(|c| (c * 255.0).round() as u8))) {
+                        Some(img) => draw_icon(&mut pm, &img, left + inset + bs / 2.0, by + bs / 2.0),
+                        None => texts.push(mk(&glyph(*g), Font::IconLarge, [left + inset, by, bs, bs], DWRITE_TEXT_ALIGNMENT_CENTER, pal.ink)),
+                    }
                     let tx = left + inset + bs + 10.0 * s;
                     texts.push(mk(t, Font::Bold, [tx, by - 1.0 * s, right - inset - tx, 20.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
                     texts.push(mk(sub, Font::Small, [tx, by + 19.0 * s, right - inset - tx, 18.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.dim));
@@ -1433,6 +1443,22 @@ impl Panel {
                     fill(&mut pm, l, ty, r - l, th, th / 2.0, pal.strong);
                     if let Some(f) = frac.map(|f| f.clamp(0.0, 1.0)).filter(|&f| f > 0.0) {
                         fill(&mut pm, l, ty, ((r - l) * f).max(th), th, th / 2.0, color);
+                    }
+                }
+                Widget::Bar { label, value, frac, strong } => {
+                    let (l, r) = (left + inset, right - inset);
+                    let (lw, vw) = (84.0 * s, 60.0 * s);
+                    let (font, ink) = if *strong { (Font::Bold, pal.ink) } else { (Font::Body, pal.dim) };
+                    texts.push(mk(label, font, [l, y, lw, wh], DWRITE_TEXT_ALIGNMENT_LEADING, ink));
+                    texts.push(mk(value, font, [r - vw, y, vw, wh], DWRITE_TEXT_ALIGNMENT_TRAILING, ink));
+                    let (bl, br) = (l + lw, r - vw - 8.0 * s);
+                    let th = 4.0 * s;
+                    let ty = y + (wh - th) / 2.0;
+                    fill(&mut pm, bl, ty, br - bl, th, th / 2.0, pal.strong);
+                    let f = frac.clamp(0.0, 1.0);
+                    if f > 0.0 {
+                        let d = pal.dim.map(|c| (c * 255.0) as u8);
+                        fill(&mut pm, bl, ty, ((br - bl) * f).max(th), th, th / 2.0, if *strong { pal.accent } else { d });
                     }
                 }
                 Widget::Separator => {

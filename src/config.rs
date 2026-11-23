@@ -154,6 +154,10 @@ pub enum Module {
     /// Ícones da bandeja e a seta de ocultos, sempre juntos.
     Tray,
     Control,
+    /// Uso do plano do Claude (sessão de 5 h); desligado por padrão.
+    Claude,
+    /// Uso do plano do Codex (sessão de 5 h); desligado por padrão.
+    Codex,
 }
 
 /// Zona da barra: a ordem dos módulos vale dentro de cada uma.
@@ -186,7 +190,7 @@ impl Zone {
 }
 
 impl Module {
-    pub const ALL: [Module; 4] = [Module::Stats, Module::Clock, Module::Tray, Module::Control];
+    pub const ALL: [Module; 6] = [Module::Stats, Module::Clock, Module::Tray, Module::Control, Module::Claude, Module::Codex];
 
     fn key(self) -> &'static str {
         match self {
@@ -194,6 +198,8 @@ impl Module {
             Module::Clock => "clock",
             Module::Tray => "tray",
             Module::Control => "control",
+            Module::Claude => "claude",
+            Module::Codex => "codex",
         }
     }
 
@@ -204,6 +210,8 @@ impl Module {
             Module::Clock => "Relógio",
             Module::Tray => "Bandeja",
             Module::Control => "Central de Controle",
+            Module::Claude => "Uso do Claude",
+            Module::Codex => "Uso do Codex",
         }
     }
 
@@ -211,6 +219,8 @@ impl Module {
         match self {
             Module::Stats => "CPU/RAM",
             Module::Control => "Central",
+            Module::Claude => "Claude",
+            Module::Codex => "Codex",
             m => m.label(),
         }
     }
@@ -222,6 +232,7 @@ impl Module {
             Module::Clock => (Zone::Center, 0),
             Module::Tray => (Zone::Right, 0),
             Module::Control => (Zone::Right, 1),
+            Module::Claude | Module::Codex => (Zone::Right, 0),
         }
     }
 }
@@ -253,7 +264,11 @@ pub fn modules() -> Vec<Slot> {
         .into_iter()
         .enumerate()
         .map(|(i, m)| {
-            let legacy_on = m != Module::Stats || legacy;
+            let legacy_on = match m {
+                Module::Stats => legacy,
+                Module::Claude | Module::Codex => false,
+                _ => true,
+            };
             let (zone, order, on) = parse_slot(m, get(&format!("mod.{}", m.key())).as_deref(), legacy_on);
             (zone, order, i, Slot { module: m, zone, on })
         })

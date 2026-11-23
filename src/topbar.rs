@@ -44,6 +44,7 @@ use crate::config::{self, Module};
 use crate::glass;
 use crate::panel::{self, PanelContent};
 use crate::status::{self, Audio};
+use crate::usage::Provider;
 
 /// Botão usado num clique de ícone da bandeja.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +86,8 @@ const TINT_THROTTLE_MS: u32 = 50;
 const TIMER_REBUILD: usize = 6;
 const REBUILD_MS: u32 = 300;
 const STATS_MS: u32 = 2000;
+/// Relê o uso do Claude e do Codex (só com o módulo ligado).
+const TIMER_USAGE: usize = 7;
 /// Largura (px) de cada fatia do brilho do wallpaper.
 const LUMA_BUCKET: usize = 16;
 pub(crate) const GLYPH_CPU: u16 = 0xE950;
@@ -127,6 +130,8 @@ enum Kind {
     Control,
     /// CPU e RAM à esquerda; o clique abre o Gerenciador de Tarefas.
     Stats,
+    /// Uso do Claude ou do Codex (% da sessão de 5 h); o clique abre o painel de uso.
+    Usage(crate::usage::Provider),
 }
 
 /// Item desenhado: faixa horizontal [l, r) e textos (layout, x, opacidade).
@@ -538,6 +543,19 @@ impl Bar {
             Module::Control => {
                 self.glyph_item(&mut items, 0.0, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
             }
+            // Logo do provedor (desenhado em `redraw`) + % da sessão de 5 h.
+            Module::Claude | Module::Codex => {
+                let p = if m == Module::Claude { Provider::Claude } else { Provider::Codex };
+                let gw = GLYPH_W * s;
+                let mut lx = pad + gw + 2.0 * s;
+                let mut text = Vec::new();
+                let value = crate::usage::session_percent(p).map(|p| format!("{p}%")).unwrap_or_else(|| "–".into());
+                if let Some(t) = self.text_layout(&value.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0) {
+                    lx += Self::text_width(&t);
+                    text.push((t, gw + 2.0 * s + pad, 1.0));
+                }
+                items.push(Item { kind: Kind::Usage(p), l: 0.0, r: lx + pad, text });
+            }
         }
         items
     }
@@ -700,6 +718,18 @@ impl Bar {
                 pm.draw_pixmap(x, y, icon.as_ref(), &PixmapPaint::default(), id, None);
             }
         }
+        // Logos de uso na mesma tinta dos glifos do item (preto ou branco conforme o fundo).
+        for (i, it) in self.items.iter().enumerate() {
+            let Kind::Usage(p) = it.kind else { continue };
+            let l = if app.is_some() { light } else { item_light[i] };
+            // Mesma opacidade dos glifos do CPU/RAM (0,75 da tinta).
+            let color = if l { [0, 0, 0, 168] } else { [255, 255, 255, 182] };
+            if let Some(logo) = crate::usage::logo(p, (14.0 * s).round() as u32, color) {
+                let x = (it.l + PAD * s + (GLYPH_W * s - logo.width() as f32) / 2.0).round() as i32;
+                let y = ((h - 1.0 - logo.height() as f32) / 2.0).round() as i32;
+                pm.draw_pixmap(x, y, logo.as_ref(), &PixmapPaint::default(), id, None);
+            }
+        }
 
         // RGBA (tiny-skia) -> BGRA (GDI), ambos com alfa pré-multiplicado.
         let src = self.pixmap.data();
@@ -828,6 +858,8 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Control => ("control", || Box::new(crate::control::ControlCenter::new())),
         Kind::Overflow => ("tray", || Box::new(crate::overflow::Overflow::new())),
         Kind::Stats => ("stats", || Box::new(crate::perf::PerfPanel::new())),
+        Kind::Usage(Provider::Claude) => ("claude", || Box::new(crate::usage::UsagePanel::new(Provider::Claude))),
+        Kind::Usage(Provider::Codex) => ("codex", || Box::new(crate::usage::UsagePanel::new(Provider::Codex))),
         Kind::Tray(_) => return None,
     })
 }
@@ -874,6 +906,7 @@ pub fn language_changed() {
 pub fn settings_changed() {
     update_clock();
     update_stats();
+    update_usage();
     for_bars(|b| {
         b.relayout();
         b.redraw();
@@ -886,6 +919,15 @@ fn update_stats() {
     }
     let Some((cpu, ram)) = USAGE.with(|u| u.borrow_mut().as_mut().map(|u| (u.cpu(), u.ram()))) else { return };
     for_bars(|b| b.set_stats(cpu, ram));
+}
+
+/// Pede uma releitura do uso do Claude e do Codex; a resposta chega como `usage::WM_USAGE`.
+fn update_usage() {
+    for (m, p) in [(Module::Claude, Provider::Claude), (Module::Codex, Provider::Codex)] {
+        if config::module_on(m) {
+            crate::usage::refresh(p, false);
+        }
+    }
 }
 
 /// Registra quem trata os cliques nos ícones da bandeja.
@@ -1071,6 +1113,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         update_stats();
                         panel::notify(crate::control::TICK, 0);
                     }
+                    TIMER_USAGE => update_usage(),
                     TIMER_REBUILD => {
                         let _ = KillTimer(Some(hwnd), TIMER_REBUILD);
                         rebuild();
@@ -1101,6 +1144,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         }
                     });
                 }
+                panel::notify(msg, wp.0);
+                LRESULT(0)
+            }
+            crate::usage::WM_USAGE => {
+                for_bars(|b| {
+                    b.relayout();
+                    b.redraw();
+                });
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }
@@ -1343,6 +1394,8 @@ pub fn create() {
         USAGE.with(|u| *u.borrow_mut() = Some(status::Usage::new()));
         update_clock();
         SetTimer(Some(hwnd), TIMER_STATS, STATS_MS, None);
+        SetTimer(Some(hwnd), TIMER_USAGE, crate::usage::REFRESH_MS, None);
+        update_usage();
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
         let _ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);

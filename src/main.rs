@@ -10,6 +10,7 @@ mod drag;
 mod bluetooth;
 mod brightness;
 mod calendar;
+mod usage;
 mod glass;
 mod guard;
 mod i18n;
