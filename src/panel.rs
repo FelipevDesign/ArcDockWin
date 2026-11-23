@@ -815,7 +815,10 @@ impl Panel {
             RegisterClassW(&wc);
 
             let anchor = POINT { x: item.right, y: item.bottom };
-            let monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+            // `right` é exclusivo: com o item colado na borda direita de um monitor à esquerda
+            // do principal (ex.: o lançador), `item.right` já cai no monitor vizinho.
+            let inside = POINT { x: (item.right - 1).max(item.left), y: item.bottom };
+            let monitor = MonitorFromPoint(inside, MONITOR_DEFAULTTONEAREST);
             let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
             let _ = GetMonitorInfoW(monitor, &mut mi);
             let (mut dx, mut dy) = (96u32, 96u32);
