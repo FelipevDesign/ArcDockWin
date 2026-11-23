@@ -28,6 +28,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SwitchToThisWindow, WM_SYSCOMMAND, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
+use windows::core::{Interface, PCSTR};
+use windows::Win32::Foundation::{LRESULT, POINT};
+use windows::Win32::UI::Shell::{
+    BHID_SFUIObject, CMF_NORMAL, CMINVOKECOMMANDINFO, IContextMenu, IContextMenu3, IShellItem,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreatePopupMenu, DestroyMenu, TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, WM_DRAWITEM, WM_INITMENUPOPUP,
+    WM_MEASUREITEM, WM_MENUCHAR,
+};
 
 pub const APPS_FOLDER: &str = "shell:AppsFolder\\";
 
@@ -574,4 +583,51 @@ pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
         let at = apps.iter().filter(|a| a.pinned && a.source != START).count();
         apps.insert(at, app);
     }
+}
+
+thread_local! {
+    /// Menu do Windows aberto por "Mais opções…": recebe as mensagens dos submenus dinâmicos.
+    static SHELL_MENU: std::cell::RefCell<Option<IContextMenu3>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Mostra o menu de contexto do próprio Windows para o app (o mesmo do clique direito no
+/// Explorer) e executa a opção escolhida.
+pub fn shell_menu(hwnd: HWND, source: &str, pt: POINT, flags: TRACK_POPUP_MENU_FLAGS) {
+    unsafe {
+        let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(source), None) else { return };
+        let Ok(cm) = item.BindToHandler::<_, IContextMenu>(None, &BHID_SFUIObject) else { return };
+        let Ok(menu) = CreatePopupMenu() else { return };
+        const FIRST: u32 = 1;
+        if cm.QueryContextMenu(menu, 0, FIRST, 0x7FFF, CMF_NORMAL).is_ok() {
+            SHELL_MENU.with(|m| *m.borrow_mut() = cm.cast::<IContextMenu3>().ok());
+            let _ = SetForegroundWindow(hwnd);
+            let cmd = TrackPopupMenu(menu, flags, pt.x, pt.y, None, hwnd, None).0 as u32;
+            SHELL_MENU.with(|m| *m.borrow_mut() = None);
+            if cmd >= FIRST {
+                let info = CMINVOKECOMMANDINFO {
+                    cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+                    hwnd,
+                    lpVerb: PCSTR((cmd - FIRST) as usize as *const u8),
+                    nShow: SW_SHOWNORMAL.0,
+                    ..Default::default()
+                };
+                let _ = cm.InvokeCommand(&info);
+            }
+        }
+        let _ = DestroyMenu(menu);
+    }
+}
+
+/// Repassa ao menu do Windows aberto as mensagens que montam/desenham os submenus dele.
+pub fn shell_menu_msg(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+    if !matches!(msg, WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR) {
+        return None;
+    }
+    SHELL_MENU.with(|m| {
+        let m = m.borrow();
+        let cm = m.as_ref()?;
+        let mut r = LRESULT(0);
+        unsafe { cm.HandleMenuMsg2(msg, wp, lp, Some(&mut r)) }.ok()?;
+        Some(r)
+    })
 }

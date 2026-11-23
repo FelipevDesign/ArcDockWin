@@ -58,6 +58,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, Tr
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::core::{HSTRING, PCWSTR, w};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use apps::App;
 use render::{Metrics, Theme};
@@ -76,6 +78,10 @@ const MENU_QUIT: usize = 1;
 const MENU_PIN: usize = 2;
 const MENU_CLOSE: usize = 3;
 const MENU_SETTINGS: usize = 4;
+const MENU_NEW: usize = 5;
+const MENU_ADMIN: usize = 6;
+const MENU_LOCATION: usize = 7;
+const MENU_MORE: usize = 8;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -1058,13 +1064,13 @@ unsafe extern "system" fn on_window_change(
     }
 }
 
-/// Menu do botão direito: com `target` (key, fixado, janelas), as opções do app; sempre "Sair".
+/// Menu do botão direito: com `target` (key, source, fixado, janelas), as opções do app; sempre "Sair".
 /// `anchor`: ponto acima do centro do ícone onde o menu se apoia (sem ícone, abre no mouse).
-unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, anchor: Option<POINT>) {
+unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>)>, anchor: Option<POINT>) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let fg = GetForegroundWindow();
-        if let Some((_, pinned, windows)) = &target {
+        if let Some((_, source, pinned, windows)) = &target {
             if windows.len() >= 2 {
                 for (k, &win) in windows.iter().enumerate() {
                     let flags = if win == fg { MF_STRING | MF_CHECKED } else { MF_STRING };
@@ -1073,6 +1079,19 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
                 }
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             }
+            if !windows.is_empty() {
+                let text = HSTRING::from(crate::i18n::tr("Nova janela"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_NEW, &text);
+            }
+            let text = HSTRING::from(crate::i18n::tr("Executar como administrador"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ADMIN, &text);
+            if !source.starts_with(apps::APPS_FOLDER) {
+                let text = HSTRING::from(crate::i18n::tr("Abrir local do arquivo"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_LOCATION, &text);
+            }
+            let text = HSTRING::from(crate::i18n::tr("Mais opções…"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_MORE, &text);
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let pin = HSTRING::from(crate::i18n::tr(if *pinned { "Desafixar do dock" } else { "Fixar no dock" }));
             let _ = AppendMenuW(menu, MF_STRING, MENU_PIN, &pin);
             match windows.len() {
@@ -1125,8 +1144,25 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
             settings::open();
             return;
         }
-        let Some((key, pinned, windows)) = target else { return };
+        let Some((key, source, pinned, windows)) = target else { return };
         match cmd {
+            MENU_NEW => {
+                ShellExecuteW(None, w!("open"), &HSTRING::from(&source), None, None, SW_SHOWNORMAL);
+                return;
+            }
+            MENU_ADMIN => {
+                ShellExecuteW(None, w!("runas"), &HSTRING::from(&source), None, None, SW_SHOWNORMAL);
+                return;
+            }
+            MENU_LOCATION => {
+                let args = HSTRING::from(format!("/select,\"{source}\""));
+                ShellExecuteW(None, w!("open"), w!("explorer.exe"), &args, None, SW_SHOWNORMAL);
+                return;
+            }
+            MENU_MORE => {
+                apps::shell_menu(hwnd, &source, pt, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | align);
+                return;
+            }
             MENU_PIN => {
                 with_dock(hwnd, |d| apps::set_pinned(&mut d.apps, &key, !pinned));
             }
@@ -1155,6 +1191,10 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, bool, Vec<HWND>)>, an
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
+        // Submenus do menu do Windows ("Mais opções…"), como "Abrir com", se preenchem sozinhos.
+        if let Some(r) = apps::shell_menu_msg(msg, wp, lp) {
+            return r;
+        }
         match msg {
             WM_TRASH => {
                 stacks::trash_notified(wp.0, lp.0);
@@ -1307,7 +1347,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let target = i
                         .and_then(|i| d.apps.get(i))
                         .filter(|a| a.source != apps::START)
-                        .map(|a| (a.key.clone(), a.pinned, a.windows.clone()));
+                        .map(|a| (a.key.clone(), a.source.clone(), a.pinned, a.windows.clone()));
                     (target, i.and_then(|i| d.menu_anchor(i)))
                 })
                 .unwrap_or((None, None));
