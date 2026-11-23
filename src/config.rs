@@ -95,6 +95,15 @@ pub fn set_stacks(on: bool) {
     set_flag("stacks", on);
 }
 
+/// Prévia das janelas ao parar o mouse num app com 2+ janelas.
+pub fn window_previews() -> bool {
+    flag("window_previews")
+}
+
+pub fn set_window_previews(on: bool) {
+    set_flag("window_previews", on);
+}
+
 /// Dock em todos os monitores (padrão: desligado, só no principal).
 pub fn dock_all_monitors() -> bool {
     get("dock_all_monitors").is_some_and(|v| v == "1")
