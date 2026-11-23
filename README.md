@@ -120,7 +120,7 @@ languages are welcome through pull requests.
 > The `.exe` is not digitally signed, so Windows may show **"Windows protected your PC"**.
 > Click **More info → Run anyway**.
 
-Requirement: **Windows 11**.
+Requirement: **Windows 11**. Windows 10 is not officially supported, but users report that it works; the menu bar and control panel fall back to the Segoe MDL2 Assets icon font there.
 
 ### Build from source
 

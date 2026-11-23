@@ -117,7 +117,7 @@ pull request.
 > O `.exe` não é assinado digitalmente, então o Windows pode mostrar **"O Windows protegeu o computador"**.
 > Clique em **Mais informações → Executar assim mesmo**.
 
-Requisito: **Windows 11**.
+Requisito: **Windows 11**. O Windows 10 não tem suporte oficial, mas há relatos de que funciona; nele, a barra de menus e o painel de controle usam a fonte de ícones Segoe MDL2 Assets.
 
 ### Compilar do código
 
