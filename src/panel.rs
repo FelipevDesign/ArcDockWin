@@ -93,7 +93,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
+    GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
     VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_UP,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -382,6 +382,9 @@ thread_local! {
     /// Onde foi o clique que abriu o menu do convidado, e o último menu dele já movido.
     static GUEST_AT: cell::Cell<Option<POINT>> = const { cell::Cell::new(None) };
     static GUEST_MOVED: cell::Cell<isize> = const { cell::Cell::new(0) };
+    /// Fechar pedido com o painel emprestado (ex.: ShellExecute de dentro de um evento roda um
+    /// laço de mensagens e o WM_PANEL_CLOSE chega antes de o evento acabar): o `restore` dele.
+    static CLOSE_PENDING: cell::Cell<Option<bool>> = const { cell::Cell::new(None) };
 }
 
 /// O painel aberto não fecha quando o processo `pid` toma o primeiro plano ou recebe cliques
@@ -1798,7 +1801,12 @@ fn take() -> Result<Option<Panel>, ()> {
 }
 
 fn close_now(restore: bool) {
-    if let Ok(Some(p)) = take() {
+    let Ok(taken) = take() else {
+        // Emprestado: o wndproc fecha assim que o evento em andamento terminar.
+        CLOSE_PENDING.with(|c| c.set(Some(restore)));
+        return;
+    };
+    if let Some(p) = taken {
         unsafe {
             if restore && GetForegroundWindow() == p.hwnd && IsWindow(Some(p.prev_fg)).as_bool() {
                 let _ = SetForegroundWindow(p.prev_fg);
@@ -1829,6 +1837,8 @@ pub fn toggle(key: &'static str, item: RECT, make: impl FnOnce() -> Box<dyn Pane
 }
 
 fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: HWND) {
+    // Pedido de fechar que ficou de um painel anterior não vale para este.
+    CLOSE_PENDING.with(|c| c.set(None));
     let Ok(mut p) = Panel::new(key, item, content, prev_fg) else { return };
     p.rebuild();
     let hwnd = p.hwnd;
@@ -1859,6 +1869,10 @@ fn outside(prev_fg: HWND) -> bool {
         let down = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0;
         if down(VK_ESCAPE) {
             return true;
+        }
+        // Arrastando um slider (captura nossa): o mouse pode sair do painel sem ser clique fora.
+        if !GetCapture().is_invalid() {
+            return false;
         }
         let guest = GUEST_PID.with(|g| g.get());
         let pid_of = |h: HWND| {
@@ -1955,6 +1969,17 @@ pub fn notify(msg: u32, wparam: usize) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let r = unsafe { handle(hwnd, msg, wp, lp) };
+    if let Some(restore) = CLOSE_PENDING.with(|c| c.get())
+        && PANEL.with(|p| p.try_borrow_mut().is_ok())
+    {
+        CLOSE_PENDING.with(|c| c.set(None));
+        close_now(restore);
+    }
+    r
+}
+
+unsafe fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         // Só a janela do painel aberto reage (a antiga, na troca, ainda recebe mensagens).
         if OPEN_HWND.with(|h| h.get()) != hwnd.0 as isize {
