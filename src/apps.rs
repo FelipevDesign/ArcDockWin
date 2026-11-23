@@ -11,6 +11,9 @@ use windows::Win32::Graphics::Gdi::{
     GetObjectW, HBITMAP, HGDIOBJ, ReleaseDC,
 };
 use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
@@ -312,7 +315,7 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
 fn window_app(hwnd: HWND, procs: &mut HashMap<u32, String>) -> Option<(String, String)> {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    let path = procs.entry(pid).or_insert_with(|| process_path(pid)).clone();
+    let path = procs.entry(pid).or_insert_with(|| host_path(pid)).clone();
     let key = exe_key(&path);
     if key.is_empty() {
         return None;
@@ -378,6 +381,46 @@ unsafe fn is_app_window(hwnd: HWND) -> bool {
     }
 }
 
+/// Caminho do .exe dono do processo. Janelas do WebView2 (msedgewebview2.exe) ficam com o app
+/// que hospeda o WebView2 (ex.: WhatsApp.Root.exe), para o dock mostrar o ícone certo.
+fn host_path(pid: u32) -> String {
+    let path = process_path(pid);
+    if exe_key(&path) != "msedgewebview2.exe" {
+        return path;
+    }
+    let parents = parent_pids();
+    let mut cur = pid;
+    // Sobe a árvore: renderizador -> navegador do WebView2 -> app.
+    for _ in 0..4 {
+        let Some(&parent) = parents.get(&cur) else { break };
+        let p = process_path(parent);
+        if p.is_empty() {
+            break;
+        }
+        if exe_key(&p) != "msedgewebview2.exe" {
+            return p;
+        }
+        cur = parent;
+    }
+    path
+}
+
+/// pid -> pid do pai, de todos os processos.
+fn parent_pids() -> HashMap<u32, u32> {
+    let mut map = HashMap::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return map };
+        let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            map.insert(e.th32ProcessID, e.th32ParentProcessID);
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    map
+}
+
 fn process_path(pid: u32) -> String {
     unsafe {
         let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
@@ -409,7 +452,10 @@ pub fn activate(source: &str, windows: &[HWND]) {
             return;
         }
         let fg = GetForegroundWindow();
-        match windows.iter().position(|&h| h == fg) {
+        // Minimizada pode continuar "em primeiro plano" (sem outra janela para ativar, o
+        // Windows deixa o foco nela): não conta como em foco, senão minimizaria de novo.
+        let focused = if IsIconic(fg).as_bool() { None } else { windows.iter().position(|&h| h == fg) };
+        match focused {
             Some(_) if windows.len() == 1 => {
                 crate::minimize::capture(fg); // foto antes de sumir (animação até o ícone)
                 let _ = ShowWindow(fg, SW_MINIMIZE);

@@ -181,7 +181,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
             let mut hit = 0usize;
             if !root.is_invalid()
                 && SendMessageTimeoutW(root, WM_NCHITTEST, WPARAM(0), lparam, SMTO_ABORTIFHUNG, 30, Some(&mut hit)).0 != 0
-                && (hit == HTMINBUTTON as usize || (hit == HTCAPTION as usize && on_dwm_min_button(root, pt)))
+                && (hit == HTMINBUTTON as usize
+                    // Explorador do Windows 11 (barra com abas numa janela-filha) responde
+                    // HTCLIENT em cima do "_": a posição dos botões do DWM decide.
+                    || ((hit == HTCAPTION as usize || hit == HTCLIENT as usize) && on_dwm_min_button(root, pt)))
             {
                 let _ = PostMessageW(Some(overlay()), WM_CAPTURE, WPARAM(root.0 as usize), LPARAM(0));
             }
@@ -191,7 +194,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
 }
 
 /// Moldura padrão desenhada pelo DWM: o WM_NCHITTEST mandado de fora às vezes responde
-/// HTCAPTION em cima do "_". Confere pelo primeiro terço da área dos botões (_ □ X).
+/// HTCAPTION (ou HTCLIENT, no Explorador) em cima do "_". Confere pelo primeiro terço da área
+/// dos botões (_ □ X). Um falso positivo só tira uma foto à toa: sem minimizar em 2 s, nada anima.
 unsafe fn on_dwm_min_button(hwnd: HWND, pt: POINT) -> bool {
     unsafe {
         if GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_MINIMIZEBOX.0 == 0 {

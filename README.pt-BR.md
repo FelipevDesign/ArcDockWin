@@ -147,7 +147,7 @@ Tudo fica em `%APPDATA%\ArcDockWin\`:
 | `pinned.txt` | Apps fixados na dock, um caminho por linha (pode editar à mão). |
 | `icons.txt` | Ícones trocados por app (`nome.exe=C:\caminho\icone.ico`), veja abaixo. |
 | `colors.db` | Cor de cada app na barra do topo e quais ícones da bandeja ficam visíveis (SQLite). |
-| `settings.txt` | Opções da janela de Configurações (`chave=valor`, ex.: `icon_size=48`, `mod.clock=center,0,on`). Chave ausente usa o padrão. |
+| `settings.txt` | Opções da janela de Configurações (`chave=valor`, ex.: `icon_size=48`, `mod.clock=center,0,on`). Chave ausente usa o padrão. `tray_color=1` (ainda sem opção na janela) mantém as cores dos apps nos ícones da bandeja em vez de cinza. |
 | `animation.txt` | Animação ao minimizar: `enabled=1` ou `0`, `effect=genie` ou `scale`. |
 
 ### Limitações conhecidas
@@ -232,6 +232,9 @@ Para trocar o ícone de um único app na dock, sem script, edite `%APPDATA%\ArcD
 ```
 spotify.exe=C:\Icones\MacTahoe\apps\spotify.ico
 ```
+
+O **Ícones Tahoe** reescreve o `icons.txt` toda vez que aplica os ícones. Para manter os seus ajustes, coloque as
+mesmas linhas em `C:\Icones\MacTahoe\icons-custom.txt`: elas têm prioridade sobre o tema e entram em toda aplicação.
 
 ### Desfazer
 

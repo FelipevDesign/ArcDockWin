@@ -70,6 +70,21 @@ struct ShellTrayData {
 
 const _: () = assert!(size_of::<NotifyIconData32>() == 956);
 
+/// Shell_NotifyIconGetRect (WM_COPYDATA com dwData == 3). O shell32 manda duas vezes:
+/// `message` 1 pede o canto esquerdo/superior e 2 a largura/altura, cada um como MAKELPARAM.
+/// Layout do ManagedShell (WINNOTIFYICONIDENTIFIER).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IconIdentifier {
+    signature: u32,
+    message: u32,
+    cb_size: u32,
+    padding: u32,
+    hwnd: u32,
+    uid: u32,
+    guid: GUID,
+}
+
 const TRAY_SIGNATURE: u32 = 0x3475_3423;
 const NIM_ADD: u32 = 0;
 const NIM_MODIFY: u32 = 1;
@@ -224,6 +239,8 @@ pub fn click(index: usize, button: TrayButton, anchor: POINT) {
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         // Sem isso o menu do app não consegue tomar o foco (e não fecha ao clicar fora).
         let _ = AllowSetForegroundWindow(pid);
+        // Clique vindo do painel Bandeja: o menu do app abre por cima e o painel fica.
+        crate::panel::allow_guest(pid);
     }
     let msgs: &[u32] = match button {
         TrayButton::Left => &[WM_LBUTTONDOWN, WM_LBUTTONUP, NIN_SELECT],
@@ -271,6 +288,28 @@ fn make_topmost(hwnd: HWND) {
     }
 }
 
+/// Dá à nossa Shell_TrayWnd (invisível) o retângulo da barra de cima. Apps como o Logitech
+/// G HUB abrem o menu da bandeja junto do retângulo dela; com 0×0 em (0,0) o menu ia para o
+/// canto da tela. Só mexe quando a barra mudou.
+fn match_topbar(hwnd: HWND) {
+    let Some(want) = crate::topbar::main_rect() else { return };
+    unsafe {
+        let mut now = windows::Win32::Foundation::RECT::default();
+        if GetWindowRect(hwnd, &mut now).is_ok() && now == want {
+            return;
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            want.left,
+            want.top,
+            want.right - want.left,
+            want.bottom - want.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// Repassa a mensagem ao Shell_TrayWnd do Explorer e devolve o resultado dele.
 /// SendMessageTimeout em vez de SendMessage para um Explorer travado não travar o dock;
 /// sem SMTO_BLOCK, para continuarmos atendendo mensagens enviadas a nós enquanto esperamos
@@ -296,6 +335,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     match msg {
         WM_COPYDATA => {
             let cds = unsafe { &*(lp.0 as *const COPYDATASTRUCT) };
+            // Onde está o ícone: quem sabe é a nossa barra. O Explorer responderia com a barra
+            // dele, escondida, e o menu do app abriria longe do ícone.
+            if cds.dwData == 3
+                && let Some(r) = unsafe { icon_rect(cds) }
+            {
+                return LRESULT(r);
+            }
             // Trata o nosso caso antes, sem segurar empréstimo do estado durante o repasse
             // (o SendMessageTimeout pode reentrar neste wndproc).
             let own = if cds.dwData == 1 { unsafe { handle_tray(cds) } } else { None };
@@ -362,6 +408,7 @@ fn on_timer(hwnd: HWND) {
     if unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }.ok() != Some(hwnd) {
         make_topmost(hwnd);
     }
+    match_topbar(hwnd);
     // Remove ícones de janelas que morreram sem NIM_DELETE (app fechado à força).
     let changed = STATE.with_borrow_mut(|s| {
         let Some(s) = s else { return None };
@@ -381,6 +428,33 @@ fn on_timer(hwnd: HWND) {
     if let Some(f) = changed {
         f();
     }
+}
+
+/// Resposta de Shell_NotifyIconGetRect para um ícone nosso: MAKELPARAM do canto ou do tamanho.
+/// None se não for nosso (ou a barra não souber), e aí a pergunta vai ao Explorer.
+unsafe fn icon_rect(cds: &COPYDATASTRUCT) -> Option<isize> {
+    if cds.lpData.is_null() || (cds.cbData as usize) < size_of::<IconIdentifier>() {
+        return None;
+    }
+    let id: IconIdentifier = unsafe { std::ptr::read_unaligned(cds.lpData as *const IconIdentifier) };
+    if id.signature != TRAY_SIGNATURE {
+        return None;
+    }
+    let by_guid = id.guid != GUID::zeroed();
+    // Mesmo índice de `icons()` (só os sem NIS_HIDDEN), que é o da barra.
+    let index = STATE.with_borrow(|s| {
+        s.as_ref()?.icons.iter().filter(|e| !e.hidden).position(|e| {
+            if by_guid { e.guid == Some(id.guid) } else { e.hwnd == id.hwnd && e.uid == id.uid }
+        })
+    })?;
+    let r = crate::topbar::tray_icon_rect(index)?;
+    let (x, y) = match id.message {
+        1 => (r.left, r.top),
+        // O shell32 soma ao canto: aqui vão largura e altura (testado; não o canto oposto).
+        2 => (r.right - r.left, r.bottom - r.top),
+        _ => return None,
+    };
+    Some(((x as u16 as u32) | ((y as u16 as u32) << 16)) as i32 as isize)
 }
 
 /// Aplica um Shell_NotifyIcon à nossa lista. Devolve (resultado para o app, mudou algo visível)

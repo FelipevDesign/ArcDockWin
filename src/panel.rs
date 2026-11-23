@@ -93,9 +93,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DELETE, VK_END, VK_ESCAPE,
-    VK_DOWN, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP,
+    GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
+    VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_UP,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -342,6 +343,8 @@ const CLASS: PCWSTR = w!("ArcDockWinPanel");
 const WM_PANEL_CLOSE: u32 = WM_APP + 20;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_ANIM: usize = 1;
+/// Vigia de clique fora/Esc quando o painel não conseguiu a ativação.
+const TIMER_WATCH: usize = 2;
 const ANIM_MS: f32 = 120.0;
 /// Deslize da animação de abrir (px antes da escala).
 const SLIDE: f32 = 6.0;
@@ -373,6 +376,69 @@ thread_local! {
     /// Chave e item do painel aberto, legíveis mesmo com PANEL emprestado (a barra redesenha
     /// durante eventos do painel).
     static OPEN_ITEM: cell::Cell<Option<(&'static str, RECT)>> = const { cell::Cell::new(None) };
+    /// Processo cujo menu pode tomar o primeiro plano sem fechar o painel (ícone clicado no
+    /// painel Bandeja). 0 = nenhum.
+    static GUEST_PID: cell::Cell<u32> = const { cell::Cell::new(0) };
+    /// Onde foi o clique que abriu o menu do convidado, e o último menu dele já movido.
+    static GUEST_AT: cell::Cell<Option<POINT>> = const { cell::Cell::new(None) };
+    static GUEST_MOVED: cell::Cell<isize> = const { cell::Cell::new(0) };
+    /// Fechar pedido com o painel emprestado (ex.: ShellExecute de dentro de um evento roda um
+    /// laço de mensagens e o WM_PANEL_CLOSE chega antes de o evento acabar): o `restore` dele.
+    static CLOSE_PENDING: cell::Cell<Option<bool>> = const { cell::Cell::new(None) };
+}
+
+/// O painel aberto não fecha quando o processo `pid` toma o primeiro plano ou recebe cliques
+/// (o menu de um ícone da bandeja aberto de dentro do painel). Vale até o painel fechar.
+pub fn allow_guest(pid: u32) {
+    if OPEN_HWND.with(|h| h.get()) != 0 {
+        GUEST_PID.with(|g| g.set(pid));
+        let mut pt = POINT::default();
+        let at = unsafe { GetCursorPos(&mut pt) }.is_ok().then_some(pt);
+        GUEST_AT.with(|g| g.set(at));
+    }
+}
+
+/// Alguns apps (ex.: AMD Adrenalin) põem o menu da bandeja no canto da tela, junto da barra,
+/// em cima do painel. Menu do convidado (classe #32768) que cobre o painel vai para o ponto do
+/// clique, como os outros apps fazem; cada menu é movido uma vez só.
+fn nudge_guest_menu(panel: HWND) {
+    let guest = GUEST_PID.with(|g| g.get());
+    let Some(at) = GUEST_AT.with(|g| g.get()) else { return };
+    if guest == 0 {
+        return;
+    }
+    unsafe {
+        let Ok(menu) = FindWindowW(w!("#32768"), None) else { return };
+        if menu.0 as isize == GUEST_MOVED.with(|m| m.get()) || !IsWindowVisible(menu).as_bool() {
+            return;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(menu, Some(&mut pid));
+        let (mut m, mut p) = (RECT::default(), RECT::default());
+        if pid != guest || GetWindowRect(menu, &mut m).is_err() || GetWindowRect(panel, &mut p).is_err() {
+            return;
+        }
+        GUEST_MOVED.with(|g| g.set(menu.0 as isize));
+        let overlaps = m.left < p.right && p.left < m.right && m.top < p.bottom && p.top < m.bottom;
+        if !overlaps {
+            return;
+        }
+        // Abre para baixo e para a esquerda do clique (a Bandeja fica no canto direito);
+        // vira para o outro lado onde não couber na tela.
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST), &mut mi);
+        let work = mi.rcWork;
+        let (w, h) = (m.right - m.left, m.bottom - m.top);
+        let mut x = at.x - w;
+        if x < work.left {
+            x = at.x;
+        }
+        let mut y = at.y;
+        if y + h > work.bottom {
+            y = at.y - h;
+        }
+        let _ = SetWindowPos(menu, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1710,6 +1776,9 @@ impl Drop for Panel {
         if current {
             OPEN_HWND.with(|h| h.set(0));
             OPEN_ITEM.with(|o| o.set(None));
+            GUEST_PID.with(|g| g.set(0));
+            GUEST_AT.with(|g| g.set(None));
+            GUEST_MOVED.with(|g| g.set(0));
         }
         unsafe {
             let _ = DestroyWindow(self.hwnd);
@@ -1732,7 +1801,12 @@ fn take() -> Result<Option<Panel>, ()> {
 }
 
 fn close_now(restore: bool) {
-    if let Ok(Some(p)) = take() {
+    let Ok(taken) = take() else {
+        // Emprestado: o wndproc fecha assim que o evento em andamento terminar.
+        CLOSE_PENDING.with(|c| c.set(Some(restore)));
+        return;
+    };
+    if let Some(p) = taken {
         unsafe {
             if restore && GetForegroundWindow() == p.hwnd && IsWindow(Some(p.prev_fg)).as_bool() {
                 let _ = SetForegroundWindow(p.prev_fg);
@@ -1763,6 +1837,8 @@ pub fn toggle(key: &'static str, item: RECT, make: impl FnOnce() -> Box<dyn Pane
 }
 
 fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: HWND) {
+    // Pedido de fechar que ficou de um painel anterior não vale para este.
+    CLOSE_PENDING.with(|c| c.set(None));
     let Ok(mut p) = Panel::new(key, item, content, prev_fg) else { return };
     p.rebuild();
     let hwnd = p.hwnd;
@@ -1778,8 +1854,59 @@ fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: 
     // Ativa para receber o teclado; fecha ao perder a ativação (WM_ACTIVATE).
     unsafe {
         let _ = SetForegroundWindow(hwnd);
+        // O Windows pode negar o primeiro plano (trava de foco), ou dar e tirar sem
+        // WA_INACTIVE: aí não chega o aviso nem o Esc, e o painel ficaria aberto. Então vigia
+        // por timer enquanto estiver aberto (morre junto com a janela).
+        SetTimer(Some(hwnd), TIMER_WATCH, 50, None);
     }
     crate::topbar::panel_visibility_changed();
+}
+
+/// Painel sem ativação: fecha com Esc, com o primeiro plano mudando para outra janela ou com
+/// clique fora. Cliques nas nossas janelas (dock, barra, o próprio painel) ficam com elas.
+fn outside(prev_fg: HWND) -> bool {
+    unsafe {
+        let down = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0;
+        if down(VK_ESCAPE) {
+            return true;
+        }
+        // Arrastando um slider (captura nossa): o mouse pode sair do painel sem ser clique fora.
+        if !GetCapture().is_invalid() {
+            return false;
+        }
+        let guest = GUEST_PID.with(|g| g.get());
+        let pid_of = |h: HWND| {
+            let mut pid = 0;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            pid
+        };
+        let ours = |h: HWND| pid_of(h) == GetCurrentProcessId();
+        let is_guest = |h: HWND| guest != 0 && pid_of(h) == guest;
+        // O convidado pode tomar o primeiro plano (o menu dele precisa) sem fechar o painel...
+        let fg = GetForegroundWindow();
+        if fg != prev_fg && !fg.is_invalid() && !ours(fg) && !is_guest(fg) {
+            return true;
+        }
+        if !(down(VK_LBUTTON) || down(VK_RBUTTON) || down(VK_MBUTTON)) {
+            return false;
+        }
+        // ...mas só cliques no menu dele (classe #32768) não fecham; clicar numa janela que o
+        // app abriu (ex.: o Adrenalin no duplo clique) fecha, para o painel não ficar na frente.
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        let hit = WindowFromPoint(pt);
+        if ours(hit) {
+            return false;
+        }
+        if is_guest(hit) {
+            let mut class = [0u16; 16];
+            let n = GetClassNameW(hit, &mut class) as usize;
+            return String::from_utf16_lossy(&class[..n]) != "#32768";
+        }
+        true
+    }
 }
 
 /// Fecha o painel aberto, se houver. Seguro de chamar de dentro de [`PanelContent::event`].
@@ -1842,6 +1969,17 @@ pub fn notify(msg: u32, wparam: usize) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let r = unsafe { handle(hwnd, msg, wp, lp) };
+    if let Some(restore) = CLOSE_PENDING.with(|c| c.get())
+        && PANEL.with(|p| p.try_borrow_mut().is_ok())
+    {
+        CLOSE_PENDING.with(|c| c.set(None));
+        close_now(restore);
+    }
+    r
+}
+
+unsafe fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         // Só a janela do painel aberto reage (a antiga, na troca, ainda recebe mensagens).
         if OPEN_HWND.with(|h| h.get()) != hwnd.0 as isize {
@@ -1911,8 +2049,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_ACTIVATE => {
-                // Perdeu a ativação (clique fora, Alt+Tab...): fecha depois, fora daqui.
-                if (wp.0 & 0xffff) as u32 == WA_INACTIVE {
+                // Perdeu a ativação (clique fora, Alt+Tab...): fecha depois, fora daqui. Com um
+                // convidado (menu de ícone da bandeja), quem decide é a vigia (TIMER_WATCH).
+                if (wp.0 & 0xffff) as u32 == WA_INACTIVE && GUEST_PID.with(|g| g.get()) == 0 {
                     let _ = PostMessageW(Some(hwnd), WM_PANEL_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 LRESULT(0)
@@ -1923,6 +2062,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_TIMER if wp.0 == TIMER_ANIM => {
                 with_panel(|p| p.animate());
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == TIMER_WATCH => {
+                nudge_guest_menu(hwnd);
+                if with_panel(|p| outside(p.prev_fg)) == Some(true) {
+                    close_now(false);
+                }
                 LRESULT(0)
             }
             WM_SETTINGCHANGE => {

@@ -143,6 +143,12 @@ pub fn click(source: &str, anchor: POINT) {
     match source {
         TRASH => open_trash(),
         DOWNLOADS => {
+            // Clicar de novo fecha. Não dá para confiar no `toggle` comparar o item: o ponto
+            // acima do ícone muda com o zoom (posição do mouse), e aí reabriria em vez de fechar.
+            if panel::is_open("downloads") {
+                panel::close();
+                return;
+            }
             let item = RECT { left: anchor.x, top: anchor.y, right: anchor.x, bottom: anchor.y };
             panel::toggle("downloads", item, || {
                 let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;

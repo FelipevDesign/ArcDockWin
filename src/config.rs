@@ -104,6 +104,11 @@ pub fn set_clock_24h(on: bool) {
     set_flag("clock_24h", on);
 }
 
+/// Ícones da bandeja com as cores do app (`tray_color=1`); o padrão é tons de cinza.
+pub fn tray_color() -> bool {
+    get("tray_color").is_some_and(|v| v == "1")
+}
+
 /// Segundos no relógio (desligado por padrão: atualiza a cada minuto).
 pub fn clock_seconds() -> bool {
     get("clock_seconds").is_some_and(|v| v == "1")
