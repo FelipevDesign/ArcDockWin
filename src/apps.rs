@@ -24,7 +24,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
     GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    PostMessageW, SC_MINIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
+    PostMessageW, SC_MINIMIZE, SW_MINIMIZE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
     SwitchToThisWindow, WM_SYSCOMMAND, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
@@ -514,15 +514,13 @@ pub fn cycle_window(windows: &[HWND], forward: bool) {
 /// Traz a janela para frente, restaurando se estiver minimizada.
 pub fn focus_window(hwnd: HWND) {
     unsafe {
+        // Minimizada: SwitchToThisWindow restaura e ativa como o clique na barra de tarefas do
+        // Windows. O ShowWindow(SW_RESTORE) de fora deixava apps WinUI 3 maximizados (ex.:
+        // WhatsApp) com a interface presa no tamanho de janela minimizada (tela branca), e
+        // com app rodando como administrador o UIPI nega o ShowWindow.
         if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            // Janela de app rodando como administrador: o UIPI nega o ShowWindow (acesso
-            // negado) e ela continua minimizada. SwitchToThisWindow restaura e ativa, como
-            // o clique na barra de tarefas do Windows.
-            if IsIconic(hwnd).as_bool() {
-                SwitchToThisWindow(hwnd, true);
-                return;
-            }
+            SwitchToThisWindow(hwnd, true);
+            return;
         }
         let _ = SetForegroundWindow(hwnd);
     }
