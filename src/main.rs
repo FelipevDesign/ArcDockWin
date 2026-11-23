@@ -474,6 +474,29 @@ impl Dock {
         pt.y >= b.bottom - 2 && pt.y < b.bottom && pt.x >= b.left && pt.x < b.right
     }
 
+    /// Cursor sobre o dock na tela: fundo, ícones ampliados ou a faixa até a borda de baixo.
+    /// Não depende do WM_MOUSEMOVE: se ele se perde (o cursor para logo depois de entrar), o
+    /// `tracking` fica falso e o dock descia com o mouse em cima dele.
+    fn mouse_over(&self) -> bool {
+        if !self.shown {
+            return false;
+        }
+        let mut pt = POINT::default();
+        if unsafe { GetCursorPos(&mut pt) }.is_err() {
+            return false;
+        }
+        let Some((l, t, r, _)) = render::box_rect(&self.slots(), &self.m, self.pixmap.height() as f32) else {
+            return false;
+        };
+        // Com zoom, os ícones passam do fundo: conta a altura toda da janela.
+        let top = if self.hover > 0.01 { 0 } else { t };
+        let y = self.pos.y + self.offset();
+        pt.x >= self.pos.x + l
+            && pt.x < self.pos.x + r
+            && pt.y >= y + top
+            && pt.y < self.monitor_bounds.bottom
+    }
+
     /// Decide se o dock deve aparecer ou sumir (chamado a cada ~50 ms).
     fn edge_tick(&mut self) {
         let now = Instant::now();
@@ -485,6 +508,7 @@ impl Dock {
             || minimize::busy()
             || panel::is_open("downloads")
             || self.at_edge()
+            || self.mouse_over()
             || !self.covered()
         {
             self.last_inside = Some(now);
