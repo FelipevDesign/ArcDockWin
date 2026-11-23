@@ -251,6 +251,8 @@ impl Bar {
                 fonts.as_ref().is_some_and(|f| f.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool())
             };
             let family = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
+            // Windows 10 não tem a Segoe Fluent Icons; a MDL2 Assets usa os mesmos códigos.
+            let icons = if has(w!("Segoe Fluent Icons")) { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
             let locale = HSTRING::from(crate::i18n::text_locale());
             let locale_ptr = PCWSTR::from_raw(locale.as_ptr());
             let format = |family: PCWSTR, size: f32| -> windows::core::Result<IDWriteTextFormat> {
@@ -268,7 +270,7 @@ impl Bar {
                 Ok(f)
             };
             let text_fmt = format(family, 12.0)?;
-            let icon_fmt = format(w!("Segoe Fluent Icons"), 14.0)?;
+            let icon_fmt = format(icons, 14.0)?;
             icon_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
 
             let glass_fx = glass_fx.or_else(|| glass::Glass::new(glass_hwnd, 0.0).ok());
