@@ -465,6 +465,12 @@ impl Dock {
                     fx.refresh();
                 }
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                // Escondido, o dock pode ficar abaixo de um app maximizado que veio para a frente
+                // (o WS_EX_TOPMOST continua marcado, mas o DWM o compõe atrás): ao subir, volta
+                // ao topo da faixa "sempre no topo". Vidro primeiro; o dock é dono-dependente dele.
+                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                let _ = SetWindowPos(self.glass, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             } else {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
                 let _ = ShowWindow(self.glass, SW_HIDE);
