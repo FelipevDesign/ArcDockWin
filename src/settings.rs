@@ -59,6 +59,7 @@ enum Opt {
     MagnifySize,
     AutoHide,
     Stacks,
+    DockAllMonitors,
     Anim,
     Clock24,
     ClockSeconds,
@@ -194,6 +195,10 @@ fn toggle(o: Opt) {
             config::set_stacks(!config::stacks());
             crate::apply_settings(false);
         }
+        Opt::DockAllMonitors => {
+            config::set_dock_all_monitors(!config::dock_all_monitors());
+            crate::rebuild_docks();
+        }
         Opt::Anim => {
             animcfg::set_enabled(!animcfg::enabled());
             crate::minimize::config_changed();
@@ -269,6 +274,7 @@ fn blocks(page: usize) -> Vec<Block> {
                 Row::Slider(Opt::MagnifySize, "Tamanho da ampliação", value(Opt::MagnifySize), format!("{}×", decimal(config::magnify_scale())), zoom),
                 Row::Toggle(Opt::AutoHide, "Ocultar automaticamente", config::autohide()),
                 Row::Toggle(Opt::Stacks, "Mostrar Downloads e Lixeira", config::stacks()),
+                Row::Toggle(Opt::DockAllMonitors, "Mostrar Dock em todos os monitores", config::dock_all_monitors()),
             ])]
         }
         1 => {

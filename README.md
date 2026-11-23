@@ -22,6 +22,7 @@ Windows taskbar in daily use.
 ## ✨ Features
 
 ### Dock
+- Shown on the main monitor by default; can be shown on **every monitor** in Settings → Dock.
 - Real blurred glass (what is behind the dock shows through blurred), rounded corners and a soft shadow.
 - Icon magnification on hover and a small dot under running apps.
 - Smooth magnification follows pointer movement; use the mouse wheel over an app with multiple windows to cycle through them.
@@ -42,7 +43,7 @@ animation runs. The original value is restored afterwards, when ArcDockWin quits
 crashes.
 
 ### Top bar
-- Shown on **every monitor** by default (the dock stays on the main one only); can be limited to the main monitor.
+- Shown on **every monitor** by default; can be limited to the main monitor in Settings → Top bar.
 - **Takes the colour of the focused app** (10% darker, to separate the bar from the app), the moment you switch windows.
 - Built from **modules**: CPU/RAM, Clock, Tray and Control Center. Each one can be turned off, placed in the left,
   centre or right zone, and ordered inside its zone.
@@ -73,7 +74,7 @@ dock) with a Mica background that follows the Windows light/dark theme. Changes 
 
 | Page | Options |
 | --- | --- |
-| Dock | Icon size (32–72 px), magnification on hover on/off and its size (1.1×–2.0×), auto-hide, show Downloads and Trash |
+| Dock | Icon size (32–72 px), magnification on hover on/off and its size (1.1×–2.0×), auto-hide, show Downloads and Trash, show on all monitors |
 | Animations | Minimize animation on/off, Genie or Scale effect |
 | Top bar | Live preview of the bar; each module on/off, zone (Left/Centre/Right) and order (▲▼); clock format (24 h, seconds, date); show on all monitors |
 | General | Start with Windows; About |
