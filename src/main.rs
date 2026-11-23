@@ -20,6 +20,7 @@ mod minimize;
 mod panel;
 mod perf;
 mod power;
+mod preview;
 mod render;
 mod settings;
 mod stacks;
@@ -491,6 +492,7 @@ impl Dock {
             || MENU_OPEN.load(Ordering::Relaxed)
             || minimize::busy()
             || panel::is_open("downloads")
+            || preview::is_open()
             || self.at_edge()
             || !self.covered()
         {
@@ -1208,6 +1210,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_MOUSEMOVE => {
+                // App com 2+ janelas sob o mouse: a prévia delas abre depois de uma pequena espera.
+                let preview_target = with_dock(hwnd, |d| {
+                    if d.drag.busy() {
+                        return None;
+                    }
+                    let i = d.hit(mouse_x(lp))?;
+                    let app = d.apps.get(i).filter(|a| a.windows.len() >= 2)?;
+                    Some(preview::Target { key: app.key.clone(), windows: app.windows.clone(), anchor: d.menu_anchor(i)? })
+                })
+                .flatten();
+                preview::hover(preview_target);
                 with_dock(hwnd, |d| {
                     d.mx_target = mouse_x(lp);
                     // O ícone arrastado deve continuar colado ao cursor.
@@ -1235,6 +1248,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
+                preview::dock_left();
                 with_dock(hwnd, |d| {
                     d.tracking = false;
                     // Com o mouse capturado no arrasto, o zoom fica até soltar.
@@ -1252,6 +1266,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     y: ((lp.0 >> 16) & 0xffff) as i16 as i32,
                 };
                 let _ = ScreenToClient(hwnd, &mut point);
+                preview::dismiss();
                 let windows = with_dock(hwnd, |d| {
                     let i = d.hit(point.x as f32)?;
                     let app = d.apps.get(i)?;
@@ -1308,6 +1323,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                preview::dismiss();
                 // Foi um arrasto, não um clique.
                 if with_dock(hwnd, |d| d.drag_up()).unwrap_or(false) {
                     reload_pins();
@@ -1332,6 +1348,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
+                preview::dismiss();
                 if let Some((source, anchor)) = with_dock(hwnd, |d| d.stack_at(d.hit(mouse_x(lp))?)).flatten() {
                     MENU_OPEN.store(true, Ordering::Relaxed);
                     stacks::context_menu(hwnd, &source, anchor);
@@ -1368,6 +1385,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     tray::stop();
                     topbar::shutdown();
                     taskbar::restore();
+                    preview::shutdown();
                     minimize::shutdown();
                 }
                 LRESULT(0)
@@ -1379,6 +1397,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     tray::stop();
                     topbar::shutdown();
                     taskbar::restore();
+                    preview::shutdown();
                     minimize::shutdown();
                     PostQuitMessage(0);
                 }
