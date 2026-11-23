@@ -24,7 +24,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
     GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, WS_EX_TOOLWINDOW,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, SwitchToThisWindow, WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
 
@@ -501,6 +501,13 @@ pub fn focus_window(hwnd: HWND) {
     unsafe {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
+            // Janela de app rodando como administrador: o UIPI nega o ShowWindow (acesso
+            // negado) e ela continua minimizada. SwitchToThisWindow restaura e ativa, como
+            // o clique na barra de tarefas do Windows.
+            if IsIconic(hwnd).as_bool() {
+                SwitchToThisWindow(hwnd, true);
+                return;
+            }
         }
         let _ = SetForegroundWindow(hwnd);
     }
