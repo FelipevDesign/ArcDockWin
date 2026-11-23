@@ -19,11 +19,14 @@ ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言，內建葡萄牙文�
 - App 要求注意時圖示會跳動；開啟右鍵選單可固定／取消固定 App 或關閉視窗。
 - 可拖曳圖示排序；Launcher 永遠位於 Dock 項目末端。
 - Dock 尾端附有「下載項目」堆疊與垃圾桶，支援自動隱藏，並跟隨 Windows 淺色／深色模式。
+- 自動隱藏時，將指標移到螢幕底部邊緣的任何位置即可叫出 Dock；「下載項目」面板開啟時 Dock 不會隱藏，再點一次堆疊即可關閉面板。
+- 在 WebView2 中執行的 App（例如 WhatsApp）會顯示自己的圖示，而不是 Edge WebView 的圖示。
+- 點選唯一視窗已最小化的 App 會還原該視窗。
 - 可透過 `icons.txt` 將 Dock 圖示換成 MacTahoe 圖示主題中的 `.ico`。
 
 ### 最小化動畫
 
-視窗最小化時會縮進 Dock 上對應的 App 圖示，可選「精靈」或「縮放」效果，接近圖示時逐漸淡出（60 fps）。點選視窗的最小化按鈕、按 **Win+↓**，或點選 Dock 上的 App 圖示來最小化時都會播放。動畫進行期間會暫時關閉 Windows 原生的最小化動畫，結束後、程式結束時，以及 Dock 當機時由守護程序還原。
+視窗最小化時會縮進 Dock 上對應的 App 圖示，可選「精靈」或「縮放」效果，接近圖示時逐漸淡出（60 fps）。點選視窗的最小化按鈕、按 **Win+↓**，或點選 Dock 上的 App 圖示來最小化時都會播放，Windows 11 檔案總管（含索引標籤的視窗）也支援。動畫進行期間會暫時關閉 Windows 原生的最小化動畫，結束後、程式結束時，以及 Dock 當機時由守護程序還原。
 
 ### 頂端選單列與控制中心
 
@@ -31,6 +34,8 @@ ArcDockWin 會讀取 Windows 使用者的 UI 顯示語言，內建葡萄牙文�
 - 選單列由模組組成：CPU／記憶體、時鐘、系統匣與控制中心。每個模組可開關、放在左／中／右區，並調整區內順序。
 - 時鐘可選 24／12 小時制、秒數與日期；點選時鐘會開啟日曆。
 - 系統匣圖示可選擇固定在選單列或收納到溢位面板；空間不足時會自動收進箭頭，CPU／記憶體最後才隱藏。
+- 系統匣 App 的選單會在選單列上的圖示旁開啟；在隱藏圖示面板中按兩下圖示，行為與 Windows 工作列相同。
+- 檔案總管重新啟動後，選單列會重新保留空間，最大化的視窗不會被它遮住。
 - 控制中心提供 Wi‑Fi、藍牙、淺色／深色模式、電源、亮度、音量與媒體控制。
 
 ### 效能面板
@@ -105,11 +110,13 @@ cargo build --release
 spotify.exe=C:\Icones\MacTahoe\apps\spotify.ico
 ```
 
+**Ícones Tahoe** 每次套用時都會重寫 `icons.txt`。若要保留自己的修改，請改寫在 `C:\Icones\MacTahoe\icons-custom.txt`：其中的設定優先於主題，並會在每次套用時合併進去。
+
 圖示主題不會隨此專案一併散布；轉換腳本會從 [MacTahoe icon theme](https://github.com/vinceliuice/MacTahoe-icon-theme) 下載，並依原專案 GPL-3.0 授權。
 
 ## 設定與還原
 
-ArcDockWin 的使用者設定位於 `%APPDATA%\ArcDockWin\`：`pinned.txt` 管理 Dock 固定項目，`icons.txt` 管理自訂圖示，`colors.db` 儲存選單列 App 色彩與系統匣顯示選項，`settings.txt` 儲存設定視窗的選項，`animation.txt` 儲存最小化動畫（`enabled=1|0`、`effect=genie|scale`）。
+ArcDockWin 的使用者設定位於 `%APPDATA%\ArcDockWin\`：`pinned.txt` 管理 Dock 固定項目，`icons.txt` 管理自訂圖示，`colors.db` 儲存選單列 App 色彩與系統匣顯示選項，`settings.txt` 儲存設定視窗的選項（`tray_color=1` 目前沒有介面選項，可讓系統匣圖示保留 App 原本的顏色而非灰階），`animation.txt` 儲存最小化動畫（`enabled=1|0`、`effect=genie|scale`）。
 
 已知限制：自繪標題列的 App 以啟發式方式偵測最小化按鈕，可能沒有動畫（Win+↓ 與 Dock 圖示仍有動畫）；溫度讀取取決於硬體與驅動程式。
 

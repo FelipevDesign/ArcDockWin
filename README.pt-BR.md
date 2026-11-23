@@ -29,13 +29,17 @@ substituir a barra de tarefas do Windows no dia a dia.
 - **Arrastar para reordenar**: solte um app aberto entre os fixados para fixar, ou arraste para cima para desafixar.
   O lançador fica sempre como último app.
 - **Lixeira e Downloads** no fim da dock, com painel de arquivos recentes.
-- Esconde sozinha quando uma janela encosta nela.
+- Esconde sozinha quando uma janela encosta nela; com o ocultar automático ligado, levar o mouse a qualquer ponto
+  da borda de baixo traz ela de volta. Fica visível enquanto o painel de Downloads está aberto, e clicar de novo na
+  pilha fecha o painel.
+- Apps que rodam dentro do WebView2 (como o WhatsApp) mostram o próprio ícone, e não o do Edge WebView.
+- Clicar num app cuja única janela está minimizada restaura a janela.
 - Segue o **Modo Escuro/Claro** do Windows.
 
 ### Animação ao minimizar
 As janelas encolhem até o ícone do app na dock com efeito **Gênio** ou **Escala**, sumindo aos poucos conforme
 chegam perto do ícone, a 60 fps. Funciona ao clicar no botão de minimizar da janela, no atalho **Win+↓** e ao clicar
-no ícone do app na dock para minimizá-lo.
+no ícone do app na dock para minimizá-lo. Também funciona nas pastas do Explorador do Windows 11 (as com abas).
 
 Para não ter animação dobrada, o ArcDockWin desliga a animação nativa de minimizar do Windows só durante a dele. O
 valor original volta logo depois, quando o ArcDockWin é fechado e também pelo vigia, se a dock travar.
@@ -49,6 +53,9 @@ valor original volta logo depois, quando o ArcDockWin é fechado e também pelo 
 - Ícones da bandeja com painel dos ocultos e escolha de quais ficam na barra. Quando falta espaço, os ícones se
   recolhem sozinhos para a seta (sem mudar a sua escolha) e o CPU/RAM é o último a sumir.
 - O item com o painel aberto fica destacado.
+- Os menus dos apps da bandeja abrem junto do ícone na barra do topo, e o duplo clique num ícone do painel dos
+  ocultos funciona como na barra de tarefas do Windows.
+- Se o Explorer reiniciar, a barra do topo reserva o espaço dela de novo, e janelas maximizadas não ficam por baixo.
 
 ### Painel Desempenho
 Clique no CPU/RAM da barra do topo para ver o uso de CPU, memória e GPU (com a memória de vídeo) e as temperaturas

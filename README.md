@@ -30,13 +30,16 @@ Windows taskbar in daily use.
 - **Drag to reorder**: drop a running app between the pinned ones to pin it, or drag it upwards to unpin it.
   The launcher is always the last app.
 - **Trash and Downloads** at the end of the dock, with a panel of recent files.
-- Hides itself when a window touches it.
+- Hides itself when a window touches it; with auto-hide on, moving the mouse to any point of the bottom edge
+  brings it back. It stays visible while the Downloads panel is open, and clicking the stack again closes the panel.
+- Apps that run inside WebView2 (such as WhatsApp) show their own icon instead of the Edge WebView one.
+- Clicking an app whose only window is minimized restores it.
 - Follows the Windows **Dark/Light mode**.
 
 ### Minimize animation
 Windows shrink into their app's icon on the dock with a **Genie** or **Scale** effect, fading out as they get close
 to the icon, at 60 fps. It works when you click a window's minimize button, press **Win+↓**, or click the app's
-icon on the dock to minimize it.
+icon on the dock to minimize it. It also works on Windows 11 File Explorer windows (the ones with tabs).
 
 To avoid a double animation, ArcDockWin turns off the native Windows minimize animation for the short moment its own
 animation runs. The original value is restored afterwards, when ArcDockWin quits, and by the watchdog if the dock
@@ -52,6 +55,9 @@ crashes.
   room, tray icons fold into the arrow on their own (your choice of visible icons is kept) and CPU/RAM is the last
   thing to go.
 - The item whose panel is open stays highlighted.
+- Tray app menus open next to their icon on the top bar, and double-clicking an icon in the hidden-icons panel works
+  like on the Windows taskbar.
+- If Explorer restarts, the top bar reserves its space again, so maximized windows do not slide under it.
 
 ### Performance panel
 Click CPU/RAM on the top bar to see CPU, memory and GPU usage (with video memory) and the CPU and GPU temperatures,
