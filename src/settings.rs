@@ -805,6 +805,8 @@ pub fn open() {
             hInstance: hinst,
             lpszClassName: class,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            // Ícone do app (recurso 1, embutido pelo build.rs).
+            hIcon: LoadIconW(Some(hinst), windows::core::PCWSTR(1 as *const u16)).unwrap_or_default(),
             ..Default::default()
         };
         // Falha a partir da segunda vez (classe já existe): tudo bem.
