@@ -90,6 +90,7 @@ const MENU_ADMIN: usize = 6;
 const MENU_LOCATION: usize = 7;
 const MENU_MORE: usize = 8;
 const MENU_UPDATE: usize = 9;
+const MENU_SEP: usize = 10;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -240,7 +241,15 @@ impl Dock {
             .filter(|a| a.source == apps::START && (self.apps.len() > 1 || !self.stack_items().is_empty()))
             .map(|_| 0);
         let stacks = self.apps.len().checked_sub(1).filter(|_| !self.stack_items().is_empty());
-        let mut seps: Vec<usize> = start.into_iter().chain(self.sep_after()).chain(stacks).collect();
+        // Separadores escolhidos pelo usuário (`---` no pinned.txt), menos depois do último item.
+        let custom = self
+            .apps
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.pinned && a.sep_after && i + 1 < self.apps.len())
+            .map(|(i, _)| i);
+        let mut seps: Vec<usize> = start.into_iter().chain(self.sep_after()).chain(custom).chain(stacks).collect();
+        seps.sort_unstable();
         seps.dedup();
         seps
     }
@@ -1202,13 +1211,14 @@ unsafe extern "system" fn on_window_change(
     }
 }
 
-/// Menu do botão direito: com `target` (key, source, fixado, janelas), as opções do app; sempre "Sair".
+/// Menu do botão direito: com `target` (key, source, fixado, janelas, separador depois), as
+/// opções do app; sempre "Sair".
 /// `anchor`: ponto acima do centro do ícone onde o menu se apoia (sem ícone, abre no mouse).
-unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>)>, anchor: Option<POINT>) {
+unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>, bool)>, anchor: Option<POINT>) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let fg = GetForegroundWindow();
-        if let Some((_, source, pinned, windows)) = &target {
+        if let Some((_, source, pinned, windows, sep)) = &target {
             if windows.len() >= 2 {
                 for (k, &win) in windows.iter().enumerate() {
                     let flags = if win == fg { MF_STRING | MF_CHECKED } else { MF_STRING };
@@ -1232,6 +1242,11 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let pin = HSTRING::from(crate::i18n::tr(if *pinned { "Desafixar do dock" } else { "Fixar no dock" }));
             let _ = AppendMenuW(menu, MF_STRING, MENU_PIN, &pin);
+            if *pinned {
+                let text = if *sep { "Remover separador depois" } else { "Adicionar separador depois" };
+                let text = HSTRING::from(crate::i18n::tr(text));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_SEP, &text);
+            }
             match windows.len() {
                 0 => {}
                 1 => {
@@ -1290,7 +1305,7 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             update::install();
             return;
         }
-        let Some((key, source, pinned, windows)) = target else { return };
+        let Some((key, source, pinned, windows, _)) = target else { return };
         match cmd {
             MENU_NEW => {
                 ShellExecuteW(None, w!("open"), &HSTRING::from(&source), None, None, SW_SHOWNORMAL);
@@ -1312,6 +1327,9 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             MENU_PIN => {
                 with_dock(hwnd, |d| apps::set_pinned(&mut d.apps, &key, !pinned));
             }
+            MENU_SEP => {
+                with_dock(hwnd, |d| apps::toggle_separator(&mut d.apps, &key));
+            }
             MENU_CLOSE => {
                 for &win in &windows {
                     let _ = PostMessageW(Some(win), WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -1324,7 +1342,7 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             }
             _ => return,
         }
-        if cmd == MENU_PIN {
+        if cmd == MENU_PIN || cmd == MENU_SEP {
             reload_pins();
         } else {
             with_docks(|d| {
@@ -1532,7 +1550,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let target = i
                         .and_then(|i| d.apps.get(i))
                         .filter(|a| a.source != apps::START)
-                        .map(|a| (a.key.clone(), a.source.clone(), a.pinned, a.windows.clone()));
+                        .map(|a| (a.key.clone(), a.source.clone(), a.pinned, a.windows.clone(), a.sep_after));
                     (target, i.and_then(|i| d.menu_anchor(i)))
                 })
                 .unwrap_or((None, None));

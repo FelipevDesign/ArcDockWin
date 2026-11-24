@@ -209,7 +209,7 @@ impl crate::Dock {
                         d.apps.insert(at, app);
                     }
                 }
-                save_order(&d.apps, gone.as_deref());
+                apps::save_pinned(&d.apps, gone.as_deref());
             });
         }
         self.drag.press = None;
@@ -226,30 +226,4 @@ impl crate::Dock {
         }
         active
     }
-}
-
-/// Grava os fixados na ordem do dock: comentários e linhas de apps que não estão no dock
-/// ficam como estão, os fixados vão para o fim e `gone` (desafixado) sai.
-fn save_order(list: &[App], gone: Option<&str>) {
-    let pinned: Vec<&str> =
-        list[first(list)..].iter().filter(|a| a.pinned).map(|a| a.source.as_str()).collect();
-    let cfg = apps::config_path();
-    let text = std::fs::read_to_string(&cfg).unwrap_or_default();
-    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut out = String::new();
-    for line in text.lines() {
-        let l = line.trim();
-        if !pinned.contains(&l) && gone != Some(l) {
-            out.push_str(line);
-            out.push_str(nl);
-        }
-    }
-    for s in pinned {
-        out.push_str(s);
-        out.push_str(nl);
-    }
-    if let Some(dir) = cfg.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&cfg, out);
 }

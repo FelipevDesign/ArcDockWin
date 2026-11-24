@@ -53,12 +53,17 @@ pub struct App {
     pub icon: Option<Pixmap>,
     /// Janelas abertas do app, na ordem em que apareceram.
     pub windows: Vec<HWND>,
+    /// Separador depois deste app (linha `---` no pinned.txt; só nos fixados).
+    pub sep_after: bool,
 }
+
+/// Linha do pinned.txt que põe um separador depois do app de cima.
+pub const SEP_LINE: &str = "---";
 
 const DEFAULT_CONFIG: &str = "\
 # ArcDockWin - apps fixados no dock
 # Um caminho de .exe por linha (ou shell:AppsFolder\\<id> para apps da Store).
-# Linhas começando com # são ignoradas.
+# Linhas começando com # são ignoradas. Uma linha --- põe um separador depois do app de cima.
 C:\\Windows\\explorer.exe
 C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe
 C:\\Windows\\System32\\notepad.exe
@@ -85,23 +90,68 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         pinned: true,
         icon: load_icon(START, icon_size),
         windows: Vec::new(),
+        sep_after: false,
     };
     // O botão Iniciar é sempre o primeiro item, antes dos fixados e dos abertos.
-    let apps: Vec<App> = std::iter::once(start)
-        .chain(text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter(|l| l.starts_with(APPS_FOLDER) || Path::new(l).exists())
-        .map(|source| App {
-            key: source_key(source),
-            icon: load_icon(source, icon_size),
-            source: source.to_string(),
+    let mut apps: Vec<App> = vec![start];
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        if line == SEP_LINE {
+            // O Iniciar já tem separador depois dele.
+            if let Some(last) = apps.last_mut().filter(|a| a.source != START) {
+                last.sep_after = true;
+            }
+            continue;
+        }
+        if !(line.starts_with(APPS_FOLDER) || Path::new(line).exists()) {
+            continue;
+        }
+        apps.push(App {
+            key: source_key(line),
+            icon: load_icon(line, icon_size),
+            source: line.to_string(),
             pinned: true,
             windows: Vec::new(),
-        }))
-        .collect();
+            sep_after: false,
+        });
+    }
     apps
+}
+
+/// Grava os fixados na ordem do dock: comentários e linhas de apps que não estão no dock
+/// ficam como estão, os fixados (com os separadores `---` depois deles) vão para o fim e
+/// `gone` (desafixado) sai.
+pub fn save_pinned(list: &[App], gone: Option<&str>) {
+    let pinned: Vec<&App> = list.iter().filter(|a| a.pinned && a.source != START).collect();
+    let cfg = config_path();
+    let text = std::fs::read_to_string(&cfg).unwrap_or_default();
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l != SEP_LINE && !pinned.iter().any(|a| a.source == l) && gone != Some(l) {
+            out.push_str(line);
+            out.push_str(nl);
+        }
+    }
+    for a in pinned {
+        out.push_str(&a.source);
+        out.push_str(nl);
+        if a.sep_after {
+            out.push_str(SEP_LINE);
+            out.push_str(nl);
+        }
+    }
+    if let Some(dir) = cfg.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&cfg, out);
+}
+
+/// Põe ou tira o separador depois do app fixado `key` e grava.
+pub fn toggle_separator(apps: &mut [App], key: &str) {
+    let Some(app) = apps.iter_mut().find(|a| a.key == key && a.pinned && a.source != START) else { return };
+    app.sep_after = !app.sep_after;
+    save_pinned(apps, None);
 }
 
 /// Item especial do botão Iniciar.
@@ -338,6 +388,7 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
                 key,
                 pinned: false,
                 windows,
+                sep_after: false,
             });
             changed = true;
         }
@@ -665,11 +716,23 @@ pub fn import_taskbar_pins() -> usize {
         .collect();
     let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut added = 0;
+    // Separador só depois de um app que acabou de entrar (nada de --- solto ou repetido).
+    let mut last_added = false;
     for source in taskbar_pins() {
-        let key = source_key(&source);
-        if keys.contains(&key) {
+        if source == SEP_LINE {
+            if last_added {
+                text.push_str(SEP_LINE);
+                text.push_str(nl);
+                last_added = false;
+            }
             continue;
         }
+        let key = source_key(&source);
+        if keys.contains(&key) {
+            last_added = false;
+            continue;
+        }
+        last_added = true;
         if !text.is_empty() && !text.ends_with('\n') {
             text.push_str(nl);
         }
@@ -691,8 +754,10 @@ fn taskbar_pins() -> Vec<String> {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
     let pinned = base.join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned");
     let mut out: Vec<String> = Vec::new();
+    // `---` (separador) pode repetir, mas nunca no começo nem dois seguidos.
     let mut push = |s: String| {
-        if !out.contains(&s) {
+        let ok = if s == SEP_LINE { out.last().is_some_and(|l| l != SEP_LINE) } else { !out.contains(&s) };
+        if ok {
             out.push(s);
         }
     };
@@ -708,6 +773,11 @@ fn taskbar_pins() -> Vec<String> {
     let aumids: Vec<&str> = tokens.iter().map(String::as_str).filter(|t| is_aumid(t)).collect();
     for t in &tokens {
         if t.to_ascii_lowercase().ends_with(".lnk") {
+            // Separadores do Windhawk na barra do Windows viram separadores do dock.
+            if t.contains("WindhawkSeparator") {
+                push(SEP_LINE.to_string());
+                continue;
+            }
             if let Some(source) = find_lnk(&pinned, t).and_then(|p| resolve_lnk(&p)) {
                 push(source);
             }
@@ -905,7 +975,22 @@ pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
         text.push_str(&source);
         text.push_str(nl);
     } else {
-        text = text.split_inclusive('\n').filter(|l| l.trim() != source).collect();
+        // Sai a linha do app e o separador logo depois dele, se houver.
+        let mut out = String::new();
+        let mut skip_sep = false;
+        for l in text.split_inclusive('\n') {
+            if l.trim() == source {
+                skip_sep = true;
+                continue;
+            }
+            if skip_sep && l.trim() == SEP_LINE {
+                skip_sep = false;
+                continue;
+            }
+            skip_sep = false;
+            out.push_str(l);
+        }
+        text = out;
     }
     if let Some(dir) = cfg.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -914,6 +999,7 @@ pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
 
     let mut app = apps.remove(i);
     app.pinned = pin;
+    app.sep_after = false;
     if pin || !app.windows.is_empty() {
         // Depois do Iniciar (índice 0) e dos outros fixados.
         let at = 1 + apps.iter().filter(|a| a.pinned && a.source != START).count();
