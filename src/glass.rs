@@ -64,6 +64,10 @@ impl Glass {
         }
     }
 
+    pub fn set_radius(&self, r: f32) {
+        let _ = self.shape.SetCornerRadius(Vector2 { X: r, Y: r });
+    }
+
     pub fn resize(&self, w: f32, h: f32) {
         let _ = self.shape.SetSize(Vector2 { X: w, Y: h });
     }

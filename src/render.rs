@@ -51,6 +51,7 @@ pub struct Theme {
     divider: [u8; 4],
     /// Pontinhos do app em foco: cor de destaque do Windows.
     accent: [u8; 4],
+    pub light: bool,
 }
 
 impl Theme {
@@ -60,7 +61,7 @@ impl Theme {
         } else {
             ([40, 40, 44, 116], [255, 255, 255, 58], [255, 255, 255, 210], [255, 255, 255, 60])
         };
-        Self { tint, border, dot, divider, accent: accent.unwrap_or(dot) }
+        Self { tint, border, dot, divider, accent: accent.unwrap_or(dot), light }
     }
 }
 

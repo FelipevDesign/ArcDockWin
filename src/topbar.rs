@@ -146,7 +146,7 @@ struct Item {
 /// de GPU (96 dpi: 1 DIP = 1 px; a escala vai nos tamanhos). Um render target e uma fábrica
 /// DirectWrite para todas as barras (mesma thread; BindDC troca a DIB a cada desenho): cada
 /// render target em software custa ~2 MB.
-fn shared_d2d() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFactory)> {
+pub(crate) fn shared_d2d() -> windows::core::Result<(ID2D1DCRenderTarget, IDWriteFactory)> {
     thread_local! {
         static D2D: std::cell::RefCell<Option<(ID2D1DCRenderTarget, IDWriteFactory)>> = const { std::cell::RefCell::new(None) };
     }
