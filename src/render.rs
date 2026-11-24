@@ -3,8 +3,8 @@
 use std::f32::consts::PI;
 
 use tiny_skia::{
-    Color, FillRule, FilterQuality, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke,
-    Transform,
+    Color, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
+    Rect, SpreadMode, Stroke, Transform,
 };
 
 use crate::apps::App;
@@ -14,7 +14,8 @@ pub struct Metrics {
     pub max: f32,    // tamanho máximo com zoom
     pub gap: f32,    // espaço entre ícones
     pub sep: f32,    // espaço extra do separador (fixados | abertos)
-    pub pad: f32,    // espaço interno do fundo
+    pub pad: f32,    // espaço interno do fundo (em cima e embaixo)
+    pub pad_x: f32,  // espaço interno nas pontas
     pub margin: f32, // distância até a borda de baixo
     pub range: f32,  // raio de alcance do zoom
     pub radius: f32, // arredondamento do fundo
@@ -24,17 +25,22 @@ pub struct Metrics {
 impl Metrics {
     /// Tamanho dos ícones e ampliação vêm das Configurações (config.rs).
     pub fn new(scale: f32) -> Self {
-        let (base, gap) = (crate::config::icon_size() * scale, 9.0 * scale);
-        let zoom = if crate::config::magnify() { crate::config::magnify_scale() } else { 1.0 };
+        use crate::config;
+        let (base, gap) = (config::icon_size() * scale, config::icon_gap() * scale);
+        let pad = config::dock_padding() * scale;
+        let zoom = if config::magnify() { config::magnify_scale() } else { 1.0 };
         Self {
             base,
             max: base * zoom,
             gap,
-            sep: 10.0 * scale, // espaçamento simétrico em torno do divisor
-            pad: 8.0 * scale,
-            margin: 6.0 * scale,
+            // Espaço extra em volta do divisor: o grupo fica bem separado, como no macOS.
+            sep: gap + 4.0 * scale,
+            pad,
+            pad_x: pad * 1.5,
+            margin: config::dock_margin() * scale,
             range: 2.0 * (base + gap), // 2 slots de cada lado
-            radius: 20.0 * scale,
+            // No máximo meia altura: o máximo vira uma pílula.
+            radius: (config::dock_radius() * scale).min(base / 2.0 + pad),
             dot: 1.7 * scale,
         }
     }
@@ -49,18 +55,23 @@ pub struct Theme {
     border: [u8; 4],
     dot: [u8; 4],
     divider: [u8; 4],
+    /// Brilho do vidro nas bordas de cima e de baixo (degradê por dentro).
+    sheen: [u8; 4],
     /// Pontinhos do app em foco: cor de destaque do Windows.
     accent: [u8; 4],
 }
 
 impl Theme {
     pub fn new(light: bool, accent: Option<[u8; 4]>) -> Self {
-        let (tint, border, dot, divider) = if light {
-            ([250, 250, 252, 108], [255, 255, 255, 178], [0, 0, 0, 170], [0, 0, 0, 45])
+        // Opacidade da tinta: a das Configurações (padrão 50%).
+        let alpha = (crate::config::dock_opacity() / 100.0 * 255.0).round() as u8;
+        let (tint, border, dot, divider, sheen) = if light {
+            ([250, 250, 252, alpha], [255, 255, 255, 178], [0, 0, 0, 170], [0, 0, 0, 45], [255, 255, 255, 40])
         } else {
-            ([40, 40, 44, 116], [255, 255, 255, 58], [255, 255, 255, 210], [255, 255, 255, 60])
+            // Vidro escuro azulado com borda clara fina e um brilho leve em cima e embaixo.
+            ([30, 35, 45, alpha], [255, 255, 255, 46], [255, 255, 255, 210], [255, 255, 255, 56], [255, 255, 255, 18])
         };
-        Self { tint, border, dot, divider, accent: accent.unwrap_or(dot) }
+        Self { tint, border, dot, divider, sheen, accent: accent.unwrap_or(dot) }
     }
 }
 
@@ -79,7 +90,8 @@ pub fn layout(n: usize, seps: &[usize], width: f32, m: &Metrics, mx: f32, hover:
     }
     let extra = |i: usize| m.sep * seps.iter().filter(|&&s| i > s).count() as f32;
     let base_total = n as f32 * m.base + (n - 1) as f32 * m.gap + extra(n - 1);
-    let base_left = (width - base_total) / 2.0;
+    let left = |total: f32| (width - total) / 2.0;
+    let base_left = left(base_total);
 
     let sizes: Vec<f32> = (0..n)
         .map(|i| {
@@ -91,7 +103,7 @@ pub fn layout(n: usize, seps: &[usize], width: f32, m: &Metrics, mx: f32, hover:
         .collect();
 
     let total = sizes.iter().sum::<f32>() + (n - 1) as f32 * m.gap + extra(n - 1);
-    let mut x = (width - total) / 2.0;
+    let mut x = left(total);
     sizes
         .into_iter()
         .enumerate()
@@ -111,9 +123,9 @@ pub fn box_rect(slots: &[Slot], m: &Metrics, height: f32) -> Option<(i32, i32, i
     let (first, last) = (slots.first()?, slots.last()?);
     let bottom = height - m.margin;
     Some((
-        (first.x - m.pad).round() as i32,
+        (first.x - m.pad_x).round() as i32,
         (bottom - m.base - 2.0 * m.pad).round() as i32,
-        (last.x + last.size + m.pad).round() as i32,
+        (last.x + last.size + m.pad_x).round() as i32,
         bottom.round() as i32,
     ))
 }
@@ -148,15 +160,32 @@ pub fn draw(
     // Vidro: o desfoque vem da janela de fundo; aqui só a tinta e a borda.
     if let Some(bg) = rounded_rect(l, t, r - l, b - t, m.radius) {
         pm.fill_path(&bg, &solid(theme.tint), FillRule::Winding, id, None);
+        let [sr, sg, sb, sa] = theme.sheen;
+        let c = |a: u8| Color::from_rgba8(sr, sg, sb, a);
+        let stops = vec![
+            GradientStop::new(0.0, c(sa)),
+            GradientStop::new(0.4, c(0)),
+            GradientStop::new(0.65, c(0)),
+            GradientStop::new(1.0, c(sa)),
+        ];
+        if let Some(shader) =
+            LinearGradient::new(Point::from_xy(0.0, t), Point::from_xy(0.0, b), stops, SpreadMode::Pad, id)
+        {
+            let paint = Paint { shader, anti_alias: true, ..Default::default() };
+            pm.fill_path(&bg, &paint, FillRule::Winding, id, None);
+        }
     }
-    if let Some(border) = rounded_rect(l + 0.5, t + 0.5, r - l - 1.0, b - t - 1.0, m.radius - 0.5) {
+    if let Some(border) = rounded_rect(l + 0.5, t + 0.5, r - l - 1.0, b - t - 1.0, (m.radius - 0.5).max(0.0)) {
         let stroke = Stroke { width: 1.0, ..Default::default() };
         pm.stroke_path(&border, &solid(theme.border), &stroke, id, None);
     }
 
+    // Divisores: 1 px, quase a altura do ícone, centralizados no fundo.
+    let div_h = (m.base * 0.9).round();
+    let div_top = ((t + b - div_h) / 2.0).round();
     for s in seps.iter().filter_map(|&s| slots.get(s)) {
         let x = (s.x + s.size + (m.gap + m.sep) / 2.0).round() + 0.5;
-        if let Some(rect) = Rect::from_xywh(x - 0.5, t + m.pad * 1.3, 1.0, b - t - m.pad * 2.6) {
+        if let Some(rect) = Rect::from_xywh(x - 0.5, div_top, 1.0, div_h) {
             pm.fill_rect(rect, &solid(theme.divider), id, None);
         }
     }

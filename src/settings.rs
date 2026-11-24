@@ -46,19 +46,29 @@ const SIDEBAR: f32 = 230.0;
 const ROW: f32 = 60.0;
 /// Linhas mais baixas na página da barra do topo (cabe tudo sem rolagem).
 const ROW_COMPACT: f32 = 48.0;
-const BAR_PAGE: usize = 2;
+const LOOK_PAGE: usize = 1;
+const BAR_PAGE: usize = 3;
 const CARD_RADIUS: f32 = 10.0;
 
 /// Seções da barra lateral: nome e glifo (Segoe Fluent Icons).
-const PAGES: [(&str, u16); 4] = [("Dock", 0xE71D), ("Animações", 0xE768), ("Barra do topo", 0xE7F4), ("Geral", 0xE713)];
+const PAGES: [(&str, u16); 5] =
+    [("Dock", 0xE71D), ("Aparência", 0xE790), ("Animações", 0xE768), ("Barra do topo", 0xE7F4), ("Geral", 0xE713)];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Opt {
     IconSize,
+    Radius,
+    Opacity,
+    Padding,
+    Gap,
+    Margin,
     Magnify,
     MagnifySize,
     AutoHide,
-    Stacks,
+    Downloads,
+    Trash,
+    TaskbarMode,
+    TopbarEnabled,
     DockAllMonitors,
     Previews,
     Anim,
@@ -82,6 +92,8 @@ enum Act {
     Link,
     /// Procurar / instalar atualização, ou abrir a página do release se falhou.
     Update,
+    /// Traz de novo os fixados da barra de tarefas do Windows.
+    ImportPins,
     /// Módulo da barra do topo: liga/desliga, zona, sobe (-1) ou desce (+1).
     ModOn(Module),
     ModZone(Module, BarZone),
@@ -90,12 +102,16 @@ enum Act {
 
 enum Row {
     Toggle(Opt, &'static str, bool),
+    /// Interruptor com uma linha de explicação embaixo do texto.
+    ToggleSub(Opt, &'static str, &'static str, bool),
     /// Opção, texto, valor (0..1), rótulo do valor, habilitado.
     Slider(Opt, &'static str, f32, String, bool),
     /// Gênio/Escala; habilitado.
     Effect(bool),
     Info(&'static str, String),
     Link(&'static str, &'static str),
+    /// Botão numa linha: texto, texto do botão e o que faz.
+    Button(&'static str, &'static str, Act),
     /// Atualizações: texto, valor (já traduzidos) e se dá para clicar.
     Update(String, String, bool),
     /// Módulo da barra; pode subir / descer dentro da zona.
@@ -147,29 +163,56 @@ fn with_win<R>(f: impl FnOnce(&mut Win) -> R) -> Option<R> {
     WIN.with(|w| w.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
 
+/// Controles deslizantes em px (ou %) inteiros: mínimo, máximo, leitura e gravação.
+fn px_slider(o: Opt) -> Option<(f32, f32, fn() -> f32, fn(f32))> {
+    Some(match o {
+        Opt::IconSize => (32.0, 72.0, config::icon_size as fn() -> f32, config::set_icon_size as fn(f32)),
+        Opt::Radius => (0.0, 40.0, config::dock_radius, config::set_dock_radius),
+        Opt::Opacity => (0.0, 100.0, config::dock_opacity, config::set_dock_opacity),
+        Opt::Padding => (2.0, 24.0, config::dock_padding, config::set_dock_padding),
+        Opt::Gap => (0.0, 24.0, config::icon_gap, config::set_icon_gap),
+        Opt::Margin => (0.0, 32.0, config::dock_margin, config::set_dock_margin),
+        _ => return None,
+    })
+}
+
 /// Valor (0..1) de um controle deslizante.
 fn value(o: Opt) -> f32 {
+    if let Some((min, max, get, _)) = px_slider(o) {
+        return (get() - min) / (max - min);
+    }
     match o {
-        Opt::IconSize => (config::icon_size() - 32.0) / 40.0,
         Opt::MagnifySize => (config::magnify_scale() - 1.1) / 0.9,
         _ => 0.0,
     }
 }
 
-/// Passo do teclado em cada controle deslizante (1 px; 0,05×).
+/// Passo do teclado em cada controle deslizante (1 px ou 1%; 0,05×).
 fn step(o: Opt) -> f32 {
-    if o == Opt::IconSize { 1.0 / 40.0 } else { 0.05 / 0.9 }
+    match px_slider(o) {
+        Some((min, max, ..)) => 1.0 / (max - min),
+        None => 0.05 / 0.9,
+    }
+}
+
+/// Texto do valor ao lado do controle deslizante.
+fn slider_label(o: Opt) -> String {
+    match o {
+        Opt::Opacity => format!("{}%", config::dock_opacity()),
+        _ => px_slider(o).map(|(_, _, get, _)| format!("{} px", get())).unwrap_or_default(),
+    }
 }
 
 /// Muda um controle deslizante e aplica no dock; `reload`: recarrega os ícones (fim do arrasto).
 fn slide(o: Opt, v: f32, reload: bool) {
     let v = v.clamp(0.0, 1.0);
     let changed = match o {
-        Opt::IconSize => {
-            let px = (32.0 + v * 40.0).round();
-            let changed = px != config::icon_size();
+        o if px_slider(o).is_some() => {
+            let (min, max, get, set) = px_slider(o).unwrap();
+            let px = (min + v * (max - min)).round();
+            let changed = px != get();
             if changed {
-                config::set_icon_size(px);
+                set(px);
             }
             changed
         }
@@ -198,10 +241,16 @@ fn toggle(o: Opt) {
             config::set_autohide(!config::autohide());
             crate::apply_settings(false);
         }
-        Opt::Stacks => {
-            config::set_stacks(!config::stacks());
+        Opt::Downloads => {
+            config::set_show_downloads(!config::show_downloads());
             crate::apply_settings(false);
         }
+        Opt::Trash => {
+            config::set_show_trash(!config::show_trash());
+            crate::apply_settings(false);
+        }
+        Opt::TaskbarMode => crate::set_taskbar_mode(!config::taskbar_mode()),
+        Opt::TopbarEnabled => crate::set_topbar_enabled(!config::topbar_enabled()),
         Opt::DockAllMonitors => {
             config::set_dock_all_monitors(!config::dock_all_monitors());
             crate::rebuild_docks();
@@ -244,7 +293,7 @@ fn toggle(o: Opt) {
                 crate::update::check_now();
             }
         }
-        Opt::IconSize | Opt::MagnifySize => {}
+        Opt::IconSize | Opt::MagnifySize | Opt::Radius | Opt::Opacity | Opt::Padding | Opt::Gap | Opt::Margin => {}
     }
 }
 
@@ -278,6 +327,10 @@ fn run(act: Act) {
         Act::ModMove(m, dir) => {
             config::move_module(m, dir);
             crate::topbar::settings_changed();
+        }
+        Act::ImportPins => {
+            crate::apps::import_taskbar_pins();
+            crate::reload_pins();
         }
         Act::Slider(..) => {}
     }
@@ -314,20 +367,54 @@ fn blocks(page: usize) -> Vec<Block> {
         0 => {
             let zoom = config::magnify();
             vec![Block::Card(vec![
-                Row::Slider(Opt::IconSize, "Tamanho dos ícones", value(Opt::IconSize), format!("{} px", config::icon_size()), true),
+                Row::Slider(Opt::IconSize, "Tamanho dos ícones", value(Opt::IconSize), slider_label(Opt::IconSize), true),
                 Row::Toggle(Opt::Magnify, "Ampliação ao passar o mouse", zoom),
-                Row::Slider(Opt::MagnifySize, "Tamanho da ampliação", value(Opt::MagnifySize), format!("{}×", decimal(config::magnify_scale())), zoom),
+                Row::Slider(
+                    Opt::MagnifySize,
+                    "Tamanho da ampliação",
+                    value(Opt::MagnifySize),
+                    format!("{}×", decimal(config::magnify_scale())),
+                    zoom,
+                ),
                 Row::Toggle(Opt::AutoHide, "Ocultar automaticamente", config::autohide()),
-                Row::Toggle(Opt::Stacks, "Mostrar Downloads e Lixeira", config::stacks()),
+                Row::Toggle(Opt::Downloads, "Mostrar Downloads", config::show_downloads()),
+                Row::Toggle(Opt::Trash, "Mostrar Lixeira", config::show_trash()),
                 Row::Toggle(Opt::Previews, "Prévia das janelas ao passar o mouse", config::window_previews()),
                 Row::Toggle(Opt::DockAllMonitors, "Mostrar Dock em todos os monitores", config::dock_all_monitors()),
             ])]
         }
-        1 => {
+        LOOK_PAGE => {
+            let slider = |o: Opt, t: &'static str| Row::Slider(o, t, value(o), slider_label(o), true);
+            vec![
+                Block::Card(vec![
+                    slider(Opt::Radius, "Arredondamento dos cantos"),
+                    slider(Opt::Opacity, "Opacidade do fundo"),
+                    slider(Opt::Padding, "Espaço entre os ícones e a borda"),
+                    slider(Opt::Gap, "Espaço entre os ícones"),
+                    slider(Opt::Margin, "Distância da borda da tela"),
+                ]),
+                Block::Card(vec![Row::ToggleSub(
+                    Opt::TaskbarMode,
+                    "Modo barra de tarefas",
+                    "Dock sempre à vista; janelas maximizadas param acima dele",
+                    config::taskbar_mode(),
+                )]),
+            ]
+        }
+        2 => {
             let on = animcfg::enabled();
             vec![Block::Card(vec![Row::Toggle(Opt::Anim, "Animação ao minimizar janelas", on), Row::Effect(on)])]
         }
         BAR_PAGE => {
+            // Desligada, a barra não existe: só o interruptor (e o aviso sobre a bandeja).
+            if !config::topbar_enabled() {
+                return vec![Block::Card(vec![Row::ToggleSub(
+                    Opt::TopbarEnabled,
+                    "Mostrar barra superior",
+                    "Sem ela, os ícones da bandeja do sistema ficam ocultos",
+                    false,
+                )])];
+            }
             // Ordem da lista = ordem na barra, da esquerda para a direita.
             let list = config::modules();
             let rows = list
@@ -340,15 +427,17 @@ fn blocks(page: usize) -> Vec<Block> {
                 })
                 .collect();
             vec![
+                Block::Card(vec![
+                    Row::ToggleSub(Opt::TopbarEnabled, "Mostrar barra superior", "Desligar economiza memória e CPU", true),
+                    Row::Toggle(Opt::AllMonitors, "Mostrar em todos os monitores", config::bar_all_monitors()),
+                ]),
                 Block::Preview,
                 Block::Card(rows),
-                Block::Label("Relógio"),
                 Block::Card(vec![
-                    Row::Toggle(Opt::Clock24, "Formato de 24 horas", config::clock_24h()),
+                    Row::Toggle(Opt::Clock24, "Relógio em 24 horas", config::clock_24h()),
                     Row::Toggle(Opt::ClockSeconds, "Mostrar segundos", config::clock_seconds()),
                     Row::Toggle(Opt::ClockDate, "Mostrar a data", config::clock_date()),
                 ]),
-                Block::Card(vec![Row::Toggle(Opt::AllMonitors, "Mostrar em todos os monitores", config::bar_all_monitors())]),
             ]
         }
         _ => vec![
@@ -356,6 +445,7 @@ fn blocks(page: usize) -> Vec<Block> {
                 Row::Toggle(Opt::Autostart, "Iniciar com o Windows", config::autostart()),
                 Row::Toggle(Opt::WinKey, "Tecla Windows abre o lançador", config::win_key_launcher()),
                 Row::Toggle(Opt::AutoUpdate, "Procurar atualizações automaticamente", config::auto_update()),
+                Row::Button("Fixados da barra de tarefas do Windows", "Importar", Act::ImportPins),
             ]),
             Block::Label("Sobre"),
             Block::Card(vec![
@@ -460,6 +550,13 @@ impl Win {
                         zones.push(Zone { r: whole, radius: 8.0 * s, act: Act::Toggle(*o) });
                         text(&tr(t), Font::Body, [lx, ry, sx - lx - 8.0 * s, rh], lead, pal.ink);
                     }
+                    Row::ToggleSub(o, t, sub, on) => {
+                        let sx = panel::switch(&mut pm, tf, &pal, rx, cy, s, *on);
+                        zones.push(Zone { r: whole, radius: 8.0 * s, act: Act::Toggle(*o) });
+                        let w = sx - lx - 8.0 * s;
+                        text(&tr(t), Font::Body, [lx, cy - 19.0 * s, w, 20.0 * s], lead, pal.ink);
+                        text(&tr(sub), Font::Small, [lx, cy + 1.0 * s, w, 18.0 * s], lead, pal.dim);
+                    }
                     Row::Slider(o, t, v, value, on) => {
                         let vw = 64.0 * s;
                         let (tl, tr_) = (rx - vw - 16.0 * s - 220.0 * s, rx - vw - 16.0 * s);
@@ -529,6 +626,11 @@ impl Win {
                         }
                         let ink = if slot.on { pal.ink } else { pal.dim };
                         text(&tr(m.label()), Font::Body, [lx, ry, x0 - lx - 8.0 * s, rh], lead, ink);
+                    }
+                    Row::Button(t, b, act) => {
+                        zones.push(Zone { r: whole, radius: 8.0 * s, act: *act });
+                        text(&tr(t), Font::Body, label, lead, pal.ink);
+                        text(&tr(b), Font::Body, [lx, ry, rx - lx, rh], trail, rgba(pal.accent));
                     }
                     Row::Info(t, v) => {
                         text(t, Font::Bold, label, lead, pal.ink);
