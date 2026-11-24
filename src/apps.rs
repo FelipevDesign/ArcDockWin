@@ -487,10 +487,10 @@ unsafe fn is_app_window(hwnd: HWND) -> bool {
         if GetWindow(hwnd, GW_OWNER).is_ok_and(|o| !o.is_invalid()) {
             return false;
         }
-        // As janelas do próprio dock (topbar, painéis...) não são apps; a de Configurações é.
+        // As janelas do próprio dock (topbar, painéis, Configurações...) não são apps.
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == windows::Win32::System::Threading::GetCurrentProcessId() && hwnd != crate::settings::hwnd() {
+        if pid == windows::Win32::System::Threading::GetCurrentProcessId() {
             return false;
         }
         if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0 {
