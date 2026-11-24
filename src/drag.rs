@@ -1,6 +1,7 @@
 //! Arrastar ícones do dock para reordenar, fixar (soltar um app aberto entre os fixados)
 //! ou desafixar (soltar um fixado bem acima do dock), com os outros abrindo espaço animados.
-//! O botão do lançador e o que vier depois dele não se movem, e nada é solto depois dele.
+//! O botão Iniciar (sempre o primeiro) não se move e nada é solto antes dele; Downloads e
+//! Lixeira ficam fora da lista de apps, sempre no fim.
 
 use std::time::Instant;
 
@@ -49,9 +50,9 @@ impl Drag {
     }
 }
 
-/// Índice do lançador: só o que vem antes dele se arrasta.
-fn end(apps: &[App]) -> usize {
-    apps.iter().position(|a| a.source == apps::START).unwrap_or(apps.len())
+/// Primeiro índice arrastável: o que vem depois do botão Iniciar.
+fn first(apps: &[App]) -> usize {
+    apps.iter().position(|a| a.source == apps::START).map_or(0, |i| i + 1)
 }
 
 impl crate::Dock {
@@ -108,7 +109,7 @@ impl crate::Dock {
     }
 
     pub(crate) fn drag_down(&mut self, x: f32, y: f32) {
-        let Some(i) = self.hit(x).filter(|&i| i < end(&self.apps)) else { return };
+        let Some(i) = self.hit(x).filter(|&i| i >= first(&self.apps) && i < self.apps.len()) else { return };
         let Some(s) = self.slots().into_iter().nth(i) else { return };
         self.drag.press = Some(Press {
             key: self.apps[i].key.clone(),
@@ -173,10 +174,10 @@ impl crate::Dock {
             return Spot::Out;
         }
         let cx = x - p.grab;
-        let n = end(&self.apps);
-        let mut k = 0;
+        let n = first(&self.apps);
+        let mut k = n;
         let mut last_right = None;
-        for (a, s) in self.apps[..n].iter().zip(&slots) {
+        for (a, s) in self.apps.iter().zip(&slots).skip(n) {
             if a.pinned && a.key != p.key {
                 k += (s.x + s.size / 2.0 < cx) as usize;
                 last_right = Some(s.x + s.size);
@@ -188,7 +189,7 @@ impl crate::Dock {
         // App aberto: fixa se for levado até perto dos fixados; senão volta ao lugar.
         let bound = match last_right {
             Some(r) => r + (self.m.gap + self.m.base) / 2.0,
-            None => slots.first().map_or(0.0, |s| s.x),
+            None => slots.get(n).map_or(0.0, |s| s.x),
         };
         if cx < bound { Spot::At(k, true) } else { Spot::At(p.home, false) }
     }
@@ -204,11 +205,11 @@ impl crate::Dock {
                 if let Some(mut app) = p.held {
                     if !app.windows.is_empty() {
                         app.pinned = false;
-                        let at = d.apps.iter().filter(|a| a.pinned && a.source != apps::START).count();
+                        let at = first(&d.apps) + d.apps.iter().filter(|a| a.pinned && a.source != apps::START).count();
                         d.apps.insert(at, app);
                     }
                 }
-                save_order(&d.apps, gone.as_deref());
+                apps::save_pinned(&d.apps, gone.as_deref());
             });
         }
         self.drag.press = None;
@@ -225,30 +226,4 @@ impl crate::Dock {
         }
         active
     }
-}
-
-/// Grava os fixados na ordem do dock: comentários e linhas de apps que não estão no dock
-/// ficam como estão, os fixados vão para o fim e `gone` (desafixado) sai.
-fn save_order(list: &[App], gone: Option<&str>) {
-    let pinned: Vec<&str> =
-        list[..end(list)].iter().filter(|a| a.pinned).map(|a| a.source.as_str()).collect();
-    let cfg = apps::config_path();
-    let text = std::fs::read_to_string(&cfg).unwrap_or_default();
-    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut out = String::new();
-    for line in text.lines() {
-        let l = line.trim();
-        if !pinned.contains(&l) && gone != Some(l) {
-            out.push_str(line);
-            out.push_str(nl);
-        }
-    }
-    for s in pinned {
-        out.push_str(s);
-        out.push_str(nl);
-    }
-    if let Some(dir) = cfg.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&cfg, out);
 }

@@ -86,6 +86,15 @@ fn radio_on(r: &Radio) -> bool {
 /// consulta periódica).
 pub fn watch(topbar: HWND) {
     TOPBAR.store(topbar.0 as isize, Ordering::Relaxed);
+    // A barra pode ser desligada e ligada de novo (Configurações): o rádio é observado uma vez
+    // só e os avisos vão para a janela nova.
+    static WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WATCHING.swap(true, Ordering::Relaxed) {
+        if let Some(r) = radio() {
+            post(WM_BT_RADIO, if radio_on(&r) { 2 } else { 1 });
+        }
+        return;
+    }
     spawn(|| {
         let Ok(radios) = Radio::GetRadiosAsync().and_then(|op| op.join()) else { return };
         let Some(radio) = radios.into_iter().find(|r| r.Kind() == Ok(RadioKind::Bluetooth)) else { return };

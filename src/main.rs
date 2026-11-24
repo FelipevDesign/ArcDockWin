@@ -63,7 +63,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, Tr
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::core::{HSTRING, PCWSTR, w};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{
+    ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_POSCHANGED, APPBARDATA, SHAppBarMessage,
+    ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use apps::App;
@@ -88,6 +91,7 @@ const MENU_ADMIN: usize = 6;
 const MENU_LOCATION: usize = 7;
 const MENU_MORE: usize = 8;
 const MENU_UPDATE: usize = 9;
+const MENU_SEP: usize = 10;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -96,6 +100,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_LAUNCHER: u32 = WM_APP + 50;
 /// Aviso do shell: a Lixeira mudou (stacks::watch_trash).
 const WM_TRASH: u32 = WM_APP + 51;
+/// Avisos do sistema de AppBars para o dock no modo barra de tarefas.
+const WM_DOCK_APPBAR: u32 = WM_APP + 53;
 
 thread_local! {
     static DOCKS: RefCell<Vec<Dock>> = const { RefCell::new(Vec::new()) };
@@ -159,14 +165,16 @@ struct Dock {
     /// Balão com o nome do ícone sob o mouse (tooltip.rs): ligado no movimento, desligado ao
     /// sair, clicar ou rolar.
     tip: bool,
+    /// Registrado como AppBar na borda de baixo (modo barra de tarefas sem ocultar).
+    appbar: bool,
 }
 
 impl Dock {
     unsafe fn new(hwnd: HWND, glass: HWND, monitor: HMONITOR, bounds: RECT, primary: bool) -> Self {
         unsafe {
             let scale = monitor_scale(monitor);
-            let m = Metrics::new(scale);
             let w = bounds.right - bounds.left;
+            let m = Metrics::new(scale);
             let h = m.window_height();
             let (dib, bits) = dib(w, h);
             let memdc = CreateCompatibleDC(None);
@@ -215,23 +223,40 @@ impl Dock {
                 ticks: 0,
                 drag: drag::Drag::default(),
                 tip: false,
+                appbar: false,
             }
         }
     }
 
     /// Índice do último fixado, se houver apps abertos não fixados depois dele
-    /// (o botão Iniciar, na ponta direita, não conta em nenhum dos dois grupos).
+    /// (o botão Iniciar, sempre o primeiro, não conta em nenhum dos dois grupos).
     fn sep_after(&self) -> Option<usize> {
+        let start = self.apps.iter().filter(|a| a.source == apps::START).count();
         let regular = |a: &&App| a.source != apps::START;
         let pinned = self.apps.iter().filter(regular).filter(|a| a.pinned).count();
         let open = self.apps.iter().filter(regular).filter(|a| !a.pinned).count();
-        (pinned > 0 && open > 0).then(|| pinned - 1)
+        (pinned > 0 && open > 0).then(|| start + pinned - 1)
     }
 
-    /// Separadores: fixados | abertos e apps | pilhas.
+    /// Separadores: Iniciar | fixados | abertos | pilhas (sem repetir quando um grupo está vazio).
     fn seps(&self) -> Vec<usize> {
+        let start = self
+            .apps
+            .first()
+            .filter(|a| a.source == apps::START && (self.apps.len() > 1 || !self.stack_items().is_empty()))
+            .map(|_| 0);
         let stacks = self.apps.len().checked_sub(1).filter(|_| !self.stack_items().is_empty());
-        self.sep_after().into_iter().chain(stacks).collect()
+        // Separadores escolhidos pelo usuário (`---` no pinned.txt), menos depois do último item.
+        let custom = self
+            .apps
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.pinned && a.sep_after && i + 1 < self.apps.len())
+            .map(|(i, _)| i);
+        let mut seps: Vec<usize> = start.into_iter().chain(self.sep_after()).chain(custom).chain(stacks).collect();
+        seps.sort_unstable();
+        seps.dedup();
+        seps
     }
 
     /// Quantos itens o dock desenha (apps e pilhas).
@@ -239,17 +264,37 @@ impl Dock {
         self.apps.len() + self.stack_items().len()
     }
 
-    /// Pilhas da ponta direita (nenhuma se desligadas nas Configurações).
+    /// Pilhas da ponta direita: Downloads e depois a Lixeira, sempre a última
+    /// (cada uma pode ser desligada nas Configurações).
     fn stack_items(&self) -> &[App] {
-        if config::stacks() { &self.stacks.items } else { &[] }
+        visible_stacks(&self.stacks.items)
     }
+}
+
+/// Downloads e Lixeira conforme as opções (separado do `Dock` para não emprestá-lo inteiro).
+fn visible_stacks(items: &[App]) -> &[App] {
+    {
+        match (config::show_downloads(), config::show_trash()) {
+            (true, true) => items,
+            (true, false) => &items[..1],
+            (false, true) => &items[1..],
+            (false, false) => &[],
+        }
+    }
+}
+
+impl Dock {
 
     /// Opções do dock mudaram (Configurações): refaz métricas, superfície e layout.
     /// `reload`: recarrega os ícones no tamanho novo (no fim do arrasto do controle).
     fn apply_settings(&mut self, reload: bool) {
         self.scale = monitor_scale(self.monitor);
-        self.m = Metrics::new(self.scale);
         let w = self.monitor_bounds.right - self.monitor_bounds.left;
+        self.m = Metrics::new(self.scale);
+        self.theme = Theme::new(light_theme(), accent_color());
+        if let Some(fx) = &self.glass_fx {
+            fx.set_radius(self.m.radius);
+        }
         let h = self.m.window_height();
         if h as u32 != self.pixmap.height() {
             let (dib, bits) = dib(w, h);
@@ -269,8 +314,51 @@ impl Dock {
             self.stacks = stacks::Stacks::new(size);
         }
         self.glass_rect = None;
+        self.appbar_sync();
         self.edge_tick();
         self.redraw();
+    }
+
+    /// Modo barra de tarefas: reserva a faixa de baixo do monitor até o topo do dock em
+    /// repouso (janelas maximizadas terminam logo acima dele). Fora dele, devolve a área.
+    fn appbar_sync(&mut self) {
+        let want = config::taskbar_mode();
+        let mut abd = APPBARDATA {
+            cbSize: size_of::<APPBARDATA>() as u32,
+            hWnd: self.hwnd,
+            uCallbackMessage: WM_DOCK_APPBAR,
+            uEdge: ABE_BOTTOM,
+            ..Default::default()
+        };
+        unsafe {
+            if !want {
+                if std::mem::take(&mut self.appbar) {
+                    SHAppBarMessage(ABM_REMOVE, &mut abd);
+                }
+                return;
+            }
+            if !self.appbar {
+                SHAppBarMessage(ABM_NEW, &mut abd);
+                self.appbar = true;
+            }
+            let b = self.monitor_bounds;
+            // Dock em repouso (sem o espaço livre do zoom) mais a distância até a borda.
+            let h = (self.m.margin + self.m.base + 2.0 * self.m.pad).ceil() as i32;
+            abd.rc = RECT { left: b.left, top: b.bottom - h, right: b.right, bottom: b.bottom };
+            SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+            abd.rc.top = abd.rc.bottom - h;
+            SHAppBarMessage(ABM_SETPOS, &mut abd);
+        }
+    }
+
+    /// Tira o dock do sistema de AppBars (ao sair, desligar o modo ou recriar o dock).
+    fn appbar_remove(&mut self) {
+        if std::mem::take(&mut self.appbar) {
+            let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: self.hwnd, ..Default::default() };
+            unsafe {
+                SHAppBarMessage(ABM_REMOVE, &mut abd);
+            }
+        }
     }
 
     fn slots(&self) -> Vec<render::Slot> {
@@ -332,8 +420,7 @@ impl Dock {
         }
         let fg = HWND(LAST_FG.load(Ordering::Relaxed) as *mut c_void);
         let focus = self.apps.iter().position(|a| a.windows.contains(&fg));
-        let stack: &[App] = if config::stacks() { &self.stacks.items } else { &[] };
-        let items: Vec<&App> = self.apps.iter().chain(stack).collect();
+        let items: Vec<&App> = self.apps.iter().chain(visible_stacks(&self.stacks.items)).collect();
         render::draw(&mut self.pixmap, &slots, &seps, &items, &self.m, &self.theme, self.hover, focus, self.animating);
         self.update_glass(render::box_rect(&slots, &self.m, self.pixmap.height() as f32));
 
@@ -526,7 +613,9 @@ impl Dock {
     fn edge_tick(&mut self) {
         let now = Instant::now();
         // Com a pilha da Downloads aberta o dock fica à vista (como no macOS).
+        // Modo barra de tarefas: sempre à vista, como a barra do Windows.
         if !config::autohide()
+            || config::taskbar_mode()
             || self.tracking
             || self.drag.busy()
             || MENU_OPEN.load(Ordering::Relaxed)
@@ -821,7 +910,7 @@ fn with_docks(mut f: impl FnMut(&mut Dock)) {
     });
 }
 
-fn reload_pins() {
+pub fn reload_pins() {
     with_docks(|dock| {
         dock.apps = apps::load_pinned(dock.icon_size);
         let _ = apps::refresh(&mut dock.apps, dock.icon_size);
@@ -933,6 +1022,7 @@ unsafe fn create_dock(monitor: HMONITOR, bounds: RECT, primary: bool) -> Option<
         };
 
         let mut dock = Dock::new(hwnd, glass, monitor, bounds, primary);
+        dock.appbar_sync();
         dock.refresh();
         dock.redraw();
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -943,6 +1033,7 @@ unsafe fn create_dock(monitor: HMONITOR, bounds: RECT, primary: bool) -> Option<
 }
 
 fn dispose_dock(mut dock: Dock) {
+    dock.appbar_remove();
     // Composição antes da janela dela.
     dock.glass_fx = None;
     unsafe {
@@ -964,7 +1055,26 @@ fn mouse_y(lp: LPARAM) -> f32 {
     ((lp.0 >> 16) & 0xffff) as i16 as f32
 }
 
-/// Tema da barra de tarefas (claro/escuro).
+/// Liga ou desliga a barra superior em tempo de execução (opção das Configurações).
+/// Desligada, a barra é destruída de verdade (janelas, vidro, timers, ganchos e reserva do
+/// topo) e o host da bandeja para: os apps voltam a registrar os ícones no Explorer.
+pub fn set_topbar_enabled(on: bool) {
+    config::set_topbar_enabled(on);
+    if on {
+        topbar::create();
+        start_tray();
+    } else {
+        tray::stop();
+        topbar::destroy();
+    }
+}
+
+/// Liga ou desliga o modo barra de tarefas: refaz as métricas e a reserva da borda de baixo.
+pub fn set_taskbar_mode(on: bool) {
+    config::set_taskbar_mode(on);
+    apply_settings(true);
+}
+
 /// Bandeja do sistema na topbar: os apps registram os ícones em nós (tray.rs) e a barra
 /// mostra e repassa os cliques.
 fn start_tray() {
@@ -1130,13 +1240,14 @@ unsafe extern "system" fn on_window_change(
     }
 }
 
-/// Menu do botão direito: com `target` (key, source, fixado, janelas), as opções do app; sempre "Sair".
+/// Menu do botão direito: com `target` (key, source, fixado, janelas, separador depois), as
+/// opções do app; sempre "Sair".
 /// `anchor`: ponto acima do centro do ícone onde o menu se apoia (sem ícone, abre no mouse).
-unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>)>, anchor: Option<POINT>) {
+unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>, bool)>, anchor: Option<POINT>) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let fg = GetForegroundWindow();
-        if let Some((_, source, pinned, windows)) = &target {
+        if let Some((_, source, pinned, windows, sep)) = &target {
             if windows.len() >= 2 {
                 for (k, &win) in windows.iter().enumerate() {
                     let flags = if win == fg { MF_STRING | MF_CHECKED } else { MF_STRING };
@@ -1160,6 +1271,11 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let pin = HSTRING::from(crate::i18n::tr(if *pinned { "Desafixar do dock" } else { "Fixar no dock" }));
             let _ = AppendMenuW(menu, MF_STRING, MENU_PIN, &pin);
+            if *pinned {
+                let text = if *sep { "Remover separador depois" } else { "Adicionar separador depois" };
+                let text = HSTRING::from(crate::i18n::tr(text));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_SEP, &text);
+            }
             match windows.len() {
                 0 => {}
                 1 => {
@@ -1218,7 +1334,7 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             update::install();
             return;
         }
-        let Some((key, source, pinned, windows)) = target else { return };
+        let Some((key, source, pinned, windows, _)) = target else { return };
         match cmd {
             MENU_NEW => {
                 ShellExecuteW(None, w!("open"), &HSTRING::from(&source), None, None, SW_SHOWNORMAL);
@@ -1240,6 +1356,9 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             MENU_PIN => {
                 with_dock(hwnd, |d| apps::set_pinned(&mut d.apps, &key, !pinned));
             }
+            MENU_SEP => {
+                with_dock(hwnd, |d| apps::toggle_separator(&mut d.apps, &key));
+            }
             MENU_CLOSE => {
                 for &win in &windows {
                     let _ = PostMessageW(Some(win), WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -1252,7 +1371,7 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             }
             _ => return,
         }
-        if cmd == MENU_PIN {
+        if cmd == MENU_PIN || cmd == MENU_SEP {
             reload_pins();
         } else {
             with_docks(|d| {
@@ -1284,6 +1403,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     update::relaunch(hwnd);
                 } else {
                     settings::refresh();
+                }
+                LRESULT(0)
+            }
+            WM_DOCK_APPBAR => {
+                // Outra AppBar (ou o Explorer) mudou de lugar: pede a faixa de baixo de novo.
+                if wp.0 as u32 == ABN_POSCHANGED {
+                    with_dock(hwnd, |d| d.appbar_sync());
                 }
                 LRESULT(0)
             }
@@ -1442,7 +1568,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     with_dock(hwnd, |d| if d.refresh() { d.redraw() });
                     return LRESULT(0);
                 }
-                // App sob o mouse; fora de um ícone ou no botão Iniciar, só "Sair".
+                // Botão Iniciar: o menu do Win+X, como no Windows.
+                let on_start = with_dock(hwnd, |d| {
+                    d.hit(mouse_x(lp)).and_then(|i| d.apps.get(i)).is_some_and(|a| a.source == apps::START)
+                })
+                .unwrap_or(false);
+                if on_start {
+                    apps::open_quick_link();
+                    return LRESULT(0);
+                }
+                // App sob o mouse; fora de um ícone, só "Sair".
                 let (target, anchor) = with_dock(hwnd, |d| {
                     if d.refresh() {
                         d.redraw();
@@ -1451,7 +1586,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let target = i
                         .and_then(|i| d.apps.get(i))
                         .filter(|a| a.source != apps::START)
-                        .map(|a| (a.key.clone(), a.source.clone(), a.pinned, a.windows.clone()));
+                        .map(|a| (a.key.clone(), a.source.clone(), a.pinned, a.windows.clone(), a.sep_after));
                     (target, i.and_then(|i| d.menu_anchor(i)))
                 })
                 .unwrap_or((None, None));
@@ -1468,6 +1603,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_ENDSESSION => {
                 if wp.0 != 0 && !SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
+                    with_docks(|d| d.appbar_remove());
                     tray::stop();
                     topbar::shutdown();
                     taskbar::restore();
@@ -1481,6 +1617,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 if !REBUILDING_DOCKS.load(Ordering::Acquire)
                     && !SHUTTING_DOWN.swap(true, Ordering::AcqRel)
                 {
+                    with_docks(|d| d.appbar_remove());
                     tray::stop();
                     topbar::shutdown();
                     taskbar::restore();
@@ -1508,6 +1645,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 if with_dock(hwnd, |dock| dock.primary).unwrap_or(false) {
                     taskbar::hide();
                     topbar::explorer_restarted();
+                    // O Explorer também esqueceu a reserva do dock no modo barra de tarefas.
+                    with_docks(|d| {
+                        d.appbar = false;
+                        d.appbar_sync();
+                    });
                 }
                 LRESULT(0)
             }
@@ -1573,6 +1715,11 @@ fn main() -> windows::core::Result<()> {
 
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
         guard::spawn();
+        // Uma vez só: os fixados da barra do Windows entram no dock antes de ela sumir.
+        if !config::pins_imported() {
+            apps::import_taskbar_pins();
+            config::set_pins_imported();
+        }
         taskbar::hide();
         let mut monitors = display_monitors();
         if !config::dock_all_monitors() {
@@ -1594,11 +1741,14 @@ fn main() -> windows::core::Result<()> {
         attention::register(main_hwnd);
         stacks::watch_trash(main_hwnd, WM_TRASH);
 
-        topbar::create();
+        // Sem a barra superior nada dela é criado (janelas, timers, módulos, bandeja).
+        if config::topbar_enabled() {
+            topbar::create();
+            start_tray();
+        }
         minimize::init();
         winkey::config_changed();
         launcher::preload();
-        start_tray();
         autostart();
         update::start(main_hwnd);
         let _ = SetWinEventHook(

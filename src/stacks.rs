@@ -48,6 +48,7 @@ impl Stacks {
             pinned: true,
             icon: None,
             windows: Vec::new(),
+            sep_after: false,
         };
         let mut s = Self { items: vec![item(DOWNLOADS), item(TRASH)], trash_full: trash_full(), icon_size };
         s.reload_icons();

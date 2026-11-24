@@ -30,7 +30,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::{
     ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_FULLSCREENAPP, ABN_POSCHANGED,
@@ -118,6 +118,13 @@ thread_local! {
     static TRAY_CLICK: Cell<Option<TrayClick>> = const { Cell::new(None) };
     /// Barra cuja seta abriu a bandeja: cada barra recolhe ícones conforme a própria largura.
     static TRAY_BAR: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
+    /// Ganchos de eventos de janela da barra (tirados em `destroy`).
+    static HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A barra existe (foi criada e não foi desligada nas Configurações).
+fn active() -> bool {
+    !MAIN.get().is_invalid()
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -913,12 +920,19 @@ fn update_clock() {
 
 /// Repaint date labels and any open panel after a Windows UI-language change.
 pub fn language_changed() {
+    if !active() {
+        panel::language_changed();
+        return;
+    }
     update_clock();
     panel::language_changed();
 }
 
 /// Módulos ou relógio mudaram nas Configurações: relógio (e o timer dele) e todas as barras.
 pub fn settings_changed() {
+    if !active() {
+        return;
+    }
     update_clock();
     update_stats();
     update_usage();
@@ -1388,7 +1402,9 @@ fn rebuild() {
 
 /// Opção "todos os monitores" mudou: cria ou tira as barras dos outros monitores.
 pub fn monitors_changed() {
-    rebuild();
+    if active() {
+        rebuild();
+    }
 }
 
 /// Cria as topbars (depois do dock: reaproveita a classe da janela de vidro dele).
@@ -1418,10 +1434,40 @@ pub fn create() {
         update_usage();
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
-        let _ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        let _ = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        let _ = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        let hooks = [
+            (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND),
+            (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE),
+            (EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE),
+        ]
+        .into_iter()
+        .map(|(from, to)| SetWinEventHook(from, to, None, Some(on_window_event), 0, 0, WINEVENT_OUTOFCONTEXT))
+        .filter(|h| !h.is_invalid())
+        .collect();
+        HOOKS.with(|h| *h.borrow_mut() = hooks);
     }
+}
+
+/// Desliga a barra de vez (opção das Configurações): devolve a reserva do topo, destrói
+/// janelas e vidros (os timers vão junto), tira os ganchos e solta som e CPU/RAM.
+/// `create` a monta de novo.
+pub fn destroy() {
+    if !active() {
+        return;
+    }
+    panel::close();
+    HOOKS.with(|h| {
+        for hook in h.take() {
+            unsafe {
+                let _ = UnhookWinEvent(hook);
+            }
+        }
+    });
+    let bars = BARS.with(|b| b.try_borrow_mut().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default());
+    bars.into_iter().for_each(remove);
+    AUDIO.with(|a| *a.borrow_mut() = None);
+    USAGE.with(|u| *u.borrow_mut() = None);
+    MAIN.set(HWND(std::ptr::null_mut()));
+    TRAY_BAR.set(HWND(std::ptr::null_mut()));
 }
 
 /// Tira as barras do sistema de AppBars (chamado onde o dock encerra).

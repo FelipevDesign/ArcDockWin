@@ -64,8 +64,9 @@ impl Glass {
         }
     }
 
-    pub fn set_radius(&self, r: f32) {
-        let _ = self.shape.SetCornerRadius(Vector2 { X: r, Y: r });
+    /// Arredondamento dos cantos (o modo barra de tarefas usa 0).
+    pub fn set_radius(&self, radius: f32) {
+        let _ = self.shape.SetCornerRadius(Vector2 { X: radius, Y: radius });
     }
 
     pub fn resize(&self, w: f32, h: f32) {

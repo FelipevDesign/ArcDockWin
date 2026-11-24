@@ -59,6 +59,61 @@ pub fn set_icon_size(px: f32) {
     set("icon_size", px.round().to_string());
 }
 
+/// Aparência do dock (px antes da escala; transparência em %). Padrões: o visual clássico
+/// do dock, com ícones de 48 px.
+pub fn dock_radius() -> f32 {
+    number("dock_radius", 20.0, 0.0, 40.0).round()
+}
+
+pub fn set_dock_radius(px: f32) {
+    set("dock_radius", px.round().to_string());
+}
+
+/// Opacidade da tinta do vidro: 0 (só o desfoque) a 100 (sólido).
+pub fn dock_opacity() -> f32 {
+    number("dock_opacity", 45.0, 0.0, 100.0).round()
+}
+
+pub fn set_dock_opacity(pct: f32) {
+    set("dock_opacity", pct.round().to_string());
+}
+
+/// Espaço entre os ícones e a borda do dock (em cima e embaixo; nas pontas é 1,5×).
+pub fn dock_padding() -> f32 {
+    number("dock_padding", 8.0, 2.0, 24.0).round()
+}
+
+pub fn set_dock_padding(px: f32) {
+    set("dock_padding", px.round().to_string());
+}
+
+/// Espaço entre um ícone e outro.
+pub fn icon_gap() -> f32 {
+    number("icon_gap", 9.0, 0.0, 24.0).round()
+}
+
+pub fn set_icon_gap(px: f32) {
+    set("icon_gap", px.round().to_string());
+}
+
+/// Distância do dock até a borda de baixo da tela.
+pub fn dock_margin() -> f32 {
+    number("dock_margin", 6.0, 0.0, 32.0).round()
+}
+
+pub fn set_dock_margin(px: f32) {
+    set("dock_margin", px.round().to_string());
+}
+
+/// Os fixados da barra de tarefas do Windows já foram trazidos para o dock (uma vez só).
+pub fn pins_imported() -> bool {
+    get("pins_imported").is_some_and(|v| v == "1")
+}
+
+pub fn set_pins_imported() {
+    set_flag("pins_imported", true);
+}
+
 /// Ampliação ao passar o mouse.
 pub fn magnify() -> bool {
     flag("magnify")
@@ -95,13 +150,46 @@ pub fn set_autohide(on: bool) {
     set_flag("autohide", on);
 }
 
-/// Downloads e Lixeira na ponta direita do dock.
-pub fn stacks() -> bool {
+/// Chave antiga ("Mostrar Downloads e Lixeira"): vale como padrão das duas opções novas.
+fn stacks() -> bool {
     flag("stacks")
 }
 
-pub fn set_stacks(on: bool) {
-    set_flag("stacks", on);
+/// Pasta Downloads na ponta direita do dock (antes da Lixeira).
+pub fn show_downloads() -> bool {
+    get("show_downloads").map_or_else(stacks, |v| v != "0")
+}
+
+pub fn set_show_downloads(on: bool) {
+    set_flag("show_downloads", on);
+}
+
+/// Lixeira como último item do dock.
+pub fn show_trash() -> bool {
+    get("show_trash").map_or_else(stacks, |v| v != "0")
+}
+
+pub fn set_show_trash(on: bool) {
+    set_flag("show_trash", on);
+}
+
+/// Dock como barra de tarefas: nunca se esconde e reserva o espaço dele (janelas maximizadas
+/// param acima). Desligado por padrão (não muda nada para quem já usa).
+pub fn taskbar_mode() -> bool {
+    get("taskbar_mode").is_some_and(|v| v == "1")
+}
+
+pub fn set_taskbar_mode(on: bool) {
+    set_flag("taskbar_mode", on);
+}
+
+/// Barra superior (menus, relógio, bandeja, módulos). Padrão: ligada.
+pub fn topbar_enabled() -> bool {
+    flag("topbar_enabled")
+}
+
+pub fn set_topbar_enabled(on: bool) {
+    set_flag("topbar_enabled", on);
 }
 
 /// Prévia das janelas ao parar o mouse num app com 2+ janelas.
