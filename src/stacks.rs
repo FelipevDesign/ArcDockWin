@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::apps::{App, load_icon};
-use crate::panel::{self, Event, PanelContent, Widget};
+use crate::panel::{self, Event, Item, PanelContent, Widget};
 
 pub const DOWNLOADS: &str = "::downloads";
 pub const TRASH: &str = "::trash";
@@ -249,14 +249,14 @@ impl PanelContent for Pile {
         let n = self.files.len();
         let end = (self.top + VISIBLE).min(n);
         let items = (self.top..end)
-            .map(|i| (ROW + (i - self.top) as u32, self.icon(i), self.files[i].1.clone()))
+            .map(|i| Item { id: ROW + (i - self.top) as u32, icon: self.icon(i), glyph: 0, text: self.files[i].1.clone(), hint: String::new() })
             .collect();
         let scroll = (n > VISIBLE).then(|| (self.top as f32 / n as f32, VISIBLE as f32 / n as f32));
         let mut out = vec![Widget::Label("Downloads".into())];
         if n == 0 {
             out.push(Widget::Text("A pasta está vazia.".into()));
         } else {
-            out.push(Widget::List { items, rows: VISIBLE.min(n), selected: None, scroll });
+            out.push(Widget::List { items, rows: VISIBLE.min(n), selected: None, scroll, big: false });
         }
         out.push(Widget::Separator);
         out.push(Widget::Row { id: EXPLORER, glyph: Some(0xE838), text: "Abrir no Explorador".into(), sub: None, selected: false });

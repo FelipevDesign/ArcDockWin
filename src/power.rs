@@ -7,11 +7,11 @@ use windows::Win32::System::Shutdown::LockWorkStation;
 
 use crate::panel::{self, Event, PanelContent, Widget};
 
-const LOCK: u32 = 1;
-const SLEEP: u32 = 2;
-const SIGN_OUT: u32 = 3;
-const RESTART: u32 = 4;
-const SHUTDOWN: u32 = 5;
+pub const LOCK: u32 = 1;
+pub const SLEEP: u32 = 2;
+pub const SIGN_OUT: u32 = 3;
+pub const RESTART: u32 = 4;
+pub const SHUTDOWN: u32 = 5;
 
 pub struct PowerPanel;
 
@@ -40,20 +40,25 @@ impl PanelContent for PowerPanel {
     fn event(&mut self, ev: Event) -> bool {
         let Event::Click(id) = ev else { return false };
         panel::close();
-        unsafe {
-            match id {
-                LOCK => {
-                    let _ = LockWorkStation();
-                }
-                SLEEP => {
-                    SetSuspendState(false, false, false);
-                }
-                SIGN_OUT => shutdown(&["/l"]),
-                RESTART => shutdown(&["/r", "/t", "0"]),
-                SHUTDOWN => shutdown(&["/s", "/t", "0"]),
-                _ => {}
-            }
-        }
+        run(id);
         false
+    }
+}
+
+/// Executa a ação `id` ([`LOCK`], [`SLEEP`], [`SIGN_OUT`], [`RESTART`] ou [`SHUTDOWN`]).
+pub fn run(id: u32) {
+    unsafe {
+        match id {
+            LOCK => {
+                let _ = LockWorkStation();
+            }
+            SLEEP => {
+                SetSuspendState(false, false, false);
+            }
+            SIGN_OUT => shutdown(&["/l"]),
+            RESTART => shutdown(&["/r", "/t", "0"]),
+            SHUTDOWN => shutdown(&["/s", "/t", "0"]),
+            _ => {}
+        }
     }
 }

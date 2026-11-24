@@ -1155,6 +1155,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }
+            crate::launcher::WM_ICONS => {
+                crate::launcher::icons_arrived();
+                panel::notify(msg, wp.0);
+                LRESULT(0)
+            }
             crate::bluetooth::WM_BT_RADIO
             | crate::bluetooth::WM_BT_PANEL
             | crate::wifi::WM_WIFI

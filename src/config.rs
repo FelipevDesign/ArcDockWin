@@ -77,6 +77,15 @@ pub fn set_magnify_scale(v: f32) {
     set("magnify_scale", format!("{v:.2}"));
 }
 
+/// Tecla Windows sozinha abre o lançador em vez do menu Iniciar.
+pub fn win_key_launcher() -> bool {
+    flag("win_key_launcher")
+}
+
+pub fn set_win_key_launcher(on: bool) {
+    set_flag("win_key_launcher", on);
+}
+
 /// Esconder o dock quando uma janela encosta nele.
 pub fn autohide() -> bool {
     flag("autohide")

@@ -67,6 +67,7 @@ enum Opt {
     ClockDate,
     AllMonitors,
     Autostart,
+    WinKey,
 }
 
 /// O que uma área clicável faz.
@@ -228,6 +229,10 @@ fn toggle(o: Opt) {
             config::set_autostart(!config::autostart());
             crate::autostart();
         }
+        Opt::WinKey => {
+            config::set_win_key_launcher(!config::win_key_launcher());
+            crate::winkey::config_changed();
+        }
         Opt::IconSize | Opt::MagnifySize => {}
     }
 }
@@ -312,7 +317,10 @@ fn blocks(page: usize) -> Vec<Block> {
             ]
         }
         _ => vec![
-            Block::Card(vec![Row::Toggle(Opt::Autostart, "Iniciar com o Windows", config::autostart())]),
+            Block::Card(vec![
+                Row::Toggle(Opt::Autostart, "Iniciar com o Windows", config::autostart()),
+                Row::Toggle(Opt::WinKey, "Tecla Windows abre o lançador", config::win_key_launcher()),
+            ]),
             Block::Label("Sobre"),
             Block::Card(vec![
                 Row::Info("ArcDockWin", format!("{} {}", tr("Versão"), env!("CARGO_PKG_VERSION"))),
