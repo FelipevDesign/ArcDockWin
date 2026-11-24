@@ -63,7 +63,7 @@ use std::ffi::c_void;
 use std::time::Instant;
 
 use tiny_skia::{
-    BlendMode, FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PixmapMut, PixmapPaint, Rect, SpreadMode, Stroke,
+    BlendMode, FillRule, FilterQuality, Paint, Pattern, Pixmap, PixmapMut, PixmapPaint, Rect, SpreadMode, Stroke,
     Transform,
 };
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -94,9 +94,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
-    VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_UP,
+    VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_TAB, VK_UP,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -151,18 +151,18 @@ pub enum Widget {
     Field { id: u32, placeholder: String, password: bool },
     /// Grade de células de texto (calendário), `cols` colunas.
     Grid { cols: usize, cells: Vec<Cell> },
-    /// Campo de busca grande, sem caixa, com um glifo à esquerda e uma linha embaixo (topo de
-    /// painel sem margem). Mesmos eventos de [`Widget::Field`].
-    Search { id: u32, placeholder: String, glyph: u16 },
+    /// Campo de busca grande, sem caixa, com um glifo à esquerda e uma linha embaixo quando há
+    /// algo abaixo (topo de painel sem margem). Mesmos eventos de [`Widget::Field`].
+    /// `completion`: resto sugerido do texto, em cinza depois do cursor; Tab ou → aceita.
+    Search { id: u32, placeholder: String, glyph: u16, completion: String },
     /// Rótulo de seção (texto pequeno e apagado).
     Label(String),
-    /// Lista de `rows` linhas com imagem à esquerda → [`Event::Click`] com o id da linha.
-    /// `selected`: linha (posição em `items`) com fundo realçado. `scroll`: barra de rolagem
-    /// `(início, tamanho)` em fração da lista toda.
-    List { items: Vec<(u32, Option<Pixmap>, String)>, rows: usize, selected: Option<usize>, scroll: Option<(f32, f32)> },
-    /// Rodapé (base de painel sem margem): texto com glifo à esquerda e dicas de teclado à
-    /// direita `(texto, teclas)`.
-    Footer { left: Option<(u16, String)>, hints: Vec<(String, Vec<String>)> },
+    /// Lista de `rows` linhas com imagem (ou glifo) à esquerda → [`Event::Click`] com o id da
+    /// linha. `selected`: linha (posição em `items`) na cor de destaque. `scroll`: barra de
+    /// rolagem `(início, tamanho)` em fração da lista toda. `big`: linhas mais altas.
+    List { items: Vec<Item>, rows: usize, selected: Option<usize>, scroll: Option<(f32, f32)>, big: bool },
+    /// Espaço vazio de `n` px (ex.: folga no pé de painel sem margem).
+    Space(f32),
     /// Cartões da Central de Controle numa grade de 2 colunas, com margem própria (use em
     /// painel sem margem). Cada cartão ocupa o primeiro lugar livre, da esquerda para a direita.
     Cards(Vec<Card>),
@@ -177,6 +177,83 @@ pub enum Widget {
     /// Linha compacta só de leitura: rótulo à esquerda, barra fina no meio e valor à direita
     /// (`frac` 0..1). `strong`: rótulo forte e barra na cor de destaque (ex.: hoje).
     Bar { label: String, value: String, frac: f32, strong: bool },
+}
+
+/// Linha de [`Widget::List`]: imagem ou, sem ela, o glifo `glyph` (0 = nada). `hint`: texto
+/// pequeno à direita (ex.: a tecla e o que ela faz), vazio = nada.
+pub struct Item {
+    pub id: u32,
+    pub icon: Option<Pixmap>,
+    pub glyph: u16,
+    pub text: String,
+    pub hint: String,
+}
+
+/// O que define o fundo do painel: tamanho do bitmap, vidro, cores e sombra.
+type BgKey = (i32, i32, bool, [u8; 4], [u8; 4], u8);
+
+/// Fundo do painel: sombra, forma (vidro) e borda. `m`/`mt`: margens da sombra.
+struct Background {
+    m: f32,
+    mt: f32,
+    s: f32,
+    radius: f32,
+    shadow: u8,
+    fill: [u8; 4],
+    border: [u8; 4],
+}
+
+impl Background {
+    /// Desenha o fundo de um painel `w` × `h` em `pm` (bitmap com as margens).
+    fn draw(&self, pm: &mut PixmapMut, w: f32, h: f32) {
+        let Background { m, mt, s, radius, .. } = *self;
+        let id = Transform::identity();
+        let tf = Transform::from_translate(m, mt);
+        // Sombra: anéis cada vez maiores e fracos, deslocados para baixo; depois limpa o miolo.
+        let steps = 8;
+        for i in 1..=steps {
+            let e = m * i as f32 / steps as f32;
+            if let Some(p) = rounded_rect(m - e, mt + 3.0 * s - e, w + 2.0 * e, h + 2.0 * e, radius + e) {
+                pm.fill_path(&p, &paint([0, 0, 0, self.shadow]), FillRule::Winding, id, None);
+            }
+        }
+        if let Some(p) = rounded_rect(0.0, 0.0, w, h, radius) {
+            let mut clear = paint([0, 0, 0, 255]);
+            clear.blend_mode = BlendMode::Clear;
+            pm.fill_path(&p, &clear, FillRule::Winding, tf, None);
+            pm.fill_path(&p, &paint(self.fill), FillRule::Winding, tf, None);
+        }
+        if let Some(p) = rounded_rect(0.5, 0.5, w - 1.0, h - 1.0, radius - 0.5) {
+            let stroke = Stroke { width: 1.0, ..Default::default() };
+            pm.stroke_path(&p, &paint(self.border), &stroke, tf, None);
+        }
+    }
+}
+
+/// Estica o bitmap `src` (`sw` × `sh`, 4 bytes por pixel) para `dst` (`dw` × `dh`) repetindo a
+/// coluna `xs` e a linha `ys`; o resto (cantos e bordas) é copiado como está.
+fn stretch(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: usize, xs: usize, ys: usize) {
+    let map = |t: usize, n: usize, d: usize, split: usize| {
+        if t < split {
+            t
+        } else if t >= d - (n - split - 1) {
+            t + n - d
+        } else {
+            split
+        }
+    };
+    let right = sw - xs - 1;
+    for ty in 0..dh {
+        let sy = map(ty, sh, dh, ys);
+        let srow = &src[sy * sw * 4..(sy + 1) * sw * 4];
+        let drow = &mut dst[ty * dw * 4..(ty + 1) * dw * 4];
+        drow[..xs * 4].copy_from_slice(&srow[..xs * 4]);
+        let px = &srow[xs * 4..xs * 4 + 4];
+        for c in drow[xs * 4..(dw - right) * 4].chunks_exact_mut(4) {
+            c.copy_from_slice(px);
+        }
+        drow[(dw - right) * 4..].copy_from_slice(&srow[(xs + 1) * 4..]);
+    }
 }
 
 /// Cartão de [`Widget::Cards`]; todos em pílula translúcida.
@@ -275,10 +352,6 @@ fn localize_widgets(widgets: &mut [Widget]) {
             }
             Widget::Field { placeholder, .. } | Widget::Search { placeholder, .. } => translate(placeholder),
             Widget::Grid { cells, .. } => cells.iter_mut().for_each(|cell| translate(&mut cell.text)),
-            Widget::Footer { left, hints } => {
-                if let Some((_, text)) = left { translate(text); }
-                for (text, _) in hints { translate(text); }
-            }
             Widget::Cards(cards) => {
                 for card in cards {
                     match card {
@@ -290,7 +363,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
                 }
             }
             // App names, Wi-Fi SSIDs, and filenames are user/system content, not UI labels.
-            Widget::Icons { .. } | Widget::List { .. } | Widget::Slider { .. } | Widget::Separator => {}
+            Widget::Icons { .. } | Widget::List { .. } | Widget::Slider { .. } | Widget::Separator | Widget::Space(_) => {}
         }
     }
 }
@@ -318,7 +391,7 @@ pub trait PanelContent {
     fn width(&self) -> f32 {
         320.0
     }
-    /// `false` tira a margem de cima e de baixo (para [`Widget::Search`] e [`Widget::Footer`]).
+    /// `false` tira a margem de cima e de baixo (para [`Widget::Search`] no topo).
     fn padded(&self) -> bool {
         true
     }
@@ -369,6 +442,8 @@ const PAD_Y: f32 = 8.0;
 const ICON_CELL: f32 = 36.0;
 /// Altura da linha de [`Widget::List`].
 const LIST_ROW: f32 = 44.0;
+/// Altura da linha de [`Widget::List`] com `big`.
+const LIST_ROW_BIG: f32 = 56.0;
 /// [`Widget::Cards`]: altura da fileira, espaço entre cartões e margem em volta.
 const CARD_H: f32 = 60.0;
 const CARD_GAP: f32 = 12.0;
@@ -765,6 +840,9 @@ struct Panel {
     hwnd: HWND,
     glass: HWND,
     glass_fx: Option<glass::Glass>,
+    /// Fundo já desenhado (sombra, forma e borda) e a chave de quando foi feito: só muda com o
+    /// tamanho ou o tema, e desenhar a sombra é o mais caro do redesenho.
+    bg_cache: Option<(BgKey, Vec<u8>)>,
     /// Janela que estava em primeiro plano antes de abrir (volta para ela no Esc).
     prev_fg: HWND,
     item: RECT,
@@ -872,6 +950,7 @@ impl Panel {
                 hwnd,
                 glass,
                 glass_fx,
+                bg_cache: None,
                 prev_fg,
                 item,
                 work: mi.rcWork,
@@ -936,8 +1015,8 @@ impl Panel {
             Widget::Toggle { .. } => 40.0,
             Widget::Search { .. } => 56.0,
             Widget::Label(_) => 32.0,
-            Widget::List { rows, .. } => LIST_ROW * *rows as f32,
-            Widget::Footer { .. } => 44.0,
+            Widget::Space(px) => *px,
+            Widget::List { rows, big, .. } => (if *big { LIST_ROW_BIG } else { LIST_ROW }) * *rows as f32,
             Widget::Slider { .. } => 44.0,
             Widget::Button { .. } => 40.0,
             Widget::Separator => 9.0,
@@ -1042,30 +1121,39 @@ impl Panel {
         let (m, mt) = self.margins();
         let (w, h) = (self.w as f32, self.h as f32);
         let bytes = unsafe { std::slice::from_raw_parts_mut(bits, (bw * bh * 4) as usize) };
-        bytes.fill(0);
-        let Some(mut pm) = PixmapMut::from_bytes(bytes, bw as u32, bh as u32) else { return };
-        let id = Transform::identity();
-        let tf = Transform::from_translate(m, mt);
         let liquid = self.content.liquid();
+        let fill_color = if liquid { pal.glass } else { pal.tint };
+        let key: BgKey = (bw, bh, liquid, fill_color, pal.border, pal.shadow);
+        let cached = match &self.bg_cache {
+            Some((k, px)) if *k == key && px.len() == bytes.len() => {
+                bytes.copy_from_slice(px);
+                true
+            }
+            _ => false,
+        };
+        if !cached {
+            bytes.fill(0);
+        }
+        let Some(mut pm) = PixmapMut::from_bytes(bytes, bw as u32, bh as u32) else { return };
+        let tf = Transform::from_translate(m, mt);
         let radius = if liquid { LIQUID_RADIUS } else { RADIUS } * s;
 
-        // Sombra: anéis cada vez maiores e fracos, deslocados para baixo; depois limpa o miolo.
-        let steps = 8;
-        for i in 1..=steps {
-            let e = m * i as f32 / steps as f32;
-            if let Some(p) = rounded_rect(m - e, mt + 3.0 * s - e, w + 2.0 * e, h + 2.0 * e, radius + e) {
-                pm.fill_path(&p, &paint([0, 0, 0, pal.shadow]), FillRule::Winding, id, None);
+        if !cached {
+            let bg = Background { m, mt, s, radius, shadow: pal.shadow, fill: fill_color, border: pal.border };
+            // Desenha o fundo num tamanho mínimo e estica o meio (cantos iguais, bordas repetidas):
+            // a sombra em tamanho cheio custa de 4 a 11 ms; esticar, uma cópia de memória.
+            let (w0, h0) = ((2.0 * radius + 4.0).ceil() as i32, (2.0 * radius + 3.0 * s + 4.0).ceil() as i32);
+            let (bw0, bh0) = (w0 + 2 * m as i32, h0 + mt as i32 + m as i32);
+            let small = (bw > bw0 && bh > bh0).then(|| Pixmap::new(bw0 as u32, bh0 as u32)).flatten();
+            if let Some(mut small) = small {
+                bg.draw(&mut small.as_mut(), w0 as f32, h0 as f32);
+                let xs = (m + radius).ceil() as usize + 1;
+                let ys = (mt + radius + 3.0 * s).ceil() as usize + 1;
+                stretch(small.data(), bw0 as usize, bh0 as usize, pm.data_mut(), bw as usize, bh as usize, xs, ys);
+            } else {
+                bg.draw(&mut pm, w, h);
             }
-        }
-        if let Some(p) = rounded_rect(0.0, 0.0, w, h, radius) {
-            let mut clear = paint([0, 0, 0, 255]);
-            clear.blend_mode = BlendMode::Clear;
-            pm.fill_path(&p, &clear, FillRule::Winding, tf, None);
-            pm.fill_path(&p, &paint(if liquid { pal.glass } else { pal.tint }), FillRule::Winding, tf, None);
-        }
-        if let Some(p) = rounded_rect(0.5, 0.5, w - 1.0, h - 1.0, radius - 0.5) {
-            let stroke = Stroke { width: 1.0, ..Default::default() };
-            pm.stroke_path(&p, &paint(pal.border), &stroke, tf, None);
+            self.bg_cache = Some((key, pm.data_mut().to_vec()));
         }
 
         let fill = |pm: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, r: f32, c: [u8; 4]| {
@@ -1194,21 +1282,35 @@ impl Panel {
                 Widget::Label(t) => {
                     texts.push(mk(t, Font::Small, [left + inset, y + 6.0 * s, right - left - 2.0 * inset, wh - 6.0 * s], DWRITE_TEXT_ALIGNMENT_LEADING, pal.dim));
                 }
-                Widget::List { items, selected, scroll, .. } => {
-                    let rh = LIST_ROW * s;
+                Widget::List { items, selected, scroll, big, .. } => {
+                    let rh = if *big { LIST_ROW_BIG } else { LIST_ROW } * s;
                     let bar = if scroll.is_some() { 10.0 * s } else { 0.0 };
-                    for (k, (rid, icon, t)) in items.iter().enumerate() {
+                    let (font, gap) = if *big { (Font::Large, 52.0 * s) } else { (Font::Body, 40.0 * s) };
+                    for (k, it) in items.iter().enumerate() {
                         let ry = y + k as f32 * rh;
                         let (zy, zh) = (ry + 2.0 * s, rh - 4.0 * s);
-                        zones.push(Zone { x: left, y: zy, w: right - left - bar, h: zh, radius: 6.0 * s, kind: ZoneKind::Click(*rid) });
-                        if *selected == Some(k) {
-                            fill(&mut pm, left, zy, right - left - bar, zh, 6.0 * s, pal.hover);
+                        zones.push(Zone { x: left, y: zy, w: right - left - bar, h: zh, radius: 8.0 * s, kind: ZoneKind::Click(it.id) });
+                        let sel = *selected == Some(k);
+                        if sel {
+                            fill(&mut pm, left, zy, right - left - bar, zh, 8.0 * s, pal.accent);
                         }
+                        let ink = if sel { WHITE } else { pal.ink };
                         let tx = left + inset;
-                        if let Some(icon) = icon {
-                            draw_icon(&mut pm, icon, tx + 12.0 * s, ry + rh / 2.0);
+                        let cx = tx + (gap - 16.0 * s) / 2.0;
+                        if let Some(icon) = &it.icon {
+                            draw_icon(&mut pm, icon, cx, ry + rh / 2.0);
+                        } else if it.glyph != 0 {
+                            let gf = if *big { Font::IconLarge } else { Font::Icon };
+                            texts.push(mk(&glyph(it.glyph), gf, [cx - 14.0 * s, ry, 28.0 * s, rh], DWRITE_TEXT_ALIGNMENT_CENTER, ink));
                         }
-                        texts.push(mk(t, Font::Body, [tx + 40.0 * s, ry, right - bar - inset - tx - 40.0 * s, rh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
+                        // A dica fica à direita e o nome encurta para não passar por cima dela.
+                        let hint_w = if it.hint.is_empty() { 0.0 } else { 200.0 * s };
+                        if hint_w > 0.0 {
+                            let hc = if sel { [1.0, 1.0, 1.0, 0.85] } else { pal.dim };
+                            texts.push(mk(&it.hint, Font::Small, [right - bar - inset - hint_w, ry, hint_w, rh], DWRITE_TEXT_ALIGNMENT_TRAILING, hc));
+                        }
+                        let name_w = right - bar - inset - tx - gap - hint_w;
+                        texts.push(mk(&it.text, font, [tx + gap, ry, name_w, rh], DWRITE_TEXT_ALIGNMENT_LEADING, ink));
                     }
                     if let Some((start, size)) = scroll {
                         let (bw, bx) = (3.0 * s, right - 3.0 * s);
@@ -1216,60 +1318,6 @@ impl Panel {
                         let tl = (th * size).max(24.0 * s).min(th);
                         let top = ty + (th - tl) * (start / (1.0 - size).max(0.0001)).clamp(0.0, 1.0);
                         fill(&mut pm, bx, top, bw, tl, bw / 2.0, pal.strong);
-                    }
-                }
-                Widget::Footer { left: label, hints } => {
-                    // Fundo um pouco mais escuro, com os cantos de baixo arredondados como o painel.
-                    let r = radius;
-                    let k = r * 0.5523;
-                    let mut pb = PathBuilder::new();
-                    pb.move_to(0.0, y);
-                    pb.line_to(w, y);
-                    pb.line_to(w, y + wh - r);
-                    pb.cubic_to(w, y + wh - r + k, w - r + k, y + wh, w - r, y + wh);
-                    pb.line_to(r, y + wh);
-                    pb.cubic_to(r - k, y + wh, 0.0, y + wh - r + k, 0.0, y + wh - r);
-                    pb.close();
-                    if let Some(p) = pb.finish() {
-                        pm.fill_path(&p, &paint(pal.control), FillRule::Winding, tf, None);
-                    }
-                    if let Some(rl) = Rect::from_xywh(0.0, y, w, 1.0) {
-                        pm.fill_rect(rl, &paint(pal.line), tf, None);
-                    }
-                    let mut lx = left + inset;
-                    if let Some((g, t)) = label {
-                        texts.push(mk(&glyph(*g), Font::Icon, [lx, y, 18.0 * s, wh], DWRITE_TEXT_ALIGNMENT_CENTER, pal.ink));
-                        lx += 26.0 * s;
-                        texts.push(mk(t, Font::Small, [lx, y, w / 2.0, wh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
-                    }
-                    // Dicas da direita para a esquerda: teclas em "chips" com borda, texto antes.
-                    let text_w = |t: &str, font: Font| {
-                        let t: Vec<u16> = t.encode_utf16().collect();
-                        self.layout_text(&t, font, 10_000.0, 100.0)
-                            .and_then(|l| unsafe {
-                                let mut m = DWRITE_TEXT_METRICS::default();
-                                l.GetMetrics(&mut m).ok()?;
-                                Some(m.widthIncludingTrailingWhitespace)
-                            })
-                            .unwrap_or(0.0)
-                    };
-                    let (ch, cy) = (20.0 * s, y + (wh - 20.0 * s) / 2.0);
-                    let mut x = right - inset;
-                    for (t, keys) in hints.iter().rev() {
-                        for key in keys.iter().rev() {
-                            let cw = (text_w(key, Font::Small) + 12.0 * s).max(ch);
-                            x -= cw;
-                            if let Some(p) = rounded_rect(x + 0.5, cy + 0.5, cw - 1.0, ch - 1.0, 4.0 * s) {
-                                let stroke = Stroke { width: 1.0, ..Default::default() };
-                                pm.stroke_path(&p, &paint(pal.strong), &stroke, tf, None);
-                            }
-                            texts.push(mk(key, Font::Small, [x, cy, cw, ch], DWRITE_TEXT_ALIGNMENT_CENTER, pal.ink));
-                            x -= 4.0 * s;
-                        }
-                        let tw = text_w(t, Font::Small).ceil();
-                        x -= tw + 4.0 * s;
-                        texts.push(mk(t, Font::Small, [x, y, tw + 2.0 * s, wh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.ink));
-                        x -= 16.0 * s;
                     }
                 }
                 Widget::Icons { items } => {
@@ -1464,6 +1512,7 @@ impl Panel {
                         fill(&mut pm, bl, ty, ((br - bl) * f).max(th), th, th / 2.0, if *strong { pal.accent } else { d });
                     }
                 }
+                Widget::Space(_) => {}
                 Widget::Separator => {
                     if let Some(r) = Rect::from_xywh(left + inset, y + 4.0 * s, right - left - 2.0 * inset, 1.0) {
                         pm.fill_rect(r, &paint(pal.line), tf, None);
@@ -1476,7 +1525,10 @@ impl Panel {
                         _ => (false, true),
                     };
                     let (fy, fh, ix, iw, font) = if let Widget::Search { glyph: g, .. } = wd {
-                        if let Some(rl) = Rect::from_xywh(0.0, y + wh - 1.0, w, 1.0) {
+                        // Linha só com algo embaixo: sozinha, a busca é uma pílula.
+                        if y + wh < h - 1.0
+                            && let Some(rl) = Rect::from_xywh(0.0, y + wh - 1.0, w, 1.0)
+                        {
                             pm.fill_rect(rl, &paint(pal.line), tf, None);
                         }
                         let gx = left + inset;
@@ -1511,6 +1563,23 @@ impl Panel {
                     if shown.is_empty() {
                         texts.push(mk(placeholder, font, [ix, fy, iw, fh], DWRITE_TEXT_ALIGNMENT_LEADING, pal.dim));
                     } else {
+                        // Autocompletar: o resto do nome em cinza, colado no texto (cursor no fim).
+                        if let Widget::Search { completion, .. } = wd
+                            && focused
+                            && f.cursor == f.text.len()
+                            && !completion.is_empty()
+                        {
+                            let x = ix + cx - off;
+                            field_ops.push(TextOp {
+                                text: completion.encode_utf16().collect(),
+                                font,
+                                rect: [x + m, fy + mt, 10_000.0, fh],
+                                align: DWRITE_TEXT_ALIGNMENT_LEADING,
+                                color: pal.dim,
+                                wrap: false,
+                                clip: Some([ix + m, fy + mt, ix + iw + m, fy + fh + mt]),
+                            });
+                        }
                         field_ops.push(TextOp {
                             text: shown,
                             font,
@@ -1741,8 +1810,30 @@ impl Panel {
         }
     }
 
+    /// Aceita o autocompletar da busca em foco (Tab, ou → com o cursor no fim). `false`: nada a aceitar.
+    fn accept_completion(&mut self, tab: bool) -> bool {
+        let Some(id) = self.focus else { return false };
+        let suffix: Vec<u16> = match self.widgets.iter().find_map(|(w, ..)| match w {
+            Widget::Search { id: wid, completion, .. } if *wid == id && !completion.is_empty() => Some(completion),
+            _ => None,
+        }) {
+            Some(c) => c.encode_utf16().collect(),
+            None => return false,
+        };
+        if !self.fields.iter().any(|f| f.id == id && (tab || f.cursor == f.text.len())) {
+            return false;
+        }
+        self.edit(|f| {
+            f.text.extend(suffix);
+            f.cursor = f.text.len();
+            true
+        });
+        true
+    }
+
     fn key_down(&mut self, vk: u16) {
         match vk {
+            v if (v == VK_TAB.0 || v == VK_RIGHT.0) && self.accept_completion(v == VK_TAB.0) => {}
             v if v == VK_LEFT.0 => self.edit(|f| {
                 f.cursor = f.cursor.saturating_sub(1);
                 false
@@ -1884,7 +1975,16 @@ fn open(key: &'static str, item: RECT, content: Box<dyn PanelContent>, prev_fg: 
     PANEL.with(|c| *c.borrow_mut() = Some(p));
     // Ativa para receber o teclado; fecha ao perder a ativação (WM_ACTIVATE).
     unsafe {
-        let _ = SetForegroundWindow(hwnd);
+        if !SetForegroundWindow(hwnd).as_bool() {
+            // Negado (ex.: aberto pela tecla Win, sem clique no dock): pega a fila de entrada
+            // da janela em foco emprestada, que aí o Windows deixa trocar.
+            let fg_thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
+            let me = GetCurrentThreadId();
+            if fg_thread != 0 && fg_thread != me && AttachThreadInput(me, fg_thread, true).as_bool() {
+                let _ = SetForegroundWindow(hwnd);
+                let _ = AttachThreadInput(me, fg_thread, false);
+            }
+        }
         // O Windows pode negar o primeiro plano (trava de foco), ou dar e tirar sem
         // WA_INACTIVE: aí não chega o aviso nem o Esc, e o painel ficaria aberto. Então vigia
         // por timer enquanto estiver aberto (morre junto com a janela).
@@ -2108,6 +2208,39 @@ unsafe fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bg_tests {
+    use super::*;
+
+    /// O fundo esticado a partir do tamanho mínimo bate com o desenhado em tamanho cheio.
+    #[test]
+    fn fundo_esticado_igual_ao_cheio() {
+        for s in [1.0f32, 1.25, 1.5, 2.0] {
+            let (m, mt) = (SHADOW * s, GAP * s);
+            let radius = LIQUID_RADIUS * s;
+            let bg = Background { m, mt, s, radius, shadow: 40, fill: [240, 240, 240, 200], border: [0, 0, 0, 30] };
+            let (w, h) = ((680.0 * s) as i32, (420.0 * s) as i32);
+            let (bw, bh) = (w + 2 * m as i32, h + mt as i32 + m as i32);
+            let mut full = Pixmap::new(bw as u32, bh as u32).unwrap();
+            bg.draw(&mut full.as_mut(), w as f32, h as f32);
+            let (w0, h0) = ((2.0 * radius + 4.0).ceil() as i32, (2.0 * radius + 3.0 * s + 4.0).ceil() as i32);
+            let (bw0, bh0) = (w0 + 2 * m as i32, h0 + mt as i32 + m as i32);
+            let mut small = Pixmap::new(bw0 as u32, bh0 as u32).unwrap();
+            bg.draw(&mut small.as_mut(), w0 as f32, h0 as f32);
+            let mut out = vec![0u8; (bw * bh * 4) as usize];
+            let xs = (m + radius).ceil() as usize + 1;
+            let ys = (mt + radius + 3.0 * s).ceil() as usize + 1;
+            stretch(small.data(), bw0 as usize, bh0 as usize, &mut out, bw as usize, bh as usize, xs, ys);
+            let worst = full.data().iter().zip(&out).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            // Só o anti-aliasing da ponta da sombra varia um pouco com o tamanho: poucos pixels,
+            // pouca diferença.
+            let off: Vec<usize> = (0..out.len() / 4).filter(|&p| (0..4).any(|c| full.data()[p * 4 + c].abs_diff(out[p * 4 + c]) > 2)).collect();
+            let inner = off.iter().filter(|&&p| { let (x, y) = (p % bw as usize, p / bw as usize); x as f32 > m && (x as f32) < m + w as f32 && y as f32 > mt && (y as f32) < mt + h as f32 }).count();
+            assert!(worst <= 16 && off.len() * 10_000 <= out.len() / 4 && inner == 0, "escala {s}: diferença máxima {worst}, {} pixels, {inner} dentro", off.len());
         }
     }
 }

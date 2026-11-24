@@ -39,8 +39,6 @@ Dispositivo de áudio	Audio device
 Saída	Output
 Nenhum dispositivo de saída.	No output devices.
 Aplicativos	Apps
-Pesquisar aplicativos...	Search apps...
-Nenhum aplicativo encontrado	No apps found
 resultado	result
 resultados	results
 Abrir	Open
@@ -159,3 +157,34 @@ Entre no Codex para ver o uso.	Sign in to Codex to see usage.
 Login vencido: abra o Codex para renovar.	Login expired: open Codex to renew it.
 Sem conexão com o Codex.	Can't reach Codex.
 O Codex não respondeu agora.	Codex didn't respond right now.
+Tecla Windows abre o lançador	Windows key opens the launcher
+Melhor resultado	Top hit
+Calculadora	Calculator
+Configurações	Settings
+Ações	Actions
+Documentos	Documents
+Buscar nos arquivos	Search files
+Bluetooth e dispositivos	Bluetooth & devices
+Plano de fundo	Background
+Cores	Colors
+Notificações	Notifications
+Não incomodar	Do not disturb
+Energia e bateria	Power & battery
+Armazenamento	Storage
+Aplicativos instalados	Installed apps
+Aplicativos padrão	Default apps
+Aplicativos de inicialização	Startup apps
+Suas informações	Your info
+Data e hora	Date & time
+Idioma e região	Language & region
+Teclado	Keyboard
+Impressoras e scanners	Printers & scanners
+Privacidade e segurança	Privacy & security
+Rede e internet	Network & internet
+Acessibilidade	Accessibility
+Apps, configurações, arquivos ou cálculos	Apps, settings, files or math
+Enter abre	Enter to open
+Enter copia	Enter to copy
+Enter executa	Enter to run
+Enter busca	Enter to search
+Tab completa	Tab to complete

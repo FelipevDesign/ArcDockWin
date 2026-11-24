@@ -32,6 +32,7 @@ mod tray;
 mod overflow;
 mod volume;
 mod wifi;
+mod winkey;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -89,7 +90,7 @@ const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Abre/fecha o lançador. Mandada de fora (atalho do AutoHotkey) para a janela do dock
 /// (classe `ArcDockWin`): `PostMessage 0x8032`.
-const WM_LAUNCHER: u32 = WM_APP + 50;
+pub const WM_LAUNCHER: u32 = WM_APP + 50;
 /// Aviso do shell: a Lixeira mudou (stacks::watch_trash).
 const WM_TRASH: u32 = WM_APP + 51;
 
@@ -1537,6 +1538,8 @@ fn main() -> windows::core::Result<()> {
 
         topbar::create();
         minimize::init();
+        winkey::config_changed();
+        launcher::preload();
         start_tray();
         autostart();
         let _ = SetWinEventHook(
