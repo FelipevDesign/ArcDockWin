@@ -264,6 +264,8 @@ pub enum Module {
     Claude,
     /// Uso do plano do Codex (sessão de 5 h); desligado por padrão.
     Codex,
+    /// Botão que mostra a área de trabalho (Win+D), na ponta direita como no Windows.
+    Desktop,
 }
 
 /// Zona da barra: a ordem dos módulos vale dentro de cada uma.
@@ -296,7 +298,8 @@ impl Zone {
 }
 
 impl Module {
-    pub const ALL: [Module; 6] = [Module::Stats, Module::Clock, Module::Tray, Module::Control, Module::Claude, Module::Codex];
+    pub const ALL: [Module; 7] =
+        [Module::Stats, Module::Clock, Module::Tray, Module::Control, Module::Claude, Module::Codex, Module::Desktop];
 
     fn key(self) -> &'static str {
         match self {
@@ -306,6 +309,7 @@ impl Module {
             Module::Control => "control",
             Module::Claude => "claude",
             Module::Codex => "codex",
+            Module::Desktop => "desktop",
         }
     }
 
@@ -318,6 +322,7 @@ impl Module {
             Module::Control => "Central de Controle",
             Module::Claude => "Uso do Claude",
             Module::Codex => "Uso do Codex",
+            Module::Desktop => "Mostrar área de trabalho",
         }
     }
 
@@ -327,6 +332,7 @@ impl Module {
             Module::Control => "Central",
             Module::Claude => "Claude",
             Module::Codex => "Codex",
+            Module::Desktop => "Área de trabalho",
             m => m.label(),
         }
     }
@@ -338,6 +344,7 @@ impl Module {
             Module::Clock => (Zone::Center, 0),
             Module::Tray => (Zone::Right, 0),
             Module::Control => (Zone::Right, 1),
+            Module::Desktop => (Zone::Right, 2),
             Module::Claude | Module::Codex => (Zone::Right, 0),
         }
     }

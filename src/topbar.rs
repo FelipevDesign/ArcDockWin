@@ -139,7 +139,13 @@ enum Kind {
     Stats,
     /// Uso do Claude ou do Codex (% da sessão de 5 h); o clique abre o painel de uso.
     Usage(crate::usage::Provider),
+    /// Mostrar a área de trabalho (como o canto da barra de tarefas do Windows): o clique
+    /// faz o Win+D, e o segundo clique traz as janelas de volta.
+    Desktop,
 }
+
+/// Glifo do botão da área de trabalho (TVMonitor; existe na Fluent Icons e na MDL2 Assets).
+const GLYPH_DESKTOP: u16 = 0xE7F4;
 
 /// Item desenhado: faixa horizontal [l, r) e textos (layout, x, opacidade).
 struct Item {
@@ -556,6 +562,9 @@ impl Bar {
             Module::Control => {
                 self.glyph_item(&mut items, 0.0, Kind::Control, &[(crate::control::GLYPH, 1.0)]);
             }
+            Module::Desktop => {
+                self.glyph_item(&mut items, 0.0, Kind::Desktop, &[(GLYPH_DESKTOP, 1.0)]);
+            }
             // Logo do provedor (desenhado em `redraw`) + % da sessão de 5 h.
             Module::Claude | Module::Codex => {
                 let p = if m == Module::Claude { Provider::Claude } else { Provider::Codex };
@@ -882,7 +891,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Stats => ("stats", || Box::new(crate::perf::PerfPanel::new())),
         Kind::Usage(Provider::Claude) => ("claude", || Box::new(crate::usage::UsagePanel::new(Provider::Claude))),
         Kind::Usage(Provider::Codex) => ("codex", || Box::new(crate::usage::UsagePanel::new(Provider::Codex))),
-        Kind::Tray(_) => return None,
+        Kind::Tray(_) | Kind::Desktop => return None,
     })
 }
 
@@ -1096,6 +1105,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let hit = with_bar(hwnd, |b| b.hit(mouse_x(lp)).map(|k| (k, b.item_rect(k)))).flatten();
                 match hit {
                     Some((Kind::Tray(_), _)) => tray_click(hwnd, lp, TrayButton::Left),
+                    Some((Kind::Desktop, _)) => crate::apps::show_desktop(),
                     // Fora do borrow da barra: abrir o painel ativa outra janela.
                     // O painel abre no monitor do item (rect em coordenadas de tela).
                     Some((kind, Some(rect))) => {

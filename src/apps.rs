@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_LWIN,
-    VK_X,
+    VK_D, VK_X,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
 use windows::core::{Interface, PCSTR};
@@ -652,6 +652,12 @@ pub fn open_start() {
 /// Clique direito no Iniciar: o menu do Win+X (Link rápido).
 pub fn open_quick_link() {
     send_keys(&[VK_LWIN, VK_X]);
+}
+
+/// Botão da área de trabalho na barra do topo: o mesmo Win+D do Windows (minimiza tudo;
+/// de novo, traz as janelas de volta).
+pub fn show_desktop() {
+    send_keys(&[VK_LWIN, VK_D]);
 }
 
 /// Pressiona as teclas em ordem e solta na ordem inversa.
