@@ -88,6 +88,9 @@ const REBUILD_MS: u32 = 300;
 const STATS_MS: u32 = 2000;
 /// Relê o uso do Claude e do Codex (só com o módulo ligado).
 const TIMER_USAGE: usize = 7;
+/// Relê o layout de teclado do app em foco: o Win+Espaço e o Alt+Shift não avisam ninguém.
+const TIMER_KEYBOARD: usize = 8;
+const KEYBOARD_MS: u32 = 400;
 /// Largura (px) de cada fatia do brilho do wallpaper.
 const LUMA_BUCKET: usize = 16;
 pub(crate) const GLYPH_CPU: u16 = 0xE950;
@@ -120,6 +123,10 @@ thread_local! {
     static TRAY_BAR: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
     /// Ganchos de eventos de janela da barra (tirados em `destroy`).
     static HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
+    /// Sigla do layout de teclado atual ("PT", "EN"; vazia com um layout só), igual em
+    /// todas as barras, e o (layout, nº de layouts) de que ela saiu.
+    static KEYBOARD: RefCell<String> = const { RefCell::new(String::new()) };
+    static KEYBOARD_SEEN: Cell<(isize, usize)> = const { Cell::new((0, 0)) };
 }
 
 /// A barra existe (foi criada e não foi desligada nas Configurações).
@@ -142,6 +149,9 @@ enum Kind {
     /// Mostrar a área de trabalho (como o canto da barra de tarefas do Windows): o clique
     /// faz o Win+D, e o segundo clique traz as janelas de volta.
     Desktop,
+    /// Idioma de entrada (layout de teclado): o clique abre a lista para trocar e a roda passa
+    /// para o próximo.
+    Keyboard,
 }
 
 /// Glifo do botão da área de trabalho (TVMonitor; existe na Fluent Icons e na MDL2 Assets).
@@ -565,6 +575,16 @@ impl Bar {
             Module::Desktop => {
                 self.glyph_item(&mut items, 0.0, Kind::Desktop, &[(GLYPH_DESKTOP, 1.0)]);
             }
+            // Sigla do layout; sem item com um layout só (como a barra de tarefas do Windows).
+            Module::Keyboard => {
+                let label: Vec<u16> = KEYBOARD.with_borrow(|k| k.encode_utf16().collect());
+                if !label.is_empty()
+                    && let Some(t) = self.text_layout(&label, &self.text_fmt, 200.0)
+                {
+                    let w = Self::text_width(&t) + 2.0 * pad;
+                    items.push(Item { kind: Kind::Keyboard, l: 0.0, r: w, text: vec![(t, pad, 1.0)] });
+                }
+            }
             // Logo do provedor (desenhado em `redraw`) + % da sessão de 5 h.
             Module::Claude | Module::Codex => {
                 let p = if m == Module::Claude { Provider::Claude } else { Provider::Codex };
@@ -891,7 +911,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Stats => ("stats", || Box::new(crate::perf::PerfPanel::new())),
         Kind::Usage(Provider::Claude) => ("claude", || Box::new(crate::usage::UsagePanel::new(Provider::Claude))),
         Kind::Usage(Provider::Codex) => ("codex", || Box::new(crate::usage::UsagePanel::new(Provider::Codex))),
-        Kind::Tray(_) | Kind::Desktop => return None,
+        Kind::Tray(_) | Kind::Desktop | Kind::Keyboard => return None,
     })
 }
 
@@ -945,6 +965,7 @@ pub fn settings_changed() {
     update_clock();
     update_stats();
     update_usage();
+    update_keyboard();
     for_bars(|b| {
         b.relayout();
         b.redraw();
@@ -957,6 +978,36 @@ fn update_stats() {
     }
     let Some((cpu, ram)) = USAGE.with(|u| u.borrow_mut().as_mut().map(|u| (u.cpu(), u.ram()))) else { return };
     for_bars(|b| b.set_stats(cpu, ram));
+}
+
+/// Relê o layout de teclado do app em foco e, se a sigla mudou, refaz as barras. Barato
+/// quando nada mudou (só compara o layout e o nº de layouts).
+fn update_keyboard() {
+    let on = config::module_on(Module::Keyboard);
+    let seen = if on {
+        // Janela do dock em foco (o próprio menu de layouts): fica a sigla de antes.
+        let Some(hkl) = crate::keyboard::current() else { return };
+        (hkl.0 as isize, crate::keyboard::layouts().len())
+    } else {
+        (0, 0)
+    };
+    if seen == KEYBOARD_SEEN.get() {
+        return;
+    }
+    KEYBOARD_SEEN.set(seen);
+    let label = if on && seen.1 >= 2 {
+        crate::keyboard::short_name(windows::Win32::UI::Input::KeyboardAndMouse::HKL(seen.0 as _))
+    } else {
+        String::new()
+    };
+    if KEYBOARD.with_borrow(|k| *k == label) {
+        return;
+    }
+    KEYBOARD.with_borrow_mut(|k| *k = label);
+    for_bars(|b| {
+        b.relayout();
+        b.redraw();
+    });
 }
 
 /// Pede uma releitura do uso do Claude e do Codex; a resposta chega como `usage::WM_USAGE`.
@@ -1106,6 +1157,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 match hit {
                     Some((Kind::Tray(_), _)) => tray_click(hwnd, lp, TrayButton::Left),
                     Some((Kind::Desktop, _)) => crate::apps::show_desktop(),
+                    Some((Kind::Keyboard, _)) => {
+                        // Fora do borrow da barra: o menu roda um laço de mensagens.
+                        if let Some(anchor) = with_bar(hwnd, |b| b.anchor(Kind::Keyboard)) {
+                            crate::keyboard::menu(hwnd, anchor);
+                        }
+                        update_keyboard();
+                    }
                     // Fora do borrow da barra: abrir o painel ativa outra janela.
                     // O painel abre no monitor do item (rect em coordenadas de tela).
                     Some((kind, Some(rect))) => {
@@ -1132,8 +1190,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 // Coordenadas de tela; ±2% de volume por passo da roda sobre a central.
                 let x = (lp.0 & 0xffff) as i16 as i32;
                 let steps = ((wp.0 >> 16) as u16 as i16) as f32 / WHEEL_DELTA as f32;
-                let on_control = with_bar(hwnd, |b| b.hit((x - b.rect.left) as f32) == Some(Kind::Control));
-                if on_control == Some(true) {
+                let hit = with_bar(hwnd, |b| b.hit((x - b.rect.left) as f32)).flatten();
+                if hit == Some(Kind::Keyboard) {
+                    // Roda para baixo: próximo layout; para cima: o anterior.
+                    crate::keyboard::cycle(steps < 0.0);
+                    update_keyboard();
+                }
+                if hit == Some(Kind::Control) {
                     AUDIO.with(|a| {
                         if let Ok(a) = a.try_borrow()
                             && let Some(a) = a.as_ref()
@@ -1153,6 +1216,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         panel::notify(crate::control::TICK, 0);
                     }
                     TIMER_USAGE => update_usage(),
+                    TIMER_KEYBOARD => update_keyboard(),
                     TIMER_REBUILD => {
                         let _ = KillTimer(Some(hwnd), TIMER_REBUILD);
                         rebuild();
@@ -1442,6 +1506,8 @@ pub fn create() {
         SetTimer(Some(hwnd), TIMER_STATS, STATS_MS, None);
         SetTimer(Some(hwnd), TIMER_USAGE, crate::usage::REFRESH_MS, None);
         update_usage();
+        SetTimer(Some(hwnd), TIMER_KEYBOARD, KEYBOARD_MS, None);
+        update_keyboard();
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
         let hooks = [
@@ -1476,6 +1542,8 @@ pub fn destroy() {
     bars.into_iter().for_each(remove);
     AUDIO.with(|a| *a.borrow_mut() = None);
     USAGE.with(|u| *u.borrow_mut() = None);
+    KEYBOARD_SEEN.set((0, 0));
+    KEYBOARD.with_borrow_mut(String::clear);
     MAIN.set(HWND(std::ptr::null_mut()));
     TRAY_BAR.set(HWND(std::ptr::null_mut()));
 }
@@ -1527,4 +1595,8 @@ unsafe extern "system" fn on_window_event(
             unsafe { SetTimer(Some(b.hwnd), TIMER_TINT_EVENT, TINT_THROTTLE_MS, None) };
         }
     });
+    // Cada app tem o próprio layout: a sigla acompanha a troca de app na hora.
+    if event == EVENT_SYSTEM_FOREGROUND {
+        update_keyboard();
+    }
 }
