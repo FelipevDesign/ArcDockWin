@@ -14,6 +14,7 @@ mod usage;
 mod glass;
 mod guard;
 mod i18n;
+mod keyboard;
 mod launcher;
 mod media;
 mod minimize;
@@ -228,23 +229,28 @@ impl Dock {
         }
     }
 
-    /// Índice do último fixado, se houver apps abertos não fixados depois dele
-    /// (o botão Iniciar, sempre o primeiro, não conta em nenhum dos dois grupos).
+    /// Índice do último fixado (o Iniciar conta quando está entre eles), se houver apps
+    /// abertos não fixados depois dele.
     fn sep_after(&self) -> Option<usize> {
-        let start = self.apps.iter().filter(|a| a.source == apps::START).count();
-        let regular = |a: &&App| a.source != apps::START;
-        let pinned = self.apps.iter().filter(regular).filter(|a| a.pinned).count();
-        let open = self.apps.iter().filter(regular).filter(|a| !a.pinned).count();
-        (pinned > 0 && open > 0).then(|| start + pinned - 1)
+        let open = self.apps.iter().any(|a| !a.pinned && a.source != apps::START);
+        let last_pinned = self.apps.iter().rposition(|a| a.pinned)?;
+        open.then_some(last_pinned)
     }
 
     /// Separadores: Iniciar | fixados | abertos | pilhas (sem repetir quando um grupo está vazio).
+    /// Com o Iniciar na ponta direita: fixados | abertos | Iniciar | pilhas; no meio dos
+    /// fixados, só os separadores escolhidos pelo usuário em volta dele.
     fn seps(&self) -> Vec<usize> {
-        let start = self
-            .apps
-            .first()
-            .filter(|a| a.source == apps::START && (self.apps.len() > 1 || !self.stack_items().is_empty()))
-            .map(|_| 0);
+        let more = self.apps.len() > 1 || !self.stack_items().is_empty();
+        let start = self.apps.iter().position(|a| a.source == apps::START).filter(|_| more).and_then(|i| {
+            if i == 0 {
+                Some(0)
+            } else if !self.apps[i].pinned {
+                Some(i - 1)
+            } else {
+                None
+            }
+        });
         let stacks = self.apps.len().checked_sub(1).filter(|_| !self.stack_items().is_empty());
         // Separadores escolhidos pelo usuário (`---` no pinned.txt), menos depois do último item.
         let custom = self

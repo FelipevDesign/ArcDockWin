@@ -1,7 +1,8 @@
 //! Arrastar ícones do dock para reordenar, fixar (soltar um app aberto entre os fixados)
 //! ou desafixar (soltar um fixado bem acima do dock), com os outros abrindo espaço animados.
-//! O botão Iniciar (sempre o primeiro) não se move e nada é solto antes dele; Downloads e
-//! Lixeira ficam fora da lista de apps, sempre no fim.
+//! O botão Iniciar também se arrasta: entre os fixados (no começo, no meio ou no fim deles)
+//! ou, levado além do último app, para a ponta direita, depois dos abertos. Ele nunca é
+//! desafixado. Downloads e Lixeira ficam fora da lista de apps, sempre no fim.
 
 use std::time::Instant;
 
@@ -48,11 +49,6 @@ impl Drag {
     pub fn busy(&self) -> bool {
         self.press.is_some()
     }
-}
-
-/// Primeiro índice arrastável: o que vem depois do botão Iniciar.
-fn first(apps: &[App]) -> usize {
-    apps.iter().position(|a| a.source == apps::START).map_or(0, |i| i + 1)
 }
 
 impl crate::Dock {
@@ -109,7 +105,7 @@ impl crate::Dock {
     }
 
     pub(crate) fn drag_down(&mut self, x: f32, y: f32) {
-        let Some(i) = self.hit(x).filter(|&i| i >= first(&self.apps) && i < self.apps.len()) else { return };
+        let Some(i) = self.hit(x).filter(|&i| i < self.apps.len()) else { return };
         let Some(s) = self.slots().into_iter().nth(i) else { return };
         self.drag.press = Some(Press {
             key: self.apps[i].key.clone(),
@@ -170,18 +166,26 @@ impl crate::Dock {
         let Some(p) = &self.drag.press else { return Spot::Out };
         let slots = self.slots();
         let top = render::box_rect(&slots, &self.m, self.pixmap.height() as f32).map_or(0.0, |r| r.1 as f32);
-        if p.was_pinned && y < top - self.m.base * 1.5 {
+        let start = p.key == apps::START;
+        if p.was_pinned && !start && y < top - self.m.base * 1.5 {
             return Spot::Out;
         }
         let cx = x - p.grab;
-        let n = first(&self.apps);
-        let mut k = n;
+        let mut k = 0;
         let mut last_right = None;
-        for (a, s) in self.apps.iter().zip(&slots).skip(n) {
+        for (a, s) in self.apps.iter().zip(&slots) {
             if a.pinned && a.key != p.key {
                 k += (s.x + s.size / 2.0 < cx) as usize;
                 last_right = Some(s.x + s.size);
             }
+        }
+        if start {
+            // Além do centro do último app: ponta direita (depois dos abertos), fora dos fixados.
+            let last = self.apps.iter().zip(&slots).rfind(|(a, _)| a.key != p.key).map(|(_, s)| s.x + s.size / 2.0);
+            return match last {
+                Some(c) if cx > c => Spot::At(self.apps.len() - 1, false),
+                _ => Spot::At(k, true),
+            };
         }
         if p.was_pinned {
             return Spot::At(k, true);
@@ -189,7 +193,7 @@ impl crate::Dock {
         // App aberto: fixa se for levado até perto dos fixados; senão volta ao lugar.
         let bound = match last_right {
             Some(r) => r + (self.m.gap + self.m.base) / 2.0,
-            None => slots.get(n).map_or(0.0, |s| s.x),
+            None => slots.first().map_or(0.0, |s| s.x),
         };
         if cx < bound { Spot::At(k, true) } else { Spot::At(p.home, false) }
     }
@@ -205,7 +209,7 @@ impl crate::Dock {
                 if let Some(mut app) = p.held {
                     if !app.windows.is_empty() {
                         app.pinned = false;
-                        let at = first(&d.apps) + d.apps.iter().filter(|a| a.pinned && a.source != apps::START).count();
+                        let at = d.apps.iter().filter(|a| a.pinned).count();
                         d.apps.insert(at, app);
                     }
                 }

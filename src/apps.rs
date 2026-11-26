@@ -84,21 +84,33 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
     }
     let text = std::fs::read_to_string(&cfg).unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
 
-    let start = App {
+    let start = |pinned: bool| App {
         source: START.to_string(),
         key: START.to_string(),
-        pinned: true,
+        pinned,
         icon: load_icon(START, icon_size),
         windows: Vec::new(),
         sep_after: false,
     };
-    // O botão Iniciar é sempre o primeiro item, antes dos fixados e dos abertos.
-    let mut apps: Vec<App> = vec![start];
+    // Posição do Iniciar: a linha `::start` entre os fixados, `::start-end` na ponta direita
+    // (depois dos abertos) ou, sem nenhuma das duas, o primeiro item.
+    let mut apps: Vec<App> = Vec::new();
+    let (mut placed, mut at_end) = (false, false);
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         if line == SEP_LINE {
-            // O Iniciar já tem separador depois dele.
-            if let Some(last) = apps.last_mut().filter(|a| a.source != START) {
+            if let Some(last) = apps.last_mut() {
                 last.sep_after = true;
+            }
+            continue;
+        }
+        if line == START || line == START_END_LINE {
+            if !placed && !at_end {
+                if line == START {
+                    apps.push(start(true));
+                    placed = true;
+                } else {
+                    at_end = true;
+                }
             }
             continue;
         }
@@ -114,21 +126,36 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
             sep_after: false,
         });
     }
+    if !placed {
+        if at_end {
+            // Na ponta direita ele não é fixado: os abertos entram antes dele (`refresh`).
+            apps.push(start(false));
+        } else {
+            apps.insert(0, start(true));
+        }
+    }
     apps
 }
 
 /// Grava os fixados na ordem do dock: comentários e linhas de apps que não estão no dock
 /// ficam como estão, os fixados (com os separadores `---` depois deles) vão para o fim e
-/// `gone` (desafixado) sai.
+/// `gone` (desafixado) sai. O Iniciar entra como `::start` no lugar dele entre os fixados,
+/// ou como `::start-end` quando está na ponta direita.
 pub fn save_pinned(list: &[App], gone: Option<&str>) {
-    let pinned: Vec<&App> = list.iter().filter(|a| a.pinned && a.source != START).collect();
+    let pinned: Vec<&App> = list.iter().filter(|a| a.pinned).collect();
+    let at_end = list.iter().any(|a| a.source == START && !a.pinned);
     let cfg = config_path();
     let text = std::fs::read_to_string(&cfg).unwrap_or_default();
     let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = String::new();
     for line in text.lines() {
         let l = line.trim();
-        if l != SEP_LINE && !pinned.iter().any(|a| a.source == l) && gone != Some(l) {
+        if l != SEP_LINE
+            && l != START
+            && l != START_END_LINE
+            && !pinned.iter().any(|a| a.source == l)
+            && gone != Some(l)
+        {
             out.push_str(line);
             out.push_str(nl);
         }
@@ -140,6 +167,10 @@ pub fn save_pinned(list: &[App], gone: Option<&str>) {
             out.push_str(SEP_LINE);
             out.push_str(nl);
         }
+    }
+    if at_end {
+        out.push_str(START_END_LINE);
+        out.push_str(nl);
     }
     if let Some(dir) = cfg.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -154,8 +185,11 @@ pub fn toggle_separator(apps: &mut [App], key: &str) {
     save_pinned(apps, None);
 }
 
-/// Item especial do botão Iniciar.
+/// Item especial do botão Iniciar (e a linha do pinned.txt com a posição dele entre os fixados).
 pub const START: &str = "::start";
+
+/// Linha do pinned.txt que põe o Iniciar na ponta direita, depois dos apps abertos.
+pub const START_END_LINE: &str = "::start-end";
 
 /// Nome do app para o balão do dock: descrição do .exe ("Brave Browser") ou nome do app da Store.
 pub fn display_name(source: &str) -> String {
@@ -417,14 +451,15 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
     }
 
     let before = apps.len();
-    apps.retain(|a| a.pinned || !a.windows.is_empty());
+    apps.retain(|a| a.pinned || a.source == START || !a.windows.is_empty());
     changed |= apps.len() != before;
 
     for key in order {
         if let Some((source, windows)) = groups.remove(&key) {
             let icon = load_icon(&source, icon_size);
-            // Abertos não fixados vão para o fim (o Iniciar é sempre o primeiro).
-            apps.push(App {
+            // Abertos não fixados vão para o fim (antes do Iniciar, se ele estiver na ponta).
+            let at = apps.iter().position(|a| a.source == START && !a.pinned).unwrap_or(apps.len());
+            apps.insert(at, App {
                 icon,
                 source,
                 key,
@@ -1049,8 +1084,8 @@ pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
     app.pinned = pin;
     app.sep_after = false;
     if pin || !app.windows.is_empty() {
-        // Depois do Iniciar (índice 0) e dos outros fixados.
-        let at = 1 + apps.iter().filter(|a| a.pinned && a.source != START).count();
+        // Fim do grupo dos fixados (que começa no índice 0 e pode incluir o Iniciar).
+        let at = apps.iter().filter(|a| a.pinned).count();
         apps.insert(at, app);
     }
 }
