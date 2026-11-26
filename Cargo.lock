@@ -11,6 +11,7 @@ dependencies = [
  "tiny-skia",
  "windows",
  "windows-core",
+ "windows-future",
  "windows-numerics",
 ]
 

@@ -17,8 +17,34 @@ use windows::core::{BOOL, Interface, Result};
 
 const DWMWA_USE_HOSTBACKDROPBRUSH: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(17);
 
+thread_local! {
+    /// Fila do WinRT da thread (a Composition precisa dela). Fica aqui, e não no vidro que a
+    /// criou, porque vive até o fim: antes de o processo sair, `shutdown` a encerra.
+    static QUEUE: std::cell::RefCell<Option<DispatcherQueueController>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Encerra a fila da thread (ShutdownQueueAsync) e processa as mensagens até ela terminar.
+/// Sem isso, a janela interna da fila só cai na limpeza das `thread_local` do ExitProcess,
+/// e destruir janelas ali derruba o processo (0xC000000D no ntdll) em toda saída do dock.
+pub fn shutdown() {
+    use windows_future::AsyncStatus;
+    use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage};
+    let Some(controller) = QUEUE.with_borrow_mut(Option::take) else { return };
+    let Ok(action) = controller.ShutdownQueueAsync() else { return };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut msg = MSG::default();
+    while action.Status().is_ok_and(|s| s == AsyncStatus::Started) && std::time::Instant::now() < deadline {
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            MsgWaitForMultipleObjects(None, false, 50, QS_ALLINPUT);
+        }
+    }
+}
+
 pub struct Glass {
-    _queue: Option<DispatcherQueueController>,
     _target: DesktopWindowTarget,
     compositor: Compositor,
     visual: SpriteVisual,
@@ -38,14 +64,14 @@ impl Glass {
             )?;
 
             // Uma fila por thread: o segundo vidro (topbar) reaproveita a do primeiro.
-            let queue = match DispatcherQueue::GetForCurrentThread() {
-                Ok(_) => None,
-                Err(_) => Some(CreateDispatcherQueueController(DispatcherQueueOptions {
+            if DispatcherQueue::GetForCurrentThread().is_err() {
+                let controller = CreateDispatcherQueueController(DispatcherQueueOptions {
                     dwSize: size_of::<DispatcherQueueOptions>() as u32,
                     threadType: DQTYPE_THREAD_CURRENT,
                     apartmentType: DQTAT_COM_STA,
-                })?),
-            };
+                })?;
+                QUEUE.with_borrow_mut(|q| *q = Some(controller));
+            }
             let compositor = Compositor::new()?;
             let target = compositor
                 .cast::<ICompositorDesktopInterop>()?
@@ -60,7 +86,7 @@ impl Glass {
             visual.SetClip(&compositor.CreateGeometricClipWithGeometry(&shape)?)?;
             target.SetRoot(&visual)?;
 
-            Ok(Self { _queue: queue, _target: target, compositor, visual, shape })
+            Ok(Self { _target: target, compositor, visual, shape })
         }
     }
 

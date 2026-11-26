@@ -227,6 +227,7 @@ pub fn relaunch(main: HWND) {
     let Ok(exe) = std::env::current_exe() else { return };
     let pid = unsafe { GetCurrentProcessId() };
     if std::process::Command::new(exe).arg("--after").arg(pid.to_string()).spawn().is_ok() {
+        crate::log::line("atualização instalada: reabrindo na versão nova");
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(main);
         }

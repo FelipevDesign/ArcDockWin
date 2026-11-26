@@ -201,7 +201,8 @@ thread_local! {
 /// Descarta o render target compartilhado; o próximo `shared_d2d` cria outro. Um alvo que
 /// falhou no BindDC ou no EndDraw (ex.: D2DERR_RECREATE_TARGET) não volta sozinho: sem
 /// isso, o texto de todas as barras (relógio, CPU/RAM, glifos) sumia até reabrir o dock.
-fn reset_shared_d2d() {
+/// Também solta o par na saída do dock (`teardown`), antes da limpeza das `thread_local`.
+pub(crate) fn reset_shared_d2d() {
     D2D.with_borrow_mut(|slot| *slot = None);
 }
 
