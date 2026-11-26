@@ -266,6 +266,9 @@ pub enum Module {
     Codex,
     /// Botão que mostra a área de trabalho (Win+D), na ponta direita como no Windows.
     Desktop,
+    /// Idioma de entrada (layout de teclado) do app em foco; o clique troca de layout.
+    /// Só aparece com 2+ layouts instalados.
+    Keyboard,
 }
 
 /// Zona da barra: a ordem dos módulos vale dentro de cada uma.
@@ -298,8 +301,16 @@ impl Zone {
 }
 
 impl Module {
-    pub const ALL: [Module; 7] =
-        [Module::Stats, Module::Clock, Module::Tray, Module::Control, Module::Claude, Module::Codex, Module::Desktop];
+    pub const ALL: [Module; 8] = [
+        Module::Stats,
+        Module::Clock,
+        Module::Tray,
+        Module::Control,
+        Module::Claude,
+        Module::Codex,
+        Module::Desktop,
+        Module::Keyboard,
+    ];
 
     fn key(self) -> &'static str {
         match self {
@@ -310,6 +321,7 @@ impl Module {
             Module::Claude => "claude",
             Module::Codex => "codex",
             Module::Desktop => "desktop",
+            Module::Keyboard => "keyboard",
         }
     }
 
@@ -323,6 +335,7 @@ impl Module {
             Module::Claude => "Uso do Claude",
             Module::Codex => "Uso do Codex",
             Module::Desktop => "Mostrar área de trabalho",
+            Module::Keyboard => "Idioma do teclado",
         }
     }
 
@@ -333,6 +346,7 @@ impl Module {
             Module::Claude => "Claude",
             Module::Codex => "Codex",
             Module::Desktop => "Área de trabalho",
+            Module::Keyboard => "Teclado",
             m => m.label(),
         }
     }
@@ -345,7 +359,8 @@ impl Module {
             Module::Tray => (Zone::Right, 0),
             Module::Control => (Zone::Right, 1),
             Module::Desktop => (Zone::Right, 2),
-            Module::Claude | Module::Codex => (Zone::Right, 0),
+            // Depois da bandeja e antes da Central, como na barra de tarefas do Windows.
+            Module::Claude | Module::Codex | Module::Keyboard => (Zone::Right, 0),
         }
     }
 }

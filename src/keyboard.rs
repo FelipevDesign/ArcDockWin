@@ -1,0 +1,265 @@
+//! Idioma de entrada (layout de teclado) na barra do topo, como o indicador "POR/ENG" da
+//! barra de tarefas do Windows: mostra o layout do app em foco e o clique abre a lista dos
+//! layouts instalados para trocar. Com um layout só, o módulo não aparece (igual ao Windows).
+
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::Globalization::{
+    GetLocaleInfoEx, LCIDToLocaleName, LOCALE_ALLOW_NEUTRAL_NAMES, LOCALE_SISO639LANGNAME,
+    LOCALE_SLOCALIZEDDISPLAYNAME,
+};
+use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW,
+    RegGetValueW, RegOpenKeyExW,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardLayoutList, HKL};
+use windows::Win32::UI::Shell::SHLoadIndirectString;
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetForegroundWindow, GetWindowThreadProcessId, MF_CHECKED,
+    MF_STRING, PostMessageW, SetForegroundWindow, TPM_CENTERALIGN, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu,
+    WM_INPUTLANGCHANGEREQUEST,
+};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
+
+/// Layouts instalados, na ordem do Windows (a mesma do Win+Espaço).
+pub fn layouts() -> Vec<HKL> {
+    unsafe {
+        let n = GetKeyboardLayoutList(None);
+        if n <= 0 {
+            return Vec::new();
+        }
+        let mut list = vec![HKL::default(); n as usize];
+        let got = GetKeyboardLayoutList(Some(&mut list));
+        list.truncate(got.max(0) as usize);
+        list
+    }
+}
+
+/// Layout do app em primeiro plano (o que recebe o que se digita). None com uma janela do
+/// próprio dock em foco (o menu de layouts, Configurações): o layout dela não é o do usuário.
+pub fn current() -> Option<HKL> {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() {
+            return Some(GetKeyboardLayout(0));
+        }
+        let mut pid = 0u32;
+        let thread = GetWindowThreadProcessId(fg, Some(&mut pid));
+        (pid != GetCurrentProcessId()).then(|| GetKeyboardLayout(thread))
+    }
+}
+
+/// Idioma do layout (palavra baixa do HKL).
+fn lang_id(hkl: HKL) -> u32 {
+    (hkl.0 as usize & 0xffff) as u32
+}
+
+fn locale_name(hkl: HKL) -> Option<Vec<u16>> {
+    let mut buf = [0u16; 85];
+    // n conta o NUL do fim, que fica: GetLocaleInfoEx precisa dele.
+    let n = unsafe { LCIDToLocaleName(lang_id(hkl), Some(&mut buf), LOCALE_ALLOW_NEUTRAL_NAMES) };
+    (n > 1).then(|| buf[..n as usize].to_vec())
+}
+
+fn locale_info(hkl: HKL, lctype: u32) -> Option<String> {
+    let name = locale_name(hkl)?;
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetLocaleInfoEx(PCWSTR(name.as_ptr()), lctype, Some(&mut buf)) };
+    (n > 1).then(|| String::from_utf16_lossy(&buf[..n as usize - 1]))
+}
+
+/// Sigla da barra: idioma em duas letras ("PT", "EN"). Com 2+ layouts do mesmo idioma, cada
+/// um ganha a sigla do layout ("PT ABNT2", "PT INTL") e, se ainda empatarem, o número dele.
+pub fn short_name(hkl: HKL) -> String {
+    let lang = |h: HKL| locale_info(h, LOCALE_SISO639LANGNAME).unwrap_or_else(|| "??".into()).to_uppercase();
+    let all = layouts();
+    let mine = lang(hkl);
+    let same_lang: Vec<HKL> = all.into_iter().filter(|&h| lang(h) == mine).collect();
+    if same_lang.len() <= 1 {
+        return mine;
+    }
+    let label = |h: HKL| match layout_tag(h) {
+        Some(tag) => format!("{mine} {tag}"),
+        None => mine.clone(),
+    };
+    let me = label(hkl);
+    let twins: Vec<HKL> = same_lang.into_iter().filter(|&h| label(h) == me).collect();
+    match twins.iter().position(|&h| h == hkl) {
+        Some(i) if twins.len() > 1 && i > 0 => format!("{me} {}", i + 1),
+        _ => me,
+    }
+}
+
+/// Sigla curta do layout: a última palavra do nome (de dentro dos parênteses, se houver).
+/// "Português (Brasil ABNT2)" -> "ABNT2"; "Estados Unidos (internacional)" -> "INTL".
+fn layout_tag(hkl: HKL) -> Option<String> {
+    let name = layout_name(hkl)?;
+    let inner = name.rsplit_once('(').map_or(name.as_str(), |(_, r)| r.trim_end_matches(')'));
+    let word = inner.split([' ', '-']).rfind(|w| !w.is_empty())?.to_uppercase();
+    Some(if word.starts_with("INTERN") {
+        "INTL".into()
+    } else if word.chars().count() > 6 {
+        word.chars().take(4).collect()
+    } else {
+        word
+    })
+}
+
+/// Nome do menu: "Português (Brasil) - Português (Brasil ABNT2)".
+pub fn display_name(hkl: HKL) -> String {
+    let lang = locale_info(hkl, LOCALE_SLOCALIZEDDISPLAYNAME).unwrap_or_else(|| format!("{:04X}", lang_id(hkl)));
+    match layout_name(hkl) {
+        Some(layout) if layout != lang => format!("{lang} - {layout}"),
+        _ => lang,
+    }
+}
+
+const LAYOUTS_KEY: &str = "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layouts";
+
+/// Nome do layout físico no registro (`Layout Display Name`, traduzido; senão `Layout Text`).
+/// A palavra alta do HKL é o id do layout (00000416) ou, com F no começo, o `Layout Id` de
+/// uma variante (US-Internacional é F001 -> 00020409).
+fn layout_name(hkl: HKL) -> Option<String> {
+    let device = ((hkl.0 as usize >> 16) & 0xffff) as u32;
+    let klid = if device & 0xf000 == 0xf000 {
+        find_klid(device & 0x0fff)?
+    } else {
+        format!("{device:08X}")
+    };
+    let sub = HSTRING::from(format!("{LAYOUTS_KEY}\\{klid}"));
+    if let Some(indirect) = reg_string(&sub, "Layout Display Name") {
+        let mut buf = [0u16; 256];
+        let src = HSTRING::from(indirect);
+        if unsafe { SHLoadIndirectString(&src, &mut buf, None) }.is_ok() {
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let s = String::from_utf16_lossy(&buf[..len]);
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    reg_string(&sub, "Layout Text")
+}
+
+fn reg_string(sub: &HSTRING, value: &str) -> Option<String> {
+    let mut buf = [0u16; 512];
+    let mut size = (buf.len() * 2) as u32;
+    let value = HSTRING::from(value);
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            sub,
+            &value,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    }
+    .is_ok();
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (ok && len > 0).then(|| String::from_utf16_lossy(&buf[..len]))
+}
+
+/// KLID (subchave) cujo `Layout Id` é `id`.
+fn find_klid(id: u32) -> Option<String> {
+    unsafe {
+        let mut key = HKEY::default();
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, &HSTRING::from(LAYOUTS_KEY), None, KEY_READ, &mut key).ok().ok()?;
+        let mut found = None;
+        let mut i = 0;
+        loop {
+            let mut name = [0u16; 64];
+            let mut len = name.len() as u32;
+            if RegEnumKeyExW(key, i, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None).is_err() {
+                break;
+            }
+            i += 1;
+            let klid = String::from_utf16_lossy(&name[..len as usize]);
+            let sub = HSTRING::from(format!("{LAYOUTS_KEY}\\{klid}"));
+            let mut text = [0u16; 16];
+            let mut size = (text.len() * 2) as u32;
+            // `Layout Id` é REG_SZ ("0001"); por garantia aceita DWORD também.
+            let ok = RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                &sub,
+                &HSTRING::from("Layout Id"),
+                RRF_RT_REG_SZ | RRF_RT_REG_DWORD,
+                None,
+                Some(text.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+            .is_ok();
+            if !ok {
+                continue;
+            }
+            let value = if size == 4 {
+                text[0] as u32 | (text[1] as u32) << 16
+            } else {
+                let len = text.iter().position(|&c| c == 0).unwrap_or(0);
+                u32::from_str_radix(String::from_utf16_lossy(&text[..len]).trim(), 16).unwrap_or(u32::MAX)
+            };
+            if value == id {
+                found = Some(klid);
+                break;
+            }
+        }
+        let _ = RegCloseKey(key);
+        found
+    }
+}
+
+/// Pede ao app `target` (e, com a opção padrão do Windows de um idioma para todos os apps,
+/// ao sistema todo) que troque para `hkl`.
+pub fn activate(target: HWND, hkl: HKL) {
+    if target.is_invalid() {
+        return;
+    }
+    unsafe {
+        let _ = SetForegroundWindow(target);
+        let _ = PostMessageW(Some(target), WM_INPUTLANGCHANGEREQUEST, WPARAM(0), LPARAM(hkl.0 as isize));
+    }
+}
+
+/// Próximo layout da lista (a roda do mouse sobre o módulo), no app em foco.
+pub fn cycle(forward: bool) {
+    let list = layouts();
+    if list.len() < 2 {
+        return;
+    }
+    let cur = current();
+    let i = list.iter().position(|&h| Some(h) == cur).unwrap_or(0);
+    let n = list.len();
+    let next = if forward { (i + 1) % n } else { (i + n - 1) % n };
+    activate(unsafe { GetForegroundWindow() }, list[next]);
+}
+
+/// Menu com os layouts (o atual marcado) abaixo de `anchor`; a escolha vale para o app que
+/// estava em foco antes do menu (o menu precisa tomar o foco para fechar direito).
+pub fn menu(owner: HWND, anchor: POINT) {
+    let list = layouts();
+    if list.is_empty() {
+        return;
+    }
+    unsafe {
+        let target = GetForegroundWindow();
+        let cur = current();
+        let Ok(menu) = CreatePopupMenu() else { return };
+        for (i, &h) in list.iter().enumerate() {
+            let flags = if Some(h) == cur { MF_STRING | MF_CHECKED } else { MF_STRING };
+            // & no menu vira atalho de teclado: dobra para aparecer como texto.
+            let text = HSTRING::from(display_name(h).replace('&', "&&"));
+            let _ = AppendMenuW(menu, flags, i + 1, &text);
+        }
+        let _ = SetForegroundWindow(owner);
+        let flags = TPM_RETURNCMD | TPM_TOPALIGN | TPM_CENTERALIGN;
+        let cmd = TrackPopupMenu(menu, flags, anchor.x, anchor.y, None, owner, None).0 as usize;
+        let _ = DestroyMenu(menu);
+        if let Some(&h) = cmd.checked_sub(1).and_then(|i| list.get(i)) {
+            activate(target, h);
+        } else if !target.is_invalid() {
+            // Menu fechado sem escolha: devolve o foco ao app.
+            let _ = SetForegroundWindow(target);
+        }
+    }
+}

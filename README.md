@@ -28,7 +28,8 @@ Windows taskbar in daily use.
 - Smooth magnification follows pointer movement; use the mouse wheel over an app with multiple windows to cycle through them.
 - **Bouncing icon** when an app asks for attention, with a red dot until you open the app.
 - **Drag to reorder**: drop a running app between the pinned ones to pin it, or drag it upwards to unpin it.
-  The launcher is always the last app.
+  The Start button can be dragged too: anywhere among the pinned apps, or past the last app to sit at the right
+  end of the dock, after the open apps.
 - **Trash and Downloads** at the end of the dock, with a panel of recent files.
 - Hides itself when a window touches it; with auto-hide on, moving the mouse to any point of the bottom edge
   brings it back. It stays visible while the Downloads panel is open, and clicking the stack again closes the panel.
@@ -50,6 +51,8 @@ crashes.
 - **Takes the colour of the focused app** (10% darker, to separate the bar from the app), the moment you switch windows.
 - Built from **modules**: CPU/RAM, Clock, Tray, Control Center and the optional Claude and Codex usage. Each one can
   be turned off, placed in the left, centre or right zone, and ordered inside its zone.
+- **Keyboard language** module (like the "ENG/POR" indicator on the Windows taskbar): shows the layout of the
+  focused app; click it to pick another layout, or scroll over it to cycle. Hidden when only one layout is installed.
 - Clock with a calendar when clicked; 24 h or 12 h, optional seconds and date.
 - Tray icons with a panel for hidden icons and a choice of which ones stay on the bar. When the bar runs out of
   room, tray icons fold into the arrow on their own (your choice of visible icons is kept) and CPU/RAM is the last
