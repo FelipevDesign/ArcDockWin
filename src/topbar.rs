@@ -1220,6 +1220,13 @@ pub fn hwnd() -> HWND {
     MAIN.get()
 }
 
+/// A mesma janela, lida de qualquer thread (o `MAIN` é por thread).
+static MAIN_ANY: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn hwnd_any_thread() -> HWND {
+    HWND(MAIN_ANY.load(std::sync::atomic::Ordering::Acquire) as *mut c_void)
+}
+
 /// Um painel abriu ou fechou: refaz o realce do item dono dele nas barras.
 pub fn panel_visibility_changed() {
     for_bars(|b| b.redraw());
@@ -1927,6 +1934,7 @@ fn rebuild() {
     }
     if let Some(b) = bars.first() {
         MAIN.set(b.hwnd);
+        MAIN_ANY.store(b.hwnd.0 as isize, std::sync::atomic::Ordering::Release);
     }
     BARS.with(|b| *b.borrow_mut() = bars);
 }
@@ -2007,6 +2015,7 @@ pub fn destroy() {
     KEYBOARD_SEEN.set((0, 0));
     KEYBOARD.with_borrow_mut(String::clear);
     MAIN.set(HWND(std::ptr::null_mut()));
+    MAIN_ANY.store(0, std::sync::atomic::Ordering::Release);
     TRAY_BAR.set(HWND(std::ptr::null_mut()));
 }
 

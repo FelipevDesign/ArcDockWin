@@ -143,7 +143,8 @@ fn windows_of(pid: Option<u32>) -> Vec<HWND> {
 }
 
 fn post_bar(what: usize) {
-    let h = crate::topbar::hwnd();
+    // Chamada das threads de busca: a janela vem da variável comum, não da da thread.
+    let h = crate::topbar::hwnd_any_thread();
     if !h.is_invalid() {
         unsafe {
             let _ = PostMessageW(Some(h), WM_EXTRA, WPARAM(what), LPARAM(0));
@@ -1101,6 +1102,14 @@ static WEATHER: Mutex<Option<Weather>> = Mutex::new(None);
 static WEATHER_BUSY: Mutex<bool> = Mutex::new(false);
 /// Cidades achadas na busca do painel: (nome mostrado, lat, lon, nome curto).
 static CITY_RESULTS: Mutex<Vec<(String, String, String, String)>> = Mutex::new(Vec::new());
+/// O que está em andamento, mostrado no painel na hora ("Procurando…", "Trocando para…").
+static WEATHER_STATUS: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_status(s: Option<String>) {
+    if let Ok(mut st) = WEATHER_STATUS.lock() {
+        *st = s;
+    }
+}
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -1224,6 +1233,7 @@ pub fn search_city(name: &str) {
     if name.is_empty() {
         return;
     }
+    set_status(Some(format!("{} “{name}”…", tr("Procurando"))));
     std::thread::spawn(move || {
         let path = format!("/v1/search?count=6&language=pt&name={}", url_encode(&name));
         let mut found = Vec::new();
@@ -1246,16 +1256,24 @@ pub fn search_city(name: &str) {
         if let Ok(mut r) = CITY_RESULTS.lock() {
             *r = found;
         }
+        set_status(None);
         post_bar(1);
     });
 }
 
 /// Usa a cidade (ou, com `None`, volta à localização pela internet) e busca o clima.
 pub fn set_weather_place(place: Option<(String, String, String)>) {
+    let label = place.as_ref().map(|p| p.2.clone()).unwrap_or_else(|| tr("a sua localização"));
+    set_status(Some(format!("{} {label}…", tr("Trocando para"))));
     let v = place.map(|(lat, lon, name)| format!("{lat};{lon};{name}")).unwrap_or_default();
     config::set_raw("weather_place", v);
     if let Ok(mut r) = CITY_RESULTS.lock() {
         r.clear();
+    }
+    // O clima da cidade antiga sai da tela até chegar o da nova.
+    let _ = std::fs::remove_file(weather_file());
+    if let Ok(mut w) = WEATHER.lock() {
+        *w = None;
     }
     refresh_weather();
 }
@@ -1335,14 +1353,32 @@ fn load_cache() -> Option<Weather> {
     parse_weather(lines.next()?, place, imperial, at)
 }
 
+/// Pedido que chegou com uma busca já andando (ex.: trocou de cidade): faz de novo no fim.
+static WEATHER_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn fetch_weather_now() {
     {
         let Ok(mut busy) = WEATHER_BUSY.lock() else { return };
         if *busy {
+            WEATHER_AGAIN.store(true, Ordering::Release);
             return;
         }
         *busy = true;
     }
+    loop {
+        fetch_weather_once();
+        if !WEATHER_AGAIN.swap(false, Ordering::AcqRel) {
+            break;
+        }
+    }
+    if let Ok(mut busy) = WEATHER_BUSY.lock() {
+        *busy = false;
+    }
+    set_status(None);
+    post_bar(1);
+}
+
+fn fetch_weather_once() {
     let w = (|| {
         let (lat, lon, place) = weather_place()?;
         let imperial = extras::choice("bar_temp_unit") == 1;
@@ -1366,10 +1402,6 @@ fn fetch_weather_now() {
     {
         *slot = Some(w);
     }
-    if let Ok(mut busy) = WEATHER_BUSY.lock() {
-        *busy = false;
-    }
-    post_bar(1);
 }
 
 /// Direção do vento em pontos cardeais (de onde ele vem).
@@ -1401,6 +1433,9 @@ impl PanelContent for WeatherPanel {
     fn build(&mut self) -> Vec<Widget> {
         use crate::panel::{Cell, CellStyle};
         let mut out = Vec::new();
+        if let Some(st) = WEATHER_STATUS.lock().ok().and_then(|s| s.clone()) {
+            out.push(Widget::Label(st));
+        }
         let results = CITY_RESULTS.lock().map(|r| r.clone()).unwrap_or_default();
         if !results.is_empty() {
             out.push(Widget::Heading { text: tr("Escolha a cidade"), buttons: vec![(glyph::CHEVRON_LEFT, W_PICK - 1)] });
@@ -1514,7 +1549,7 @@ impl PanelContent for WeatherPanel {
         match ev {
             Event::Submit(W_CITY, text) if !text.trim().is_empty() => {
                 search_city(text);
-                false
+                true
             }
             Event::Click(id) if id == W_PICK - 1 => {
                 if let Ok(mut r) = CITY_RESULTS.lock() {
