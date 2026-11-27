@@ -472,3 +472,12 @@ pub fn auto_update() -> bool {
 pub fn set_auto_update(on: bool) {
     set_flag("auto_update", on);
 }
+
+/// Valor cru de uma chave (opções extras, `extras.rs`).
+pub fn raw(key: &str) -> Option<String> {
+    get(key)
+}
+
+pub fn set_raw(key: &str, value: String) {
+    set(key, value);
+}

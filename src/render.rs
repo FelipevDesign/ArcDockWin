@@ -29,14 +29,21 @@ impl Metrics {
         let (base, gap) = (config::icon_size() * scale, config::icon_gap() * scale);
         let pad = config::dock_padding() * scale;
         let zoom = if config::magnify() { config::magnify_scale() } else { 1.0 };
+        let pad_x = pad + config::dock_side_padding() * scale;
+        // Ilhas: o espaço do separador vira o vão entre dois fundos.
+        let sep = if crate::extras::on("fx_islands") {
+            (crate::extras::num("fx_islands_gap") * scale + 2.0 * pad_x - gap).max(gap)
+        } else {
+            gap + 1.0 * scale
+        };
         Self {
             base,
             max: base * zoom,
             gap,
             // Espaço extra em volta do divisor: o grupo fica bem separado, como no macOS.
-            sep: gap + 1.0 * scale,
+            sep,
             pad,
-            pad_x: pad + config::dock_side_padding() * scale,
+            pad_x,
             margin: config::dock_margin() * scale,
             range: 2.0 * (base + gap), // 2 slots de cada lado
             // No máximo meia altura: o máximo vira uma pílula.
@@ -60,10 +67,19 @@ pub struct Theme {
     /// Pontinhos do app em foco: cor de destaque do Windows.
     accent: [u8; 4],
     pub light: bool,
+    /// Estilo "Mínimo": sem fundo nem vidro, só os ícones.
+    pub minimal: bool,
 }
 
 impl Theme {
     pub fn new(light: bool, accent: Option<[u8; 4]>) -> Self {
+        let style = crate::extras::choice("fx_style");
+        let light = match style {
+            1 => false,
+            2 => true,
+            _ => light,
+        };
+        let minimal = style == 3;
         // Opacidade da tinta: a das Configurações (padrão 50%).
         let alpha = (crate::config::dock_opacity() / 100.0 * 255.0).round() as u8;
         let (tint, border, dot, divider, sheen) = if light {
@@ -72,7 +88,12 @@ impl Theme {
             // Vidro escuro clássico (o brilho "sheen" fica zerado por padrão).
             ([40, 40, 44, alpha], [255, 255, 255, 58], [255, 255, 255, 210], [255, 255, 255, 60], [0, 0, 0, 0])
         };
-        Self { tint, border, dot, divider, sheen, accent: accent.unwrap_or(dot), light }
+        let (tint, border) = if minimal { ([0, 0, 0, 0], [0, 0, 0, 0]) } else { (tint, border) };
+        // Opacidade dos indicadores de app aberto.
+        let k = crate::extras::num("fx_dot_level") / 100.0;
+        let fade = |c: [u8; 4]| [c[0], c[1], c[2], (c[3] as f32 * k).round() as u8];
+        let accent = accent.unwrap_or(dot);
+        Self { tint, border, dot: fade(dot), divider, sheen, accent: fade(accent), light, minimal }
     }
 }
 
@@ -131,6 +152,45 @@ pub fn box_rect(slots: &[Slot], m: &Metrics, height: f32) -> Option<(i32, i32, i
     ))
 }
 
+/// Fundos separados (modo ilhas): um retângulo por grupo entre separadores, ou nenhum.
+pub fn islands(slots: &[Slot], seps: &[usize], m: &Metrics, height: f32) -> Vec<(i32, i32, i32, i32)> {
+    if !crate::extras::on("fx_islands") || seps.is_empty() || slots.is_empty() {
+        return Vec::new();
+    }
+    let bottom = height - m.margin;
+    let top = (bottom - m.base - 2.0 * m.pad).round() as i32;
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 0..slots.len() {
+        if seps.contains(&i) || i + 1 == slots.len() {
+            let (a, b) = (&slots[start], &slots[i]);
+            out.push(((a.x - m.pad_x).round() as i32, top, (b.x + b.size + m.pad_x).round() as i32, bottom.round() as i32));
+            start = i + 1;
+        }
+    }
+    out
+}
+
+/// Cor média de um ícone (pixels visíveis, puxando para as mais saturadas).
+pub fn icon_color(icon: &Pixmap) -> Option<[u8; 3]> {
+    let (mut r, mut g, mut b, mut wsum) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for p in icon.pixels().iter().step_by(3) {
+        let a = p.alpha();
+        if a < 128 {
+            continue;
+        }
+        let c = p.demultiply();
+        let (pr, pg, pb) = (c.red() as f32, c.green() as f32, c.blue() as f32);
+        let sat = pr.max(pg).max(pb) - pr.min(pg).min(pb);
+        let w = 1.0 + sat / 16.0;
+        r += pr * w;
+        g += pg * w;
+        b += pb * w;
+        wsum += w;
+    }
+    (wsum > 0.0).then(|| [(r / wsum) as u8, (g / wsum) as u8, (b / wsum) as u8])
+}
+
 pub fn draw(
     pm: &mut Pixmap,
     slots: &[Slot],
@@ -158,6 +218,26 @@ pub fn draw(
         }
     }
 
+    // Cor dinâmica: a do ícone do app em foco, misturada na borda (e um véu bem leve no fundo).
+    let dyn_color = crate::extras::on("fx_dyncolor")
+        .then(|| focus.and_then(|i| apps.get(i)).and_then(|a| a.icon.as_ref()).and_then(icon_color))
+        .flatten();
+    let k = crate::extras::num("fx_dyncolor_level") / 100.0;
+    let mix = |c: [u8; 4], to: [u8; 3], f: f32| {
+        let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f).round() as u8;
+        [m(c[0], to[0]), m(c[1], to[1]), m(c[2], to[2]), c[3].max((255.0 * f * 0.7) as u8)]
+    };
+    let border_color = match dyn_color {
+        Some(c) if !theme.minimal => mix(theme.border, c, k),
+        _ => theme.border,
+    };
+    let isl = islands(slots, seps, m, pm.height() as f32);
+    let backs: Vec<(f32, f32, f32, f32)> = if isl.is_empty() {
+        vec![(l, t, r, b)]
+    } else {
+        isl.iter().map(|&(a, b_, c, d)| (a as f32, b_ as f32, c as f32, d as f32)).collect()
+    };
+    for &(l, t, r, b) in &backs {
     // Vidro: o desfoque vem da janela de fundo; aqui só a tinta e a borda.
     if let Some(bg) = rounded_rect(l, t, r - l, b - t, m.radius) {
         pm.fill_path(&bg, &solid(theme.tint), FillRule::Winding, id, None);
@@ -178,13 +258,19 @@ pub fn draw(
     }
     if let Some(border) = rounded_rect(l + 0.5, t + 0.5, r - l - 1.0, b - t - 1.0, (m.radius - 0.5).max(0.0)) {
         let stroke = Stroke { width: 1.0, ..Default::default() };
-        pm.stroke_path(&border, &solid(theme.border), &stroke, id, None);
+        pm.stroke_path(&border, &solid(border_color), &stroke, id, None);
+    }
+    if let (Some(c), false) = (dyn_color, theme.minimal)
+        && let Some(bg) = rounded_rect(l, t, r - l, b - t, m.radius)
+    {
+        pm.fill_path(&bg, &solid([c[0], c[1], c[2], (k * 40.0) as u8]), FillRule::Winding, id, None);
+    }
     }
 
     // Divisores: 1 px, quase a altura do ícone, centralizados no fundo.
     let div_h = (m.base * 0.9).round();
     let div_top = ((t + b - div_h) / 2.0).round();
-    for s in seps.iter().filter_map(|&s| slots.get(s)) {
+    for s in seps.iter().filter(|_| isl.is_empty()).filter_map(|&s| slots.get(s)) {
         let x = (s.x + s.size + (m.gap + m.sep) / 2.0).round() + 0.5;
         if let Some(rect) = Rect::from_xywh(x - 0.5, div_top, 1.0, div_h) {
             pm.fill_rect(rect, &solid(theme.divider), id, None);
@@ -230,6 +316,19 @@ pub fn draw(
             let h = m.dot * 1.5;
             let x = sx + slot.size / 2.0 - w / 2.0;
             let y = icon_bottom + m.pad / 2.0 + 0.5 - h / 2.0;
+            // Luz sob o app em foco: anéis cada vez maiores e mais fracos, na cor do indicador.
+            if focus == Some(i) && crate::extras::on("fx_glow") {
+                let level = crate::extras::num("fx_glow_level") / 100.0;
+                let [cr, cg, cb, _] = color;
+                let steps = 6;
+                for k in (1..=steps).rev() {
+                    let e = m.dot * 1.4 * k as f32;
+                    let a = (level * 70.0 / (k as f32 + 1.0)).round() as u8;
+                    if let Some(p) = rounded_rect(x - e, y - e * 0.6, w + 2.0 * e, h + 1.2 * e, (h + 1.2 * e) / 2.0) {
+                        pm.fill_path(&p, &solid([cr, cg, cb, a]), FillRule::Winding, id, None);
+                    }
+                }
+            }
             if let Some(indicator) = rounded_rect(x, y, w, h, h / 2.0) {
                 pm.fill_path(&indicator, &solid(color), FillRule::Winding, id, None);
             }

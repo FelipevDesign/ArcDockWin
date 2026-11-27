@@ -7,6 +7,11 @@ mod colordb;
 mod config;
 mod control;
 mod drag;
+mod extras;
+mod tools;
+mod clipboard;
+mod zones;
+mod quicklook;
 mod bluetooth;
 mod brightness;
 mod calendar;
@@ -428,7 +433,15 @@ impl Dock {
         let focus = self.apps.iter().position(|a| a.windows.contains(&fg));
         let items: Vec<&App> = self.apps.iter().chain(visible_stacks(&self.stacks.items)).collect();
         render::draw(&mut self.pixmap, &slots, &seps, &items, &self.m, &self.theme, self.hover, focus, self.animating);
-        self.update_glass(render::box_rect(&slots, &self.m, self.pixmap.height() as f32));
+        let rect = render::box_rect(&slots, &self.m, self.pixmap.height() as f32);
+        self.update_glass(if self.theme.minimal { None } else { rect });
+        // Ilhas: vidros separados, em coordenadas da janela de vidro.
+        if let (Some(fx), Some((bl, _, _, _))) = (&self.glass_fx, rect) {
+            let isl = render::islands(&slots, &seps, &self.m, self.pixmap.height() as f32);
+            let parts: Vec<(i32, i32)> = isl.iter().map(|&(l, _, r, _)| (l - bl, r - l)).collect();
+            let h = isl.first().map(|&(_, t, _, b)| (b - t) as f32).unwrap_or(0.0);
+            fx.set_islands(&parts, h, self.m.radius);
+        }
 
         // RGBA (tiny-skia) -> BGRA (GDI), ambos com alfa pré-multiplicado.
         let src = self.pixmap.data();

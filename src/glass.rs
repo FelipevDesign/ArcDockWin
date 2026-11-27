@@ -6,7 +6,8 @@ use std::ffi::c_void;
 use windows_numerics::Vector2;
 use windows::System::{DispatcherQueue, DispatcherQueueController};
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::UI::Composition::{Compositor, CompositionRoundedRectangleGeometry, SpriteVisual};
+use windows::UI::Composition::{CompositionRoundedRectangleGeometry, Compositor, ContainerVisual, SpriteVisual};
+use std::cell::RefCell;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
@@ -21,8 +22,11 @@ pub struct Glass {
     _queue: Option<DispatcherQueueController>,
     _target: DesktopWindowTarget,
     compositor: Compositor,
+    root: ContainerVisual,
     visual: SpriteVisual,
     shape: CompositionRoundedRectangleGeometry,
+    /// Modo ilhas: um vidro por grupo (x, largura) e o último pedido, para não repetir.
+    islands: RefCell<(Vec<(SpriteVisual, CompositionRoundedRectangleGeometry)>, Vec<(i32, i32)>)>,
 }
 
 impl Glass {
@@ -58,9 +62,12 @@ impl Glass {
             let shape = compositor.CreateRoundedRectangleGeometry()?;
             shape.SetCornerRadius(Vector2 { X: radius, Y: radius })?;
             visual.SetClip(&compositor.CreateGeometricClipWithGeometry(&shape)?)?;
-            target.SetRoot(&visual)?;
+            let root = compositor.CreateContainerVisual()?;
+            root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+            root.Children()?.InsertAtTop(&visual)?;
+            target.SetRoot(&root)?;
 
-            Ok(Self { _queue: queue, _target: target, compositor, visual, shape })
+            Ok(Self { _queue: queue, _target: target, compositor, root, visual, shape, islands: RefCell::new((Vec::new(), Vec::new())) })
         }
     }
 
@@ -83,6 +90,38 @@ impl Glass {
 
     /// Opacidade do vidro (0..1), usada na animação de abrir dos painéis.
     pub fn set_opacity(&self, opacity: f32) {
-        let _ = self.visual.SetOpacity(opacity);
+        let _ = self.root.SetOpacity(opacity);
+    }
+
+    /// Ilhas: um retângulo de vidro por grupo, `(x, largura)` dentro da janela, altura `h`.
+    /// Lista vazia volta ao vidro único.
+    pub fn set_islands(&self, parts: &[(i32, i32)], h: f32, radius: f32) {
+        let Ok(mut st) = self.islands.try_borrow_mut() else { return };
+        if st.1 == parts {
+            return;
+        }
+        st.1 = parts.to_vec();
+        let Ok(children) = self.root.Children() else { return };
+        for (v, _) in st.0.drain(..) {
+            let _ = children.Remove(&v);
+        }
+        let _ = self.visual.SetIsVisible(parts.is_empty());
+        for &(x, w) in parts {
+            let make = || -> Result<(SpriteVisual, CompositionRoundedRectangleGeometry)> {
+                let v = self.compositor.CreateSpriteVisual()?;
+                v.SetBrush(&self.compositor.CreateHostBackdropBrush()?)?;
+                v.SetOffset(windows_numerics::Vector3 { X: x as f32, Y: 0.0, Z: 0.0 })?;
+                v.SetSize(Vector2 { X: w as f32, Y: h })?;
+                let g = self.compositor.CreateRoundedRectangleGeometry()?;
+                g.SetCornerRadius(Vector2 { X: radius, Y: radius })?;
+                g.SetSize(Vector2 { X: w as f32, Y: h })?;
+                v.SetClip(&self.compositor.CreateGeometricClipWithGeometry(&g)?)?;
+                children.InsertAtTop(&v)?;
+                Ok((v, g))
+            };
+            if let Ok(pair) = make() {
+                st.0.push(pair);
+            }
+        }
     }
 }

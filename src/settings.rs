@@ -51,8 +51,20 @@ const BAR_PAGE: usize = 3;
 const CARD_RADIUS: f32 = 10.0;
 
 /// Seções da barra lateral: nome e glifo (Segoe Fluent Icons).
-const PAGES: [(&str, u16); 5] =
-    [("Dock", 0xE71D), ("Aparência", 0xE790), ("Animações", 0xE768), ("Barra do topo", 0xE7F4), ("Geral", 0xE713)];
+const PAGES: [(&str, u16); 10] = [
+    ("Dock", 0xE71D),
+    ("Aparência", 0xE790),
+    ("Animações", 0xE768),
+    ("Barra do topo", 0xE7F4),
+    (crate::extras::PAGES[0].0, crate::extras::PAGES[0].1),
+    (crate::extras::PAGES[1].0, crate::extras::PAGES[1].1),
+    (crate::extras::PAGES[2].0, crate::extras::PAGES[2].1),
+    (crate::extras::PAGES[3].0, crate::extras::PAGES[3].1),
+    (crate::extras::PAGES[4].0, crate::extras::PAGES[4].1),
+    ("Geral", 0xE713),
+];
+/// Primeira página das funções extras (`extras.rs`).
+const EXTRA_PAGE: usize = 4;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Opt {
@@ -80,6 +92,8 @@ enum Opt {
     Autostart,
     WinKey,
     AutoUpdate,
+    /// Opção extra (índice em `extras::EXTRAS`).
+    Ext(usize),
 }
 
 /// O que uma área clicável faz.
@@ -99,6 +113,8 @@ enum Act {
     ModOn(Module),
     ModZone(Module, BarZone),
     ModMove(Module, i32),
+    /// Escolha de uma opção extra: índice e opção.
+    Choice(usize, usize),
 }
 
 enum Row {
@@ -117,6 +133,8 @@ enum Row {
     Update(String, String, bool),
     /// Módulo da barra; pode subir / descer dentro da zona.
     Module(Slot, bool, bool),
+    /// Opção extra (índice em `extras::EXTRAS`).
+    Ext(usize),
 }
 
 enum Block {
@@ -185,12 +203,16 @@ fn value(o: Opt) -> f32 {
     }
     match o {
         Opt::MagnifySize => (config::magnify_scale() - 1.1) / 0.9,
+        Opt::Ext(i) => crate::extras::fraction(i),
         _ => 0.0,
     }
 }
 
 /// Passo do teclado em cada controle deslizante (1 px ou 1%; 0,05×).
 fn step(o: Opt) -> f32 {
+    if let Opt::Ext(i) = o {
+        return crate::extras::step(i);
+    }
     match px_slider(o) {
         Some((min, max, ..)) => 1.0 / (max - min),
         None => 0.05 / 0.9,
@@ -201,6 +223,7 @@ fn step(o: Opt) -> f32 {
 fn slider_label(o: Opt) -> String {
     match o {
         Opt::Opacity => format!("{}%", config::dock_opacity()),
+        Opt::Ext(i) => crate::extras::label(i),
         _ => px_slider(o).map(|(_, _, get, _)| format!("{} px", get())).unwrap_or_default(),
     }
 }
@@ -217,6 +240,11 @@ fn slide(o: Opt, v: f32, reload: bool) {
                 set(px);
             }
             changed
+        }
+        Opt::Ext(i) => {
+            // As extras se aplicam sozinhas (extras::changed).
+            crate::extras::slide(i, v);
+            false
         }
         Opt::MagnifySize => {
             let x = ((1.1 + v * 0.9) * 20.0).round() / 20.0;
@@ -295,6 +323,7 @@ fn toggle(o: Opt) {
                 crate::update::check_now();
             }
         }
+        Opt::Ext(i) => crate::extras::toggle(i),
         Opt::IconSize | Opt::MagnifySize | Opt::Radius | Opt::Opacity | Opt::Padding | Opt::SidePadding | Opt::Gap | Opt::Margin => {}
     }
 }
@@ -334,6 +363,7 @@ fn run(act: Act) {
             crate::apps::import_taskbar_pins();
             crate::reload_pins();
         }
+        Act::Choice(i, c) => crate::extras::set_choice(i, c),
         Act::Slider(..) => {}
     }
 }
@@ -443,6 +473,11 @@ fn blocks(page: usize) -> Vec<Block> {
                 ]),
             ]
         }
+        p if (EXTRA_PAGE..EXTRA_PAGE + crate::extras::PAGES.len()).contains(&p) => crate::extras::PAGES[p - EXTRA_PAGE]
+            .2
+            .iter()
+            .map(|card| Block::Card(card.iter().filter_map(|k| crate::extras::index(k)).map(Row::Ext).collect()))
+            .collect(),
         _ => vec![
             Block::Card(vec![
                 Row::Toggle(Opt::Autostart, "Iniciar com o Windows", config::autostart()),
@@ -533,7 +568,8 @@ impl Win {
                 }
                 Block::Card(rows) => rows,
             };
-            let rh = if self.page == BAR_PAGE { ROW_COMPACT } else { ROW } * s;
+            let compact = self.page == BAR_PAGE || (EXTRA_PAGE..EXTRA_PAGE + crate::extras::PAGES.len()).contains(&self.page);
+            let rh = if compact { ROW_COMPACT } else { ROW } * s;
             let card = [cx, y, cw, rows.len() as f32 * rh];
             fill(&mut pm, card, CARD_RADIUS * s, pal.card);
             stroke(&mut pm, [cx + 0.5, y + 0.5, cw - 1.0, card[3] - 1.0], CARD_RADIUS * s - 0.5, pal.card_line, 1.0);
@@ -629,6 +665,56 @@ impl Win {
                         }
                         let ink = if slot.on { pal.ink } else { pal.dim };
                         text(&tr(m.label()), Font::Body, [lx, ry, x0 - lx - 8.0 * s, rh], lead, ink);
+                    }
+                    Row::Ext(i) => {
+                        use crate::extras::{EXTRAS, Kind};
+                        let (i, e) = (*i, &EXTRAS[*i]);
+                        let on = crate::extras::enabled(i);
+                        let ink = if on { pal.ink } else { pal.dim };
+                        match e.kind {
+                            Kind::Toggle => {
+                                let sx = panel::switch(&mut pm, tf, &pal, rx, cy, s, crate::extras::on(e.key));
+                                zones.push(Zone { r: whole, radius: 8.0 * s, act: Act::Toggle(Opt::Ext(i)) });
+                                let w = sx - lx - 8.0 * s;
+                                if e.sub.is_empty() {
+                                    text(&tr(e.label), Font::Body, [lx, ry, w, rh], lead, ink);
+                                } else {
+                                    text(&tr(e.label), Font::Body, [lx, cy - 18.0 * s, w, 19.0 * s], lead, ink);
+                                    text(&tr(e.sub), Font::Small, [lx, cy + 1.0 * s, w, 17.0 * s], lead, pal.dim);
+                                }
+                            }
+                            Kind::Slider { .. } => {
+                                let vw = 64.0 * s;
+                                let (tl, tr_) = (rx - vw - 16.0 * s - 220.0 * s, rx - vw - 16.0 * s);
+                                let color = if on { pal.accent } else { pal.strong };
+                                panel::slider(&mut pm, tf, &pal, tl, tr_, cy, s, crate::extras::fraction(i).clamp(0.0, 1.0), color);
+                                if on {
+                                    let r = [tl - 10.0 * s, ry, tr_ - tl + 20.0 * s, rh];
+                                    zones.push(Zone { r, radius: 0.0, act: Act::Slider(Opt::Ext(i), tl, tr_) });
+                                }
+                                text(&tr(e.label), Font::Body, [lx + 14.0 * s, ry, tl - lx - 30.0 * s, rh], lead, ink);
+                                text(&crate::extras::label(i), Font::Body, [rx - vw, ry, vw, rh], trail, ink);
+                            }
+                            Kind::Choice(opts) => {
+                                let (sw, sh) = (84.0 * s, 28.0 * s);
+                                let x0 = rx - opts.len() as f32 * sw;
+                                fill(&mut pm, [x0, cy - sh / 2.0, opts.len() as f32 * sw, sh], 8.0 * s, pal.control);
+                                let cur = crate::extras::choice(e.key);
+                                for (k, o) in opts.iter().enumerate() {
+                                    let r = [x0 + k as f32 * sw, cy - sh / 2.0, sw, sh];
+                                    if k == cur {
+                                        let c = if on { pal.accent } else { pal.strong };
+                                        fill(&mut pm, [r[0] + 3.0 * s, r[1] + 3.0 * s, sw - 6.0 * s, sh - 6.0 * s], 6.0 * s, c);
+                                    } else if on {
+                                        zones.push(Zone { r, radius: 8.0 * s, act: Act::Choice(i, k) });
+                                    }
+                                    let c = if k == cur && on { WHITE } else { ink };
+                                    text(&tr(o), Font::Body, r, center, c);
+                                }
+                                let x = if e.needs.is_empty() { lx } else { lx + 14.0 * s };
+                                text(&tr(e.label), Font::Body, [x, ry, x0 - x - 8.0 * s, rh], lead, ink);
+                            }
+                        }
                     }
                     Row::Button(t, b, act) => {
                         zones.push(Zone { r: whole, radius: 8.0 * s, act: *act });
