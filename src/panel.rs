@@ -93,8 +93,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
-    VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_TAB, VK_UP,
+    GetAsyncKeyState, GetCapture, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
+    VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -383,6 +383,8 @@ pub enum Event<'a> {
     Text(u32, &'a str),
     /// Enter no campo.
     Submit(u32, &'a str),
+    /// Ctrl+Shift+Enter no campo.
+    SubmitAsAdmin(u32),
     /// Seta para cima/baixo (a roda do mouse também chega assim): o código da tecla.
     Key(u16),
 }
@@ -1868,6 +1870,18 @@ impl Panel {
 
     fn key_down(&mut self, vk: u16) {
         match vk {
+            v if v == VK_RETURN.0 => {
+                let Some(id) = self.focus else { return };
+                // O teclado pode não gerar WM_CHAR para Ctrl+Shift+Enter.
+                let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+                if down(VK_CONTROL) && down(VK_SHIFT) {
+                    self.emit(Event::SubmitAsAdmin(id));
+                } else if !down(VK_CONTROL) {
+                    let Some(field) = self.fields.iter().find(|f| f.id == id) else { return };
+                    let text = String::from_utf16_lossy(&field.text);
+                    self.emit(Event::Submit(id, &text));
+                }
+            }
             v if (v == VK_TAB.0 || v == VK_RIGHT.0) && self.accept_completion(v == VK_TAB.0) => {}
             v if v == VK_LEFT.0 => self.edit(|f| {
                 f.cursor = f.cursor.saturating_sub(1);
@@ -1909,13 +1923,6 @@ impl Panel {
                     false
                 }
             }),
-            // 0x0A: Ctrl+Enter (o conteúdo lê os modificadores, ex.: Ctrl+Shift+Enter).
-            0x0D | 0x0A => {
-                let Some(id) = self.focus else { return };
-                let Some(field) = self.fields.iter().find(|x| x.id == id) else { return };
-                let text = String::from_utf16_lossy(&field.text);
-                self.emit(Event::Submit(id, &text));
-            }
             c if c < 0x20 || c == 0x7F => {}
             c => self.edit(|f| {
                 f.text.insert(f.cursor, c);

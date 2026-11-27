@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTa
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_SHIFT, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_UP};
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, IShellItem, KF_FLAG_DEFAULT, SHGetKnownFolderItem,
     SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, ShellExecuteW,
@@ -624,6 +624,9 @@ impl Launcher {
     /// mesmo do menu Iniciar; o Windows pede a confirmação do UAC).
     fn run(&self, pos: usize, admin: bool) {
         let Some(h) = self.rows().nth(pos) else { return };
+        if admin && !matches!(h.target, Target::App(_)) {
+            return;
+        }
         let open = |target: &str| unsafe {
             ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
         };
@@ -758,12 +761,10 @@ impl PanelContent for Launcher {
                 true
             }
             Event::Submit(FIELD, _) => {
-                // Ctrl+Shift+Enter: como administrador, igual ao menu Iniciar do Windows.
-                let down = |vk: VIRTUAL_KEY| unsafe { GetKeyState(vk.0 as i32) } < 0;
-                self.run(self.sel, down(VK_CONTROL) && down(VK_SHIFT));
+                self.run(self.sel, false);
                 false
             }
-            Event::Click(RUN_AS_ADMIN) => {
+            Event::SubmitAsAdmin(FIELD) | Event::Click(RUN_AS_ADMIN) => {
                 self.run(self.sel, true);
                 false
             }
