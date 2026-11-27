@@ -50,6 +50,42 @@ fn number(key: &str, default: f32, min: f32, max: f32) -> f32 {
     get(key).and_then(|v| v.parse().ok()).unwrap_or(default).clamp(min, max)
 }
 
+/// Plano de fundo animado: chave do estilo (veja `wallpaper::STYLES`); `None` = desligado (padrão).
+pub fn wallpaper() -> Option<String> {
+    get("wallpaper").filter(|v| !v.is_empty() && v != "off")
+}
+
+pub fn set_wallpaper(style: Option<&str>) {
+    if let Some(s) = style {
+        set("wallpaper_last", s.to_string());
+    }
+    set("wallpaper", style.unwrap_or("off").to_string());
+}
+
+/// Último estilo ligado (o círculo do cartão religa nele).
+pub fn wallpaper_last() -> Option<String> {
+    get("wallpaper_last")
+}
+
+/// Plano de fundo segue o horário (claro de dia, dourado no nascer e pôr do sol, escuro à noite);
+/// desligado, segue o tema claro/escuro do Windows. Padrão: ligado.
+pub fn wallpaper_dynamic() -> bool {
+    flag("wallpaper_dynamic")
+}
+
+pub fn set_wallpaper_dynamic(on: bool) {
+    set_flag("wallpaper_dynamic", on);
+}
+
+/// Pausa o plano de fundo animado fora da tomada (padrão: ligado).
+pub fn wallpaper_battery_pause() -> bool {
+    flag("wallpaper_battery_pause")
+}
+
+pub fn set_wallpaper_battery_pause(on: bool) {
+    set_flag("wallpaper_battery_pause", on);
+}
+
 /// Tamanho dos ícones do dock (px antes da escala do monitor): 32 a 72, padrão 48.
 pub fn icon_size() -> f32 {
     number("icon_size", 48.0, 32.0, 72.0).round()

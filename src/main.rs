@@ -35,6 +35,7 @@ mod tray;
 mod update;
 mod overflow;
 mod volume;
+mod wallpaper;
 mod wifi;
 mod winkey;
 
@@ -1698,7 +1699,7 @@ unsafe extern "system" fn glass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 use windows::Win32::Foundation::HINSTANCE;
 
 fn main() -> windows::core::Result<()> {
-    if guard::run_if_requested() {
+    if guard::run_if_requested() || wallpaper::preview_if_requested() {
         return Ok(());
     }
     i18n::initialize();
@@ -1754,6 +1755,8 @@ fn main() -> windows::core::Result<()> {
             topbar::create();
             start_tray();
         }
+        wallpaper::apply();
+        wallpaper::prewarm();
         minimize::init();
         winkey::config_changed();
         launcher::preload();
@@ -1830,6 +1833,7 @@ unsafe fn teardown() {
     preview::shutdown();
     tooltip::shutdown();
     minimize::shutdown();
+    wallpaper::shutdown();
     panel::close();
     let docks = DOCKS.with(|d| d.try_borrow_mut().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default());
     docks.into_iter().for_each(dispose_dock);

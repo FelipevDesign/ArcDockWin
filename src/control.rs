@@ -18,6 +18,7 @@ use crate::panel::{Card, Event, PanelContent, Tile, Widget, glyph};
 use crate::power::PowerPanel;
 use crate::status::{self, Net};
 use crate::volume::VolumePanel;
+use crate::wallpaper::WallpaperPanel;
 use crate::wifi::WifiPanel;
 
 /// Repassada pela topbar a cada STATS_MS (via `panel::notify`): relê bateria e mídia.
@@ -41,6 +42,9 @@ const BRIGHT: u32 = BASE + 8;
 const PREV: u32 = BASE + 9;
 const PLAY: u32 = BASE + 10;
 const NEXT: u32 = BASE + 11;
+const WALL: u32 = BASE + 12;
+const WALL_OPEN: u32 = BASE + 13;
+const GLYPH_WALL: u16 = 0xE771;
 
 const GLYPH_POWER: u16 = 0xE7E8;
 const GLYPH_DARK: u16 = 0xE793;
@@ -57,6 +61,7 @@ enum View {
     Bluetooth,
     Sound,
     Power,
+    Wallpaper,
 }
 
 pub struct ControlCenter {
@@ -65,6 +70,8 @@ pub struct ControlCenter {
     bt: BluetoothPanel,
     volume: VolumePanel,
     power: PowerPanel,
+    /// Criado ao abrir (as miniaturas usam a placa de vídeo).
+    wallpaper: Option<WallpaperPanel>,
     /// Rede cabeada (só quando não há Wi‑Fi).
     wired: Net,
 }
@@ -110,7 +117,17 @@ impl ControlCenter {
         let wired = status::network(&status::Wlan::open());
         media::refresh(None);
         brightness::refresh();
-        Self { view: View::Main, wifi, bt: BluetoothPanel::new(), volume: VolumePanel::new(), power: PowerPanel, wired }
+        // Miniaturas dos planos de fundo prontas antes de alguém abrir a galeria.
+        crate::wallpaper::prewarm();
+        Self {
+            view: View::Main,
+            wifi,
+            bt: BluetoothPanel::new(),
+            volume: VolumePanel::new(),
+            power: PowerPanel,
+            wallpaper: None,
+            wired,
+        }
     }
 
     fn sub(&mut self) -> &mut dyn PanelContent {
@@ -118,6 +135,7 @@ impl ControlCenter {
             View::Wifi => &mut self.wifi,
             View::Bluetooth => &mut self.bt,
             View::Power => &mut self.power,
+            View::Wallpaper => self.wallpaper.get_or_insert_with(WallpaperPanel::new),
             View::Main | View::Sound => &mut self.volume,
         }
     }
@@ -191,6 +209,15 @@ impl ControlCenter {
                 button: Some((glyph::CHEVRON_RIGHT, SOUND)),
             });
         }
+        let wall = crate::wallpaper::current_name();
+        cards.push(Card::WideTile(Tile {
+            glyph: GLYPH_WALL,
+            title: "Plano de fundo".into(),
+            sub: wall.unwrap_or("Desligado").into(),
+            on: wall.is_some(),
+            toggle: WALL,
+            open: WALL_OPEN,
+        }));
         vec![Widget::Cards(cards)]
     }
 }
@@ -231,6 +258,11 @@ impl PanelContent for ControlCenter {
             Event::Click(BT_OPEN) => View::Bluetooth,
             Event::Click(SOUND) => View::Sound,
             Event::Click(POWER) => View::Power,
+            Event::Click(WALL_OPEN) => View::Wallpaper,
+            Event::Click(WALL) => {
+                crate::wallpaper::toggle();
+                return true;
+            }
             Event::Click(WIFI) => {
                 let on = self.wifi.summary().1 == Some(true);
                 return self.wifi.set_radio(!on);
