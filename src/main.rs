@@ -9,6 +9,7 @@ mod control;
 mod drag;
 mod extras;
 mod heal;
+mod peek;
 mod picker;
 mod tools;
 mod clipboard;
@@ -1926,6 +1927,10 @@ unsafe extern "system" fn glass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 use windows::Win32::Foundation::HINSTANCE;
 
 fn main() -> windows::core::Result<()> {
+    // Janela de pré-visualização: processo à parte, que sai ao fechar (quicklook.rs).
+    if peek::run_if_requested() {
+        return Ok(());
+    }
     if guard::run_if_requested() {
         return Ok(());
     }
