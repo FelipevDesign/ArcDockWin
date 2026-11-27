@@ -202,7 +202,10 @@ pub fn changed(key: &str) {
         }
         "zones" | "zone" | "shadow" => crate::zones::sync(),
         "ql" => crate::quicklook::sync(),
-        "pin" => crate::reload_pins(),
+        "pin" => {
+            crate::reload_pins();
+            crate::apply_settings(false);
+        }
         _ => {}
     }
 }

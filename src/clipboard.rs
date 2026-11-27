@@ -206,7 +206,7 @@ unsafe fn put(format: u32, bytes: &[u8]) -> bool {
             return false;
         }
         let _ = EmptyClipboard();
-        OWN.store(true, Ordering::Relaxed);
+        OWN.store(WINDOW.load(Ordering::Relaxed) != 0, Ordering::Relaxed);
         let ok = SetClipboardData(format, Some(HANDLE(g.0))).is_ok();
         let _ = CloseClipboard();
         ok

@@ -259,6 +259,8 @@ unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
     let changed = LAST_LABEL.lock().map(|mut l| std::mem::replace(&mut *l, label.clone()) != label).unwrap_or(false);
     if changed {
         crate::refresh_tools();
+    }
+    if changed || panel::is_open("timer") {
         panel::refresh();
     }
 }
