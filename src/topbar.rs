@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory, IDWriteFactory,
     IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout,
 };
@@ -91,6 +91,12 @@ const TIMER_USAGE: usize = 7;
 /// Relê o layout de teclado do app em foco: o Win+Espaço e o Alt+Shift não avisam ninguém.
 const TIMER_KEYBOARD: usize = 8;
 const KEYBOARD_MS: u32 = 400;
+/// Avisos, clima e agenda: um tique a cada 30 s (clima a cada 30 min, agenda a cada 15).
+const TIMER_SLOW: usize = 9;
+const SLOW_MS: u32 = 30_000;
+/// Barra que se esconde: vigia o mouse no topo da tela.
+const TIMER_AUTOHIDE: usize = 10;
+const AUTOHIDE_MS: u32 = 120;
 /// Largura (px) de cada fatia do brilho do wallpaper.
 const LUMA_BUCKET: usize = 16;
 pub(crate) const GLYPH_CPU: u16 = 0xE950;
@@ -152,6 +158,19 @@ enum Kind {
     /// Idioma de entrada (layout de teclado): o clique abre a lista para trocar e a roda passa
     /// para o próximo.
     Keyboard,
+    /// Logo do Windows: menu do sistema.
+    Menu,
+    /// Nome do app em foco: menu do app.
+    App,
+    /// Área de trabalho virtual: lista; a roda troca.
+    Space,
+    /// Ferramenta n de `tools::bar_tools()`.
+    Tool(u8),
+    Shot,
+    Weather,
+    Event,
+    Battery,
+    Notify,
 }
 
 /// Glifo do botão da área de trabalho (TVMonitor; existe na Fluent Icons e na MDL2 Assets).
@@ -222,7 +241,12 @@ struct Bar {
     bits: *mut u8,
     dwrite: IDWriteFactory,
     text_fmt: IDWriteTextFormat,
+    /// Nome do app em foco (semi-negrito).
+    bold_fmt: IDWriteTextFormat,
     icon_fmt: IDWriteTextFormat,
+    /// Barra que se esconde sozinha está fora da tela agora; e desde quando o mouse saiu.
+    autohidden: bool,
+    leave_at: Option<Instant>,
     /// Ícones da bandeja (os ocultos ficam na lista, mas fora da barra).
     tray: Vec<TrayEntry>,
     items: Vec<Item>,
@@ -305,6 +329,17 @@ impl Bar {
                 Ok(f)
             };
             let text_fmt = format(family, 12.0)?;
+            let bold_fmt = dwrite.CreateTextFormat(
+                family,
+                None::<&IDWriteFontCollection>,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                12.0 * scale,
+                locale_ptr,
+            )?;
+            bold_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            bold_fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
             let icon_fmt = format(icons, 14.0)?;
             icon_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
 
@@ -330,7 +365,10 @@ impl Bar {
                 bits: bits as *mut u8,
                 dwrite,
                 text_fmt,
+                bold_fmt,
                 icon_fmt,
+                autohidden: false,
+                leave_at: None,
                 tray: Vec::new(),
                 items: Vec::new(),
                 hot: None,
@@ -440,13 +478,28 @@ impl Bar {
         let mut abd = self.appbar_data();
         let m = self.monitor;
         abd.rc = RECT { left: m.left, top: m.top, right: m.left + w, bottom: m.top + h };
+        // Barra que se esconde não reserva espaço: as janelas maximizadas vão até o topo.
+        let hide = autohide();
         unsafe {
             SHAppBarMessage(ABM_QUERYPOS, &mut abd);
-            abd.rc.bottom = abd.rc.top + h;
+            abd.rc.bottom = abd.rc.top + if hide { 0 } else { h };
             SHAppBarMessage(ABM_SETPOS, &mut abd);
         }
         self.rect = RECT { left: abd.rc.left, top: abd.rc.top, right: abd.rc.left + w, bottom: abd.rc.top + h };
-        if self.fullscreen {
+        unsafe {
+            if hide {
+                SetTimer(Some(self.hwnd), TIMER_AUTOHIDE, AUTOHIDE_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_AUTOHIDE);
+                if self.autohidden {
+                    self.autohidden = false;
+                    if !self.fullscreen {
+                        let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                    }
+                }
+            }
+        }
+        if self.fullscreen || self.autohidden {
             return;
         }
         unsafe {
@@ -463,6 +516,51 @@ impl Bar {
         self.redraw();
     }
 
+    /// Barra que se esconde: aparece com o mouse encostado no topo do monitor e some
+    /// um pouco depois de o mouse sair (nunca com um painel dela aberto).
+    fn autohide_tick(&mut self) {
+        if self.fullscreen {
+            return;
+        }
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let m = self.monitor;
+        let in_x = pt.x >= m.left && pt.x < m.right;
+        if self.autohidden {
+            if in_x && pt.y <= m.top + 1 && pt.y >= m.top - 2 {
+                self.autohidden = false;
+                self.leave_at = None;
+                unsafe {
+                    let _ = ShowWindow(self.glass, SW_SHOWNOACTIVATE);
+                    let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                }
+                self.redraw();
+            }
+            return;
+        }
+        let over = in_x && pt.y >= self.rect.top - 2 && pt.y < self.rect.bottom + (4.0 * self.scale) as i32;
+        let bar = self.rect;
+        let open_here = self.items.iter().any(|it| panel_for(it.kind).is_some_and(|(key, _)| panel::is_open_in(key, bar)))
+            || panel::is_open_in("clip", bar)
+            || panel::is_open_in("timer", bar);
+        if over || open_here {
+            self.leave_at = None;
+            return;
+        }
+        let since = *self.leave_at.get_or_insert_with(Instant::now);
+        if since.elapsed() >= Duration::from_millis(500) {
+            self.autohidden = true;
+            self.leave_at = None;
+            self.hot = None;
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+                let _ = ShowWindow(self.glass, SW_HIDE);
+            }
+        }
+    }
+
     fn set_fullscreen(&mut self, on: bool) {
         if on == self.fullscreen {
             return;
@@ -474,7 +572,9 @@ impl Bar {
                 let _ = ShowWindow(self.glass, SW_HIDE);
             } else {
                 self.place();
-                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                if !self.autohidden {
+                    let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                }
             }
         }
     }
@@ -511,6 +611,15 @@ impl Bar {
         let r = x + w + 2.0 * pad;
         items.push(Item { kind, l: x, r, text });
         r
+    }
+
+    /// Item só de texto, com o espaço interno dos lados.
+    fn text_item(&self, items: &mut Vec<Item>, kind: Kind, text: &str, fmt: &IDWriteTextFormat, alpha: f32) {
+        let pad = PAD * self.scale;
+        if let Some(t) = self.text_layout(&text.encode_utf16().collect::<Vec<_>>(), fmt, 1000.0) {
+            let w = Self::text_width(&t) + 2.0 * pad;
+            items.push(Item { kind, l: 0.0, r: w, text: vec![(t, pad, alpha)] });
+        }
     }
 
     /// Largura do texto de um layout.
@@ -583,6 +692,97 @@ impl Bar {
                 {
                     let w = Self::text_width(&t) + 2.0 * pad;
                     items.push(Item { kind: Kind::Keyboard, l: 0.0, r: w, text: vec![(t, pad, 1.0)] });
+                }
+            }
+            // Logo do Windows desenhado em `redraw` (quatro quadradinhos).
+            Module::Menu => {
+                items.push(Item { kind: Kind::Menu, l: 0.0, r: GLYPH_W * s + 2.0 * pad, text: Vec::new() });
+            }
+            Module::App => {
+                if let Some(app) = crate::topextra::focus() {
+                    let mut name: String = app.name.chars().take(32).collect();
+                    if app.name.chars().count() > 32 {
+                        name.push('…');
+                    }
+                    self.text_item(&mut items, Kind::App, &name, &self.bold_fmt, 1.0);
+                }
+            }
+            Module::Space => {
+                if let Some(name) = SPACE.with_borrow(|n| n.clone()) {
+                    self.text_item(&mut items, Kind::Space, &name, &self.text_fmt, 0.85);
+                }
+            }
+            Module::Tools => {
+                let mut x = 0.0;
+                for (i, t) in crate::tools::bar_tools().into_iter().enumerate() {
+                    let g = match t {
+                        crate::tools::CLIP => 0xE77F,
+                        crate::tools::PICKER => 0xE790,
+                        _ => 0xE916,
+                    };
+                    let start = items.len();
+                    x = self.glyph_item(&mut items, x, Kind::Tool(i as u8), &[(g, 0.9)]);
+                    // Timer correndo: os minutos que faltam ao lado do relógio.
+                    if t == crate::tools::TIMER
+                        && let Some(m) = crate::tools::timer_minutes()
+                        && let Some(tl) = self.text_layout(&format!("{m}′").encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
+                    {
+                        let w = Self::text_width(&tl);
+                        let it = &mut items[start];
+                        it.text.push((tl, it.r - pad + 2.0 * s, 1.0));
+                        it.r += w + 2.0 * s;
+                        x = it.r;
+                    }
+                }
+            }
+            Module::Shot => {
+                self.glyph_item(&mut items, 0.0, Kind::Shot, &[(0xE722, 0.95)]);
+            }
+            Module::Weather => {
+                if let Some(w) = crate::topextra::weather() {
+                    let (sym, _) = crate::topextra::weather_text(w.code, w.day);
+                    self.text_item(&mut items, Kind::Weather, &format!("{sym} {:.0}°", w.temp), &self.text_fmt, 1.0);
+                }
+            }
+            Module::Event => {
+                match crate::topextra::event_label() {
+                    Some(label) => self.text_item(&mut items, Kind::Event, &label, &self.text_fmt, 1.0),
+                    // Sem link ainda: o ícone da agenda, para configurar no clique.
+                    None if !crate::topextra::has_ical() => {
+                        self.glyph_item(&mut items, 0.0, Kind::Event, &[(0xE787, 0.8)]);
+                    }
+                    None => {}
+                }
+            }
+            Module::Battery => {
+                if let Some(b) = crate::topextra::battery() {
+                    let sb = status::Battery { percent: b.percent, charging: b.charging };
+                    let r = self.glyph_item(&mut items, 0.0, Kind::Battery, &[(crate::control::battery_glyph(&sb), 1.0)]);
+                    let mut label = format!("{}%", b.percent);
+                    if crate::extras::on("bar_battery_time")
+                        && let Some(left) = b.left
+                    {
+                        label = format!("{label} · {}", crate::topextra::duration_text(left));
+                    }
+                    if let Some(t) = self.text_layout(&label.encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 400.0) {
+                        let w = Self::text_width(&t);
+                        let it = items.last_mut().unwrap();
+                        it.text.push((t, r - pad, 1.0));
+                        it.r = r + w;
+                    }
+                }
+            }
+            Module::Notify => {
+                let dnd = crate::topextra::dnd() == Some(true);
+                let g = if dnd { 0xE708 } else { 0xEA8F };
+                let r = self.glyph_item(&mut items, 0.0, Kind::Notify, &[(g, 1.0)]);
+                if let Some(n) = crate::topextra::notify_count().filter(|&n| n > 0)
+                    && let Some(t) = self.text_layout(&n.min(99).to_string().encode_utf16().collect::<Vec<_>>(), &self.text_fmt, 200.0)
+                {
+                    let w = Self::text_width(&t);
+                    let it = items.last_mut().unwrap();
+                    it.text.push((t, r - pad, 1.0));
+                    it.r = r + w;
                 }
             }
             // Logo do provedor (desenhado em `redraw`) + % da sessão de 5 h.
@@ -698,45 +898,88 @@ impl Bar {
         self.items.iter().find(|i| x >= i.l && x < i.r).map(|i| i.kind)
     }
 
+    /// Fundo da barra pelo estilo das Configurações: (tinta, linha de baixo, texto escuro
+    /// fixo pelo fundo, desfoque, raio dos cantos de baixo).
+    fn look(&self) -> (Option<[u8; 3]>, [u8; 4], Option<[u8; 4]>, Option<bool>, bool, f32) {
+        let lum = |[r, g, b]: [u8; 3]| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        let dyn_line = crate::extras::on("bar_dyncolor").then(|| DYN_COLOR.get()).flatten().map(|[r, g, b]| [r, g, b, 230]);
+        let style = crate::extras::choice("bar_style");
+        let theme = crate::render::Theme::new(crate::light_theme(), None);
+        match style {
+            1 if !theme.minimal => {
+                let (tint, border) = theme.background();
+                (None, tint, Some(dyn_line.unwrap_or(border)), Some(theme.light), true, 0.0)
+            }
+            2 => {
+                let c = crate::extras::bar_color_rgb(crate::extras::choice("bar_color"));
+                let a = (crate::extras::num("bar_opacity") / 100.0 * 255.0).round().max(1.0) as u8;
+                let light = lum(c) > 150.0;
+                let line = crate::extras::on("bar_line").then_some(if light { [0, 0, 0, 40] } else { [255, 255, 255, 46] });
+                let fixed = (a >= 100).then_some(light);
+                let r = crate::extras::num("bar_radius") * self.scale;
+                (None, [c[0], c[1], c[2], a], dyn_line.or(line), fixed, crate::extras::on("bar_blur"), r)
+            }
+            // Transparente: sobre app maximizado, a cor dele (10% mais escura, para separar).
+            _ => {
+                let app = self.app_color.map(|c| c.map(|v| (v as f32 * 0.9).round() as u8));
+                match app {
+                    Some(c) => (Some(c), [c[0], c[1], c[2], 255], Some(dyn_line.unwrap_or([c[0], c[1], c[2], 255])), Some(lum(c) > 150.0), false, 0.0),
+                    // Alfa 1 para continuar recebendo cliques.
+                    None => (None, [0, 0, 0, 1], dyn_line, None, false, 0.0),
+                }
+            }
+        }
+    }
+
     fn redraw(&mut self) {
-        if self.fullscreen {
+        if self.fullscreen || self.autohidden {
             return;
         }
-        // Com app maximizado embaixo: fundo sólido na cor dele, sem linha, tinta pelo contraste.
-        // 10% mais escura que o app, para separar barra e app.
-        let app = self.app_color.map(|c| c.map(|v| (v as f32 * 0.9).round() as u8));
-        let light = match app {
-            Some([r, g, b]) => 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32 > 150.0,
-            None => crate::light_theme(),
+        let (app, tint, line, fixed, blur, radius) = self.look();
+        let mut light = fixed.unwrap_or_else(crate::light_theme);
+        // Cor do texto escolhida nas Configurações vale mais que o fundo.
+        let forced = match crate::extras::choice("bar_ink") {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
         };
+        if let Some(f) = forced {
+            light = f;
+        }
         let ink = if light { [0.0, 0.0, 0.0, 0.88] } else { [1.0, 1.0, 1.0, 0.95] };
-        // Sobre o app: fundo sólido na cor dele. Área de trabalho: transparente
-        // (alfa 1 para continuar recebendo cliques).
-        let tint = match app {
-            Some([r, g, b]) => [r, g, b, 255],
-            None => [0, 0, 0, 1],
-        };
-        let line = tint;
-        // Tinta de cada item: pela cor do app ou pelo brilho do wallpaper sob o item.
+        // Tinta de cada item: pelo fundo ou pelo brilho do wallpaper sob o item.
         let item_light: Vec<bool> = self
             .items
             .iter()
-            .map(|it| match app {
-                Some(_) => light,
-                None => self.wall_light(it.l, it.r).unwrap_or(light),
+            .map(|it| match (forced, fixed) {
+                (Some(f), _) | (None, Some(f)) => f,
+                _ => self.wall_light(it.l, it.r).unwrap_or(light),
             })
             .collect();
         let s = self.scale;
         let (w, h) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
         let id = Transform::identity();
+        if let Some(fx) = &self.glass_fx {
+            fx.set_opacity(if blur { 1.0 } else { 0.0 });
+            fx.bottom_round(w, h, radius);
+        }
 
         // Vidro: o desfoque vem da janela de fundo; aqui a tinta, a linha de baixo e o realce.
         let pm = &mut self.pixmap;
         pm.fill(Color::TRANSPARENT);
-        if let Some(r) = Rect::from_xywh(0.0, 0.0, w, h - 1.0) {
+        if radius > 0.0 {
+            if let Some(p) = bottom_rounded(w, h, radius) {
+                pm.fill_path(&p, &solid(tint), FillRule::Winding, id, None);
+            }
+        } else if let Some(r) = Rect::from_xywh(0.0, 0.0, w, h - 1.0) {
             pm.fill_rect(r, &solid(tint), id, None);
         }
-        if let Some(r) = Rect::from_xywh(0.0, h - 1.0, w, 1.0) {
+        let line = line.unwrap_or(tint);
+        if radius > 0.0 {
+            if let Some(r) = Rect::from_xywh(radius, h - 1.0, w - 2.0 * radius, 1.0) {
+                pm.fill_rect(r, &solid(line), id, None);
+            }
+        } else if let Some(r) = Rect::from_xywh(0.0, h - 1.0, w, 1.0) {
             pm.fill_rect(r, &solid(line), id, None);
         }
         // Item cujo painel está aberto nesta barra fica realçado como no hover.
@@ -760,10 +1003,28 @@ impl Bar {
                 pm.draw_pixmap(x, y, icon.as_ref(), &PixmapPaint::default(), id, None);
             }
         }
+        // Logo do Windows do menu do sistema: quatro quadradinhos na cor do texto.
+        for (i, it) in self.items.iter().enumerate() {
+            if it.kind != Kind::Menu {
+                continue;
+            }
+            let color = if item_light[i] { [0, 0, 0, 220] } else { [255, 255, 255, 240] };
+            let size = (12.0 * s).round();
+            let gap = (1.5 * s).max(1.0).round();
+            let q = ((size - gap) / 2.0).round();
+            let x0 = ((it.l + it.r - size) / 2.0).round();
+            let y0 = ((h - 1.0 - size) / 2.0).round();
+            for (dx, dy) in [(0.0, 0.0), (q + gap, 0.0), (0.0, q + gap), (q + gap, q + gap)] {
+                if let Some(r) = Rect::from_xywh(x0 + dx, y0 + dy, q, q) {
+                    pm.fill_rect(r, &solid(color), id, None);
+                }
+            }
+        }
         // Logos de uso na mesma tinta dos glifos do item (preto ou branco conforme o fundo).
+        let _ = app;
         for (i, it) in self.items.iter().enumerate() {
             let Kind::Usage(p) = it.kind else { continue };
-            let l = if app.is_some() { light } else { item_light[i] };
+            let l = item_light[i];
             // Mesma opacidade dos glifos do CPU/RAM (0,75 da tinta).
             let color = if l { [0, 0, 0, 168] } else { [255, 255, 255, 182] };
             if let Some(logo) = crate::usage::logo(p, (14.0 * s).round() as u32, color) {
@@ -782,6 +1043,7 @@ impl Bar {
 
         // Texto e glifos por cima, direto na DIB.
         let (wi, hi) = (w as i32, h as i32);
+        let shadow = crate::extras::on("bar_shadow");
         unsafe {
             let color = D2D1_COLOR_F { r: ink[0], g: ink[1], b: ink[2], a: ink[3] };
             let draw_text = |target: &ID2D1DCRenderTarget| -> bool {
@@ -791,13 +1053,26 @@ impl Bar {
                 let Ok(brush) = target.CreateSolidColorBrush(&color, None) else { return false };
                 target.BeginDraw();
                 for (it, &il) in self.items.iter().zip(&item_light) {
-                    let c = if app.is_some() || il == light {
+                    let c = if il == light {
                         color
                     } else if il {
                         D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.88 }
                     } else {
                         D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 }
                     };
+                    // Sombra leve: 1 px abaixo, escura sob texto claro e clara sob texto escuro.
+                    if shadow {
+                        let sc = if c.r > 0.5 {
+                            D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.55 }
+                        } else {
+                            D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.45 }
+                        };
+                        brush.SetColor(&sc);
+                        for (t, x, alpha) in &it.text {
+                            brush.SetOpacity(*alpha);
+                            target.DrawTextLayout(Vector2 { X: *x, Y: (s * 1.0).round() }, t, &brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                        }
+                    }
                     brush.SetColor(&c);
                     for (t, x, alpha) in &it.text {
                         brush.SetOpacity(*alpha);
@@ -901,6 +1176,21 @@ pub(crate) fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tin
     pb.finish()
 }
 
+/// Retângulo com só os cantos de baixo arredondados.
+fn bottom_rounded(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
+    let r = r.min(w / 2.0).min(h);
+    let k = r * 0.5523;
+    let mut pb = PathBuilder::new();
+    pb.move_to(0.0, 0.0);
+    pb.line_to(w, 0.0);
+    pb.line_to(w, h - r);
+    pb.cubic_to(w, h - r + k, w - r + k, h, w - r, h);
+    pb.line_to(r, h);
+    pb.cubic_to(r - k, h, 0.0, h - r + k, 0.0, h - r);
+    pb.close();
+    pb.finish()
+}
+
 /// Painel de cada item de status: chave (para o segundo clique fechar) e o conteúdo.
 /// É aqui que se pluga um painel novo.
 fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)> {
@@ -911,7 +1201,14 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Stats => ("stats", || Box::new(crate::perf::PerfPanel::new())),
         Kind::Usage(Provider::Claude) => ("claude", || Box::new(crate::usage::UsagePanel::new(Provider::Claude))),
         Kind::Usage(Provider::Codex) => ("codex", || Box::new(crate::usage::UsagePanel::new(Provider::Codex))),
-        Kind::Tray(_) | Kind::Desktop | Kind::Keyboard => return None,
+        Kind::Menu => ("sysmenu", || Box::new(crate::topextra::SysMenu::new())),
+        Kind::App => ("appmenu", || Box::new(crate::topextra::AppMenu::new())),
+        Kind::Space => ("desktops", || Box::new(crate::topextra::DesktopPanel)),
+        Kind::Shot => ("shot", || Box::new(crate::topextra::ShotPanel)),
+        Kind::Weather => ("weather", || Box::new(crate::topextra::WeatherPanel)),
+        Kind::Event => ("agenda", || Box::new(crate::topextra::AgendaPanel::new())),
+        Kind::Battery => ("battery", || Box::new(crate::topextra::BatteryPanel)),
+        Kind::Tray(_) | Kind::Desktop | Kind::Keyboard | Kind::Tool(_) | Kind::Notify => return None,
     })
 }
 
@@ -945,6 +1242,124 @@ fn update_clock() {
     let (text, ms) = status::clock();
     unsafe { SetTimer(Some(MAIN.get()), TIMER_CLOCK, ms, None) };
     for_bars(|b| b.set_clock(&text));
+    // Compromisso na hora do aviso: bipe e a agenda aberta embaixo dele.
+    if config::module_on(Module::Event)
+        && let Some(_) = crate::topextra::due_alert()
+    {
+        unsafe {
+            let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK);
+        }
+        if let Some(rect) = item_screen_rect(Module::Event)
+            && !panel::is_open("agenda")
+        {
+            panel::toggle("agenda", rect, || Box::new(crate::topextra::AgendaPanel::new()));
+        }
+    }
+}
+
+thread_local! {
+    /// Nome da área de trabalho virtual atual (None = só uma).
+    static SPACE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Cor do ícone do app em foco (linha dinâmica).
+    static DYN_COLOR: Cell<Option<[u8; 3]>> = const { Cell::new(None) };
+    static SLOW_TICKS: Cell<u32> = const { Cell::new(0) };
+    static BATTERY_SEEN: Cell<(u8, bool)> = const { Cell::new((0, false)) };
+}
+
+fn autohide() -> bool {
+    crate::extras::on("bar_autohide")
+}
+
+fn relayout_all() {
+    for_bars(|b| {
+        b.relayout();
+        b.redraw();
+    });
+}
+
+/// Área de trabalho virtual: relida junto com o teclado (o Windows não avisa a troca).
+fn update_space() {
+    let name = if config::module_on(Module::Space) {
+        crate::topextra::desktops().map(|(names, cur)| names[cur].clone())
+    } else {
+        None
+    };
+    if SPACE.with_borrow(|n| *n != name) {
+        SPACE.with_borrow_mut(|n| *n = name);
+        relayout_all();
+    }
+}
+
+/// App em foco mudou: nome na barra e a cor da linha dinâmica.
+fn update_focus_app() {
+    let on = config::module_on(Module::App);
+    let dyn_on = crate::extras::on("bar_dyncolor");
+    if !on && !dyn_on {
+        return;
+    }
+    if !crate::topextra::update_focus() {
+        return;
+    }
+    if dyn_on {
+        let color = crate::topextra::focus()
+            .filter(|f| !f.source.is_empty())
+            .and_then(|f| crate::apps::load_icon(&f.source, 32))
+            .and_then(|icon| crate::render::icon_color(&icon));
+        DYN_COLOR.set(color);
+    }
+    relayout_all();
+}
+
+fn update_battery() {
+    if !config::module_on(Module::Battery) {
+        return;
+    }
+    let seen = crate::topextra::battery().map_or((0, false), |b| (b.percent, b.charging));
+    if seen != BATTERY_SEEN.get() {
+        BATTERY_SEEN.set(seen);
+        relayout_all();
+    }
+}
+
+/// A cada 30 s: avisos; clima a cada 30 min; agenda a cada 15 min.
+fn slow_tick() {
+    let n = SLOW_TICKS.get();
+    SLOW_TICKS.set(n.wrapping_add(1));
+    if config::module_on(Module::Notify) {
+        crate::topextra::refresh_notify();
+    }
+    if config::module_on(Module::Weather) && (n % 60 == 0 || crate::topextra::weather().is_none() && n % 4 == 0) {
+        crate::topextra::refresh_weather();
+    }
+    if config::module_on(Module::Event) && n % 30 == 0 {
+        crate::topextra::refresh_events();
+    }
+}
+
+/// Ferramentas mudaram (timer andou, ligou ou desligou uma): refaz a barra se elas aparecem.
+pub fn tools_changed() {
+    if active() && config::module_on(Module::Tools) {
+        relayout_all();
+    }
+}
+
+/// Retângulo (tela) do primeiro item de um módulo na barra principal.
+pub fn item_screen_rect(m: Module) -> Option<RECT> {
+    let main = MAIN.get();
+    with_bar(main, |b| {
+        let kind = b.items.iter().map(|i| i.kind).find(|k| {
+            matches!(
+                (m, k),
+                (Module::Menu, Kind::Menu)
+                    | (Module::App, Kind::App)
+                    | (Module::Event, Kind::Event)
+                    | (Module::Weather, Kind::Weather)
+                    | (Module::Battery, Kind::Battery)
+            )
+        })?;
+        b.item_rect(kind)
+    })
+    .flatten()
 }
 
 /// Repaint date labels and any open panel after a Windows UI-language change.
@@ -966,7 +1381,12 @@ pub fn settings_changed() {
     update_stats();
     update_usage();
     update_keyboard();
+    update_space();
+    update_focus_app();
+    SLOW_TICKS.set(0);
+    slow_tick();
     for_bars(|b| {
+        b.place();
         b.relayout();
         b.redraw();
     });
@@ -1157,6 +1577,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 match hit {
                     Some((Kind::Tray(_), _)) => tray_click(hwnd, lp, TrayButton::Left),
                     Some((Kind::Desktop, _)) => crate::apps::show_desktop(),
+                    Some((Kind::Notify, _)) => crate::topextra::open_notifications(),
+                    Some((Kind::Tool(i), Some(rect))) => {
+                        if let Some(t) = crate::tools::bar_tools().get(i as usize) {
+                            crate::tools::bar_click(t, rect);
+                        }
+                    }
                     Some((Kind::Keyboard, _)) => {
                         // Fora do borrow da barra: o menu roda um laço de mensagens.
                         if let Some(anchor) = with_bar(hwnd, |b| b.anchor(Kind::Keyboard)) {
@@ -1191,6 +1617,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let x = (lp.0 & 0xffff) as i16 as i32;
                 let steps = ((wp.0 >> 16) as u16 as i16) as f32 / WHEEL_DELTA as f32;
                 let hit = with_bar(hwnd, |b| b.hit((x - b.rect.left) as f32)).flatten();
+                if hit == Some(Kind::Space) {
+                    // Roda para baixo: área de trabalho da direita; para cima: a da esquerda.
+                    crate::topextra::switch_desktop(if steps < 0.0 { 1 } else { -1 });
+                }
                 if hit == Some(Kind::Keyboard) {
                     // Roda para baixo: próximo layout; para cima: o anterior.
                     crate::keyboard::cycle(steps < 0.0);
@@ -1213,10 +1643,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     TIMER_CLOCK => update_clock(),
                     TIMER_STATS => {
                         update_stats();
+                        update_battery();
                         panel::notify(crate::control::TICK, 0);
                     }
                     TIMER_USAGE => update_usage(),
-                    TIMER_KEYBOARD => update_keyboard(),
+                    TIMER_KEYBOARD => {
+                        update_keyboard();
+                        update_space();
+                    }
+                    TIMER_SLOW => slow_tick(),
+                    TIMER_AUTOHIDE => with_bar(hwnd, |b| b.autohide_tick()).unwrap_or(()),
                     TIMER_REBUILD => {
                         let _ = KillTimer(Some(hwnd), TIMER_REBUILD);
                         rebuild();
@@ -1247,6 +1683,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         }
                     });
                 }
+                panel::notify(msg, wp.0);
+                LRESULT(0)
+            }
+            crate::topextra::WM_EXTRA => {
+                for_bars(|b| {
+                    b.relayout();
+                    b.redraw();
+                });
                 panel::notify(msg, wp.0);
                 LRESULT(0)
             }
@@ -1508,6 +1952,11 @@ pub fn create() {
         update_usage();
         SetTimer(Some(hwnd), TIMER_KEYBOARD, KEYBOARD_MS, None);
         update_keyboard();
+        SetTimer(Some(hwnd), TIMER_SLOW, SLOW_MS, None);
+        SLOW_TICKS.set(0);
+        update_focus_app();
+        update_space();
+        slow_tick();
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
         let hooks = [
@@ -1598,5 +2047,6 @@ unsafe extern "system" fn on_window_event(
     // Cada app tem o próprio layout: a sigla acompanha a troca de app na hora.
     if event == EVENT_SYSTEM_FOREGROUND {
         update_keyboard();
+        update_focus_app();
     }
 }

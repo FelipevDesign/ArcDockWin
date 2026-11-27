@@ -45,6 +45,8 @@ struct Sample {
     vram: Option<(u64, Option<u64>)>,
     cpu_temp: Option<f64>,
     gpu_temp: Option<f64>,
+    /// Rede: (download, upload) em bytes por segundo.
+    net: Option<(f64, f64)>,
 }
 
 pub struct PerfPanel {
@@ -133,7 +135,7 @@ impl PanelContent for PerfPanel {
             frac: v.map(|v| (v / 100.0) as f32),
             level: level(v, 75.0, 90.0),
         };
-        vec![
+        let out = vec![
             Widget::Banner { glyph: crate::topbar::GLYPH_CPU, image: None, text: "Desempenho".into(), sub: self.cpu_name.clone() },
             Widget::Separator,
             Widget::Label("Recursos".into()),
@@ -143,9 +145,21 @@ impl PanelContent for PerfPanel {
             Widget::Label("Temperaturas".into()),
             temp("CPU", s.cpu_temp),
             temp("GPU", s.gpu_temp),
+        ];
+        let mut out = out;
+        if crate::extras::on("bar_net") {
+            let (down, up) = s.net.map_or(("—".into(), "—".into()), |(d, u)| (speed(d), speed(u)));
+            // Barra numa escala de 0 a 100 Mbit/s (12,5 MB/s).
+            let frac = |v: Option<f64>| v.map(|v| (v / 12_500_000.0).min(1.0) as f32);
+            out.push(Widget::Label("Rede".into()));
+            out.push(Widget::Meter { glyph: 0xE896, label: "Download".into(), value: down, detail: None, frac: frac(s.net.map(|n| n.0)), level: 0 });
+            out.push(Widget::Meter { glyph: 0xE898, label: "Upload".into(), value: up, detail: None, frac: frac(s.net.map(|n| n.1)), level: 0 });
+        }
+        out.extend([
             Widget::Separator,
             Widget::Row { id: TASKMGR, glyph: Some(GLYPH_ACTIVITY), text: "Abrir Gerenciador de Tarefas".into(), sub: None, selected: false },
-        ]
+        ]);
+        out
     }
 
     fn event(&mut self, ev: Event) -> bool {
@@ -193,8 +207,17 @@ fn collect(sample: Arc<Mutex<Sample>>, stop: Arc<AtomicBool>, hwnd: isize) {
     let mut usage = crate::status::Usage::new();
     let luid = gpu.as_ref().map(|g| g.luid.clone()).unwrap_or_default();
     let mut first = true;
+    let mut net_last: Option<(std::time::Instant, u64, u64)> = None;
     while !stop.load(Ordering::Acquire) {
         let mut s = Sample { cpu: usage.cpu(), mem: memory(), ..Default::default() };
+        if let Some((rx, tx)) = net_bytes() {
+            let now = std::time::Instant::now();
+            if let Some((t, r0, t0)) = net_last {
+                let dt = (now - t).as_secs_f64().max(0.001);
+                s.net = Some((rx.saturating_sub(r0) as f64 / dt, tx.saturating_sub(t0) as f64 / dt));
+            }
+            net_last = Some((now, rx, tx));
+        }
         if let Some(p) = &pdh {
             let (util, used) = p.read(&luid);
             s.gpu = util;
@@ -218,6 +241,39 @@ fn collect(sample: Arc<Mutex<Sample>>, stop: Arc<AtomicBool>, hwnd: isize) {
         // A primeira volta é curta: CPU e PDH precisam de duas leituras para dar a taxa.
         std::thread::park_timeout(if first { Duration::from_millis(300) } else { INTERVAL });
         first = false;
+    }
+}
+
+/// "1,2 MB/s", "340 KB/s".
+fn speed(b: f64) -> String {
+    if b >= 1024.0 * 1024.0 {
+        format!("{:.1} MB/s", b / 1024.0 / 1024.0).replace('.', ",")
+    } else {
+        format!("{:.0} KB/s", b / 1024.0)
+    }
+}
+
+/// Bytes recebidos e enviados por todas as placas de rede físicas ligadas.
+fn net_bytes() -> Option<(u64, u64)> {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    unsafe {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        if GetIfTable2(&mut table).is_err() || table.is_null() {
+            return None;
+        }
+        let t = &*table;
+        let rows = std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize);
+        let (mut rx, mut tx) = (0u64, 0u64);
+        for r in rows {
+            // Só placas de hardware (sem loopback, filtros e adaptadores virtuais duplicados).
+            if r.OperStatus == IfOperStatusUp && r.InterfaceAndOperStatusFlags._bitfield & 1 != 0 && r.Type != 24 {
+                rx += r.InOctets;
+                tx += r.OutOctets;
+            }
+        }
+        FreeMibTable(table as *const c_void);
+        Some((rx, tx))
     }
 }
 

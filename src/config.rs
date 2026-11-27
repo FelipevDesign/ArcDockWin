@@ -278,6 +278,25 @@ pub enum Module {
     /// Idioma de entrada (layout de teclado) do app em foco; o clique troca de layout.
     /// Só aparece com 2+ layouts instalados.
     Keyboard,
+    /// Menu do sistema (logo do Windows na ponta esquerda): Sobre este PC, recentes,
+    /// forçar encerramento e energia.
+    Menu,
+    /// Nome do app em foco, em negrito; o clique abre o menu do app.
+    App,
+    /// Nome da área de trabalho virtual atual; clique ou roda troca.
+    Space,
+    /// Histórico da área de transferência, coletor de cores e timer de foco.
+    Tools,
+    /// Captura de tela (Ferramenta de Captura).
+    Shot,
+    /// Clima (Open-Meteo, sem conta).
+    Weather,
+    /// Próximo compromisso (link iCal privado da agenda).
+    Event,
+    /// Bateria (só em notebook).
+    Battery,
+    /// Central de notificações (Win+N), com o número de avisos.
+    Notify,
 }
 
 /// Zona da barra: a ordem dos módulos vale dentro de cada uma.
@@ -310,7 +329,11 @@ impl Zone {
 }
 
 impl Module {
-    pub const ALL: [Module; 8] = [
+    pub const ALL: [Module; 17] = [
+        // Os da esquerda antes do CPU/RAM: com a mesma ordem gravada, o índice decide.
+        Module::Menu,
+        Module::App,
+        Module::Space,
         Module::Stats,
         Module::Clock,
         Module::Tray,
@@ -319,6 +342,12 @@ impl Module {
         Module::Codex,
         Module::Desktop,
         Module::Keyboard,
+        Module::Tools,
+        Module::Shot,
+        Module::Weather,
+        Module::Event,
+        Module::Battery,
+        Module::Notify,
     ];
 
     fn key(self) -> &'static str {
@@ -331,6 +360,15 @@ impl Module {
             Module::Codex => "codex",
             Module::Desktop => "desktop",
             Module::Keyboard => "keyboard",
+            Module::Menu => "menu",
+            Module::App => "app",
+            Module::Space => "space",
+            Module::Tools => "tools",
+            Module::Shot => "shot",
+            Module::Weather => "weather",
+            Module::Event => "event",
+            Module::Battery => "battery",
+            Module::Notify => "notify",
         }
     }
 
@@ -345,6 +383,15 @@ impl Module {
             Module::Codex => "Uso do Codex",
             Module::Desktop => "Mostrar área de trabalho",
             Module::Keyboard => "Idioma do teclado",
+            Module::Menu => "Menu do sistema",
+            Module::App => "App em foco",
+            Module::Space => "Área de trabalho virtual",
+            Module::Tools => "Ferramentas",
+            Module::Shot => "Captura de tela",
+            Module::Weather => "Clima",
+            Module::Event => "Próximo compromisso",
+            Module::Battery => "Bateria",
+            Module::Notify => "Notificações",
         }
     }
 
@@ -356,6 +403,12 @@ impl Module {
             Module::Codex => "Codex",
             Module::Desktop => "Área de trabalho",
             Module::Keyboard => "Teclado",
+            Module::Menu => "Menu",
+            Module::App => "App",
+            Module::Space => "Desktop",
+            Module::Shot => "Captura",
+            Module::Event => "Agenda",
+            Module::Notify => "Avisos",
             m => m.label(),
         }
     }
@@ -370,6 +423,11 @@ impl Module {
             Module::Desktop => (Zone::Right, 2),
             // Depois da bandeja e antes da Central, como na barra de tarefas do Windows.
             Module::Claude | Module::Codex | Module::Keyboard => (Zone::Right, 0),
+            Module::Menu | Module::App | Module::Space => (Zone::Left, 0),
+            Module::Event => (Zone::Center, 1),
+            Module::Tools | Module::Shot | Module::Weather | Module::Battery => (Zone::Right, 0),
+            // Na ponta direita, como no macOS.
+            Module::Notify => (Zone::Right, 99),
         }
     }
 }
@@ -403,7 +461,8 @@ pub fn modules() -> Vec<Slot> {
         .map(|(i, m)| {
             let legacy_on = match m {
                 Module::Stats => legacy,
-                Module::Claude | Module::Codex => false,
+                // Os que precisam de algo do usuário (conta, link, local) começam desligados.
+                Module::Claude | Module::Codex | Module::Tools | Module::Shot | Module::Weather | Module::Event => false,
                 _ => true,
             };
             let (zone, order, on) = parse_slot(m, get(&format!("mod.{}", m.key())).as_deref(), legacy_on);

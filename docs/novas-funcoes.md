@@ -72,3 +72,29 @@ o Espaço fica com ele.
   atalho ou da linha do `pinned.txt`), ou viram um item à parte. Ex.: Claude e Claude2.
 - **Sacudir o mouse aumenta o cursor** (Atalhos e mouse): tamanho e sensibilidade
   ajustáveis; não precisa de administrador. Feche o Shake to Find Cursor antes.
+
+## Barra do topo
+Módulos novos (Configurações › Barra do topo, cada um com o seu interruptor, zona e ordem):
+- **Menu do sistema** (logo do Windows na ponta esquerda): Sobre este PC, Configurações,
+  Microsoft Store, Itens recentes (apps e arquivos), Forçar encerramento… (quem não
+  responde aparece primeiro, com confirmação), Suspender, Reiniciar…/Desligar… (com
+  confirmação), Bloquear tela e Sair da conta.
+- **App em foco**, em negrito: nova janela, minimizar, fechar janela, mostrar no
+  Explorador, encerrar o app e forçar encerramento.
+- **Área de trabalho virtual**: o nome da atual; clique lista todas, a roda do mouse troca.
+- **Ferramentas**: histórico da área de transferência, coletor de cores e timer de foco
+  (com os minutos que faltam), as que estiverem ligadas em Ferramentas.
+- **Captura de tela**: área, janela, tela inteira e gravação, pela Ferramenta de Captura.
+- **Clima** (Open-Meteo, sem conta): local pela internet ou pela cidade digitada no painel;
+  atualiza a cada 30 min.
+- **Próximo compromisso**: cole o endereço secreto iCal da agenda no painel; atualiza a cada
+  15 min e avisa (bipe + painel aberto) N minutos antes.
+- **Bateria**: % e, na opção, o tempo restante; o clique mostra o modo de energia.
+- **Notificações**: sino com o número de avisos (lua com o Não incomodar ligado); abre o Win+N.
+
+Páginas **Barra: visual** (fundo transparente, igual ao dock ou personalizado com cor,
+opacidade, desfoque, linha e cantos; cor do texto; sombra no texto; cor dinâmica na linha;
+ocultar automaticamente) e **Barra: recursos** (velocidade da rede no painel de desempenho,
+Não incomodar na Central de Controle, relógios mundiais no calendário, timer de foco liga
+o Não incomodar, aviso antes do compromisso, tempo da bateria, °C/°F).
+As páginas das Configurações agora rolam com a roda do mouse.

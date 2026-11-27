@@ -669,7 +669,7 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
 }
 
 /// (key, source) do app dono da janela.
-fn window_app(hwnd: HWND, procs: &mut HashMap<u32, String>) -> Option<(String, String)> {
+pub(crate) fn window_app(hwnd: HWND, procs: &mut HashMap<u32, String>) -> Option<(String, String)> {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     let path = procs.entry(pid).or_insert_with(|| host_path(pid)).clone();

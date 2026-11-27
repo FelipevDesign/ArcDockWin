@@ -41,6 +41,7 @@ const BRIGHT: u32 = BASE + 8;
 const PREV: u32 = BASE + 9;
 const PLAY: u32 = BASE + 10;
 const NEXT: u32 = BASE + 11;
+const DND: u32 = BASE + 12;
 
 const GLYPH_POWER: u16 = 0xE7E8;
 const GLYPH_DARK: u16 = 0xE793;
@@ -70,7 +71,7 @@ pub struct ControlCenter {
 }
 
 /// Glifos da fonte Segoe Fluent Icons.
-fn battery_glyph(b: &status::Battery) -> u16 {
+pub fn battery_glyph(b: &status::Battery) -> u16 {
     let level = ((b.percent as u16 + 5) / 10).min(10);
     match (b.charging, level) {
         (true, l) => 0xEBAB + l,  // BatteryCharging0..10
@@ -164,6 +165,12 @@ impl ControlCenter {
         let dark = !crate::light_theme();
         let sub = if dark { "Ligado" } else { "Desligado" };
         cards.push(Card::Tile(Tile { glyph: GLYPH_DARK, title: "Modo Escuro".into(), sub: sub.into(), on: dark, toggle: DARK, open: DARK }));
+        if crate::extras::on("bar_dnd")
+            && let Some(on) = crate::topextra::dnd()
+        {
+            let sub = if on { "Ligado" } else { "Desligado" };
+            cards.push(Card::Tile(Tile { glyph: 0xE708, title: "Não incomodar".into(), sub: sub.into(), on, toggle: DND, open: DND }));
+        }
         let (g, sub) = match status::battery() {
             Some(b) => (battery_glyph(&b), format!("Bateria {}%", b.percent)),
             None => (GLYPH_POWER, "Desligar, reiniciar…".into()),
@@ -233,6 +240,11 @@ impl PanelContent for ControlCenter {
             Event::Click(BT) => {
                 let on = self.bt.summary().0 == Some(true);
                 return self.bt.set_on(!on);
+            }
+            Event::Click(DND) => {
+                let on = crate::topextra::dnd() == Some(true);
+                crate::topextra::set_dnd(!on);
+                return true;
             }
             Event::Click(DARK) => {
                 set_dark(crate::light_theme());

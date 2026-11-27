@@ -76,6 +76,13 @@ impl Glass {
         let _ = self.shape.SetCornerRadius(Vector2 { X: radius, Y: radius });
     }
 
+    /// Só os cantos de baixo arredondados (barra do topo): a forma passa `r` acima da janela.
+    pub fn bottom_round(&self, w: f32, h: f32, r: f32) {
+        let _ = self.shape.SetOffset(Vector2 { X: 0.0, Y: -r });
+        let _ = self.shape.SetSize(Vector2 { X: w, Y: h + r });
+        let _ = self.shape.SetCornerRadius(Vector2 { X: r, Y: r });
+    }
+
     pub fn resize(&self, w: f32, h: f32) {
         let _ = self.shape.SetSize(Vector2 { X: w, Y: h });
     }

@@ -79,7 +79,50 @@ pub const EXTRAS: &[Extra] = &[
     t("ql_ctrl", "Usar Ctrl+Espaço", "Em vez de só Espaço"),
     s("ql_size", "Tamanho da janela", 40.0, 95.0, 72.0, "%", "ql_on"),
     s("ql_text_kb", "Limite para texto", 64.0, 4096.0, 1024.0, "KB", "ql_on"),
+    // Barra do topo: visual
+    Extra { key: "bar_style", label: "Fundo da barra", sub: "", kind: Kind::Choice(BAR_STYLES), needs: "" },
+    Extra { key: "bar_ink", label: "Cor do texto", sub: "", kind: Kind::Choice(&["Automática", "Clara", "Escura"]), needs: "" },
+    t("bar_shadow", "Sombra leve no texto", "Ajuda a ler sobre wallpapers claros e escuros"),
+    t("bar_dyncolor", "Cor dinâmica na linha de baixo", "Usa a cor do ícone do app em foco"),
+    Extra { key: "bar_color", label: "Cor do fundo", sub: "", kind: Kind::Choice(BAR_COLORS), needs: "bar_style=2" },
+    s("bar_opacity", "Opacidade do fundo", 0.0, 100.0, 55.0, "%", "bar_style=2"),
+    Extra { key: "bar_blur", label: "Desfoque atrás da barra", sub: "", kind: Kind::Toggle, needs: "bar_style=2" },
+    Extra { key: "bar_line", label: "Linha embaixo", sub: "", kind: Kind::Toggle, needs: "bar_style=2" },
+    s("bar_radius", "Arredondar os cantos de baixo", 0.0, 16.0, 0.0, "px", "bar_style=2"),
+    t("bar_autohide", "Ocultar a barra automaticamente", "Aparece quando o mouse encosta no topo da tela"),
+    // Barra do topo: recursos
+    t("bar_net", "Velocidade da rede no painel de desempenho", "Download e upload, no clique do CPU/RAM"),
+    t("bar_dnd", "Não incomodar na Central de Controle", "Silencia os avisos do Windows"),
+    t("bar_world", "Relógios mundiais no calendário", "Escolha as cidades no próprio calendário"),
+    t("bar_focus_dnd", "Timer de foco liga o Não incomodar", "Volta ao normal quando o tempo acaba"),
+    s("bar_event_alert", "Aviso antes do compromisso", 0.0, 60.0, 10.0, "min", ""),
+    t("bar_battery_time", "Tempo restante ao lado da bateria", "Só quando está na bateria"),
+    Extra { key: "bar_temp_unit", label: "Temperatura", sub: "", kind: Kind::Choice(&["Celsius", "Fahrenheit"]), needs: "" },
 ];
+
+pub const BAR_STYLES: &[&str] = &["Transparente", "Igual ao dock", "Personalizado"];
+/// Cores do fundo personalizado (a última é a cor de destaque do Windows).
+pub const BAR_COLORS: &[&str] = &["Preto", "Grafite", "Branco", "Azul", "Verde", "Roxo", "Vinho", "Destaque"];
+
+/// RGB da cor `i` de [`BAR_COLORS`].
+pub fn bar_color_rgb(i: usize) -> [u8; 3] {
+    match i {
+        0 => [12, 12, 14],
+        1 => [44, 46, 52],
+        2 => [246, 246, 248],
+        3 => [28, 64, 140],
+        4 => [26, 92, 60],
+        5 => [74, 40, 128],
+        6 => [110, 24, 40],
+        _ => {
+            let c = crate::accent_color().unwrap_or([0, 95, 184, 255]);
+            [c[0], c[1], c[2]]
+        }
+    }
+}
+
+/// Liga/desliga que começam ligados.
+const DEFAULT_ON: &[&str] = &["bar_net", "bar_dnd", "bar_world", "bar_focus_dnd"];
 
 /// Páginas extras das Configurações: título, glifo e cartões (chaves de cada cartão).
 pub const PAGES: &[(&str, u16, &[&[&str]])] = &[
@@ -114,6 +157,23 @@ pub const PAGES: &[(&str, u16, &[&[&str]])] = &[
         ],
     ),
     ("Pré-visualização", 0xE7B3, &[&["ql_on", "ql_ctrl", "ql_size", "ql_text_kb"]]),
+    (
+        "Barra: visual",
+        0xE771,
+        &[
+            &["bar_style", "bar_ink", "bar_shadow", "bar_dyncolor"],
+            &["bar_color", "bar_opacity", "bar_blur", "bar_line", "bar_radius"],
+            &["bar_autohide"],
+        ],
+    ),
+    (
+        "Barra: recursos",
+        0xE8FD,
+        &[
+            &["bar_net", "bar_dnd", "bar_world"],
+            &["bar_focus_dnd", "bar_event_alert", "bar_battery_time", "bar_temp_unit"],
+        ],
+    ),
 ];
 
 pub fn index(key: &str) -> Option<usize> {
@@ -123,7 +183,10 @@ pub fn index(key: &str) -> Option<usize> {
 /// Opção ligada (as que não são liga/desliga contam como ligadas).
 pub fn on(key: &str) -> bool {
     match index(key).map(|i| EXTRAS[i].kind) {
-        Some(Kind::Toggle) | None => config::raw(key).is_some_and(|v| v == "1"),
+        Some(Kind::Toggle) | None => match config::raw(key) {
+            Some(v) => v == "1",
+            None => DEFAULT_ON.contains(&key),
+        },
         _ => true,
     }
 }
@@ -148,7 +211,10 @@ pub fn choice(key: &str) -> usize {
 /// Habilitada: a opção de que ela depende está ligada.
 pub fn enabled(i: usize) -> bool {
     let n = EXTRAS[i].needs;
-    n.is_empty() || on(n)
+    match n.split_once('=') {
+        Some((k, v)) => v.parse().is_ok_and(|v: usize| choice(k) == v),
+        None => n.is_empty() || on(n),
+    }
 }
 
 /// Fração (0..1) do controle deslizante `i`.
@@ -217,6 +283,7 @@ pub fn changed(key: &str) {
         }
         "zones" | "zone" | "shadow" => crate::zones::sync(),
         "ql" => crate::quicklook::sync(),
+        "bar" => crate::topbar::settings_changed(),
         "pin" => {
             crate::reload_pins();
             crate::apply_settings(false);

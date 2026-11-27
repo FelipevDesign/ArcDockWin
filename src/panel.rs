@@ -399,6 +399,10 @@ pub trait PanelContent {
     fn centered(&self) -> bool {
         false
     }
+    /// `true` alinha a borda esquerda do painel à do item (itens na ponta esquerda da barra).
+    fn left_aligned(&self) -> bool {
+        false
+    }
     /// `true` abre acima do item (itens do dock, na base da tela); `false` abre abaixo.
     fn above(&self) -> bool {
         false
@@ -1084,7 +1088,9 @@ impl Panel {
 
         // Posição: borda direita na do item (ou centro no centro), sem sair da área de trabalho.
         let side = (8.0 * s) as i32;
-        let want = if self.content.centered() {
+        let want = if self.content.left_aligned() {
+            self.item.left
+        } else if self.content.centered() {
             (self.item.left + self.item.right - self.w) / 2
         } else {
             self.item.right - self.w

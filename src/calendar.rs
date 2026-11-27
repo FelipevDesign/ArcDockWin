@@ -17,6 +17,10 @@ const MONTHS: [&str; 12] = [
 ];
 const PREV: u32 = 1;
 const NEXT: u32 = 2;
+/// Relógios mundiais: escolher cidades, pronto, e cada cidade (CITY + índice).
+const PICK: u32 = 3;
+const DONE: u32 = 4;
+const CITY: u32 = 100;
 
 /// Dia da semana (0 = domingo), algoritmo de Sakamoto.
 fn weekday(y: i32, m: u32, d: u32) -> usize {
@@ -38,12 +42,14 @@ fn days_in(y: i32, m: u32) -> u32 {
 pub struct Calendar {
     year: i32,
     month: u32,
+    /// Escolhendo as cidades dos relógios mundiais.
+    picking: bool,
 }
 
 impl Calendar {
     pub fn new() -> Self {
         let t = unsafe { GetLocalTime() };
-        Self { year: t.wYear as i32, month: t.wMonth as u32 }
+        Self { year: t.wYear as i32, month: t.wMonth as u32, picking: false }
     }
 }
 
@@ -56,6 +62,48 @@ impl PanelContent for Calendar {
     }
 
     fn build(&mut self) -> Vec<Widget> {
+        if self.picking {
+            let chosen = crate::topextra::chosen_cities();
+            let mut out = vec![Widget::Heading { text: crate::i18n::tr("Relógios mundiais"), buttons: vec![(glyph::CHECK, DONE)] }];
+            for (i, (name, _)) in crate::topextra::CITIES.iter().enumerate() {
+                out.push(Widget::Row { id: CITY + i as u32, glyph: None, text: (*name).into(), sub: None, selected: chosen.contains(&i) });
+            }
+            return out;
+        }
+        let mut out = self.month_view();
+        if crate::extras::on("bar_world") {
+            out.push(Widget::Separator);
+            out.push(Widget::Heading { text: crate::i18n::tr("Relógios mundiais"), buttons: vec![(0xE710, PICK)] });
+            let rows = crate::topextra::world_rows(CITY);
+            if rows.is_empty() {
+                out.push(Widget::Text(crate::i18n::tr("Toque no + para escolher as cidades")));
+            }
+            out.extend(rows);
+        }
+        out
+    }
+
+    fn event(&mut self, ev: Event) -> bool {
+        match ev {
+            Event::Click(PICK) => {
+                self.picking = true;
+                true
+            }
+            Event::Click(DONE) => {
+                self.picking = false;
+                true
+            }
+            Event::Click(id) if self.picking && id >= CITY => {
+                crate::topextra::toggle_city((id - CITY) as usize);
+                true
+            }
+            ev => self.month_event(ev),
+        }
+    }
+}
+
+impl Calendar {
+    fn month_view(&mut self) -> Vec<Widget> {
         let t = unsafe { GetLocalTime() };
         let (ty, tm, td) = (t.wYear as i32, t.wMonth as u32, t.wDay as u32);
         let title = if crate::i18n::is_traditional_chinese() {
@@ -119,7 +167,7 @@ impl PanelContent for Calendar {
         ]
     }
 
-    fn event(&mut self, ev: Event) -> bool {
+    fn month_event(&mut self, ev: Event) -> bool {
         match ev {
             Event::Click(PREV) => {
                 (self.year, self.month) = if self.month == 1 { (self.year - 1, 12) } else { (self.year, self.month - 1) };

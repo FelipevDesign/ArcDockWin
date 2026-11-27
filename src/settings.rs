@@ -51,7 +51,7 @@ const BAR_PAGE: usize = 3;
 const CARD_RADIUS: f32 = 10.0;
 
 /// Seções da barra lateral: nome e glifo (Segoe Fluent Icons).
-const PAGES: [(&str, u16); 10] = [
+const PAGES: [(&str, u16); 12] = [
     ("Dock", 0xE71D),
     ("Aparência", 0xE790),
     ("Animações", 0xE768),
@@ -61,6 +61,8 @@ const PAGES: [(&str, u16); 10] = [
     (crate::extras::PAGES[2].0, crate::extras::PAGES[2].1),
     (crate::extras::PAGES[3].0, crate::extras::PAGES[3].1),
     (crate::extras::PAGES[4].0, crate::extras::PAGES[4].1),
+    (crate::extras::PAGES[5].0, crate::extras::PAGES[5].1),
+    (crate::extras::PAGES[6].0, crate::extras::PAGES[6].1),
     ("Geral", 0xE713),
 ];
 /// Primeira página das funções extras (`extras.rs`).
@@ -156,6 +158,9 @@ struct Win {
     text: Text,
     buf: Option<Buffer>,
     page: usize,
+    /// Rolagem do conteúdo da seção (px já na escala) e o máximo dela.
+    scroll: f32,
+    max_scroll: f32,
     zones: Vec<Zone>,
     hot: Option<usize>,
     pressed: Option<usize>,
@@ -332,7 +337,12 @@ fn toggle(o: Opt) {
 fn run(act: Act) {
     match act {
         Act::Page(i) => {
-            with_win(|w| w.page = i);
+            with_win(|w| {
+                if w.page != i {
+                    w.scroll = 0.0;
+                }
+                w.page = i;
+            });
         }
         Act::Toggle(o) => toggle(o),
         Act::Effect(e) => {
@@ -528,9 +538,9 @@ impl Win {
                 pm.stroke_path(&p, &paint(c), &Stroke { width, ..Default::default() }, tf, None);
             }
         };
-        let mut texts: Vec<TextOp> = Vec::new();
+        let texts: RefCell<Vec<TextOp>> = RefCell::new(Vec::new());
         let mut text = |t: &str, font: Font, rect: [f32; 4], align: DWRITE_TEXT_ALIGNMENT, color: [f32; 4]| {
-            texts.push(TextOp { text: t.encode_utf16().collect(), font, rect, align, color, wrap: false, clip: None });
+            texts.borrow_mut().push(TextOp { text: t.encode_utf16().collect(), font, rect, align, color, wrap: false, clip: None });
         };
         let glyph = |g: u16| String::from_utf16_lossy(&[g]);
         let (lead, trail, center) = (DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -552,8 +562,9 @@ impl Win {
         // Conteúdo: título da seção e cartões.
         let (cx, cr) = (side + 8.0 * s, bw as f32 - 28.0 * s);
         let cw = cr - cx;
-        text(&tr(PAGES[self.page].0), Font::Header, [cx + 4.0 * s, 10.0 * s, cw, 48.0 * s], lead, pal.ink);
-        let mut y = 72.0 * s;
+        let side_texts = texts.borrow().len();
+        let side_zones = zones.len();
+        let mut y = 72.0 * s - self.scroll;
         for block in blocks(self.page) {
             let rows = match block {
                 Block::Label(t) => {
@@ -695,8 +706,30 @@ impl Win {
                                 text(&tr(e.label), Font::Body, [lx + 14.0 * s, ry, tl - lx - 30.0 * s, rh], lead, ink);
                                 text(&crate::extras::label(i), Font::Body, [rx - vw, ry, vw, rh], trail, ink);
                             }
+                            Kind::Choice(opts) if e.key == "bar_color" => {
+                                // Cores em bolinhas; a escolhida ganha um anel.
+                                let (sw, d) = (30.0 * s, 20.0 * s);
+                                let x0 = rx - opts.len() as f32 * sw;
+                                let cur = crate::extras::choice(e.key);
+                                for k in 0..opts.len() {
+                                    let [r, g, b] = crate::extras::bar_color_rgb(k);
+                                    let cx_ = x0 + k as f32 * sw + sw / 2.0;
+                                    let r_ = [cx_ - d / 2.0, cy - d / 2.0, d, d];
+                                    let a = if on { 255 } else { 90 };
+                                    fill(&mut pm, r_, d / 2.0, [r, g, b, a]);
+                                    stroke(&mut pm, r_, d / 2.0, pal.card_line, 1.0);
+                                    if k == cur {
+                                        let ring = [r_[0] - 3.0 * s, r_[1] - 3.0 * s, d + 6.0 * s, d + 6.0 * s];
+                                        stroke(&mut pm, ring, d / 2.0 + 3.0 * s, pal.accent, 2.0 * s);
+                                    } else if on {
+                                        zones.push(Zone { r: [x0 + k as f32 * sw, ry, sw, rh], radius: 8.0 * s, act: Act::Choice(i, k) });
+                                    }
+                                }
+                                text(&tr(e.label), Font::Body, [lx + 14.0 * s, ry, x0 - lx - 22.0 * s, rh], lead, ink);
+                            }
                             Kind::Choice(opts) => {
-                                let (sw, sh) = (84.0 * s, 28.0 * s);
+                                let wide = opts.iter().any(|o| tr(o).chars().count() > 10);
+                                let (sw, sh) = (if wide { 116.0 } else { 84.0 } * s, 28.0 * s);
                                 let x0 = rx - opts.len() as f32 * sw;
                                 fill(&mut pm, [x0, cy - sh / 2.0, opts.len() as f32 * sw, sh], 8.0 * s, pal.control);
                                 let cur = crate::extras::choice(e.key);
@@ -743,6 +776,29 @@ impl Win {
             }
             y += card[3] + 16.0 * s;
         }
+        // Rolagem: o que passou para baixo do título some (a área do título fica limpa).
+        self.max_scroll = (y + self.scroll - bh as f32 + 8.0 * s).max(0.0);
+        let head = 64.0 * s;
+        if self.scroll > 0.0 {
+            let x0 = (side as usize).min(bw as usize);
+            let data = pm.data_mut();
+            for row in 0..(head as usize).min(bh as usize) {
+                let start = (row * bw as usize + x0) * 4;
+                let end = (row + 1) * bw as usize * 4;
+                data[start..end].fill(0);
+            }
+            let mut k = 0;
+            texts.borrow_mut().retain(|t| {
+                k += 1;
+                k <= side_texts || t.rect[1] + t.rect[3] / 2.0 >= head
+            });
+            let mut k = 0;
+            zones.retain(|z| {
+                k += 1;
+                k <= side_zones || z.r[1] + z.r[3] / 2.0 >= head
+            });
+        }
+        text(&tr(PAGES[self.page].0), Font::Header, [cx + 4.0 * s, 10.0 * s, cw, 48.0 * s], lead, pal.ink);
 
         // Realce do mouse (menos na seção atual e nos controles deslizantes) e anel do foco.
         if let Some(z) = self.hot.and_then(|i| zones.get(i))
@@ -758,6 +814,7 @@ impl Win {
         }
         self.zones = zones;
         drop(pm);
+        let texts = texts.into_inner();
         self.text.draw(memdc, bw, bh, &texts);
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -933,6 +990,8 @@ pub fn open() {
             text,
             buf: None,
             page: 0,
+            scroll: 0.0,
+            max_scroll: 0.0,
             zones: Vec::new(),
             hot: None,
             pressed: None,
@@ -963,6 +1022,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),
+            WM_MOUSEWHEEL => {
+                let steps = ((wp.0 >> 16) as u16 as i16) as f32 / WHEEL_DELTA as f32;
+                with_win(|w| {
+                    let next = (w.scroll - steps * 64.0 * w.scale).clamp(0.0, w.max_scroll);
+                    if next != w.scroll {
+                        w.scroll = next;
+                        w.hot = None;
+                        w.redraw();
+                    }
+                });
+                LRESULT(0)
+            }
             WM_MOUSEMOVE => {
                 let (x, slide_to) = (lp, with_win(|w| w.drag_value(w.hit(lp).0)).flatten());
                 if let Some((o, v)) = slide_to {

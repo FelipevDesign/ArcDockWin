@@ -42,6 +42,7 @@ mod taskbar;
 mod tint;
 mod tooltip;
 mod topbar;
+mod topextra;
 mod tray;
 mod update;
 mod overflow;
@@ -1355,7 +1356,7 @@ pub fn light_theme() -> bool {
 }
 
 /// Cor de destaque do Windows (no registro vem como ABGR).
-fn accent_color() -> Option<[u8; 4]> {
+pub fn accent_color() -> Option<[u8; 4]> {
     let mut value: u32 = 0;
     let mut size = size_of::<u32>() as u32;
     let ok = unsafe {

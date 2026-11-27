@@ -315,6 +315,7 @@ unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
     if changed {
         crate::refresh_tools();
         crate::musicbar::update();
+        crate::topbar::tools_changed();
     }
     if changed || panel::is_open("timer") {
         panel::refresh();
@@ -352,6 +353,7 @@ fn start_timer(min: u64) {
     if let Ok(mut t) = TIMER_STATE.lock() {
         *t = Timer { end: Some(Instant::now() + Duration::from_secs(min * 60)), paused: None, done: false };
     }
+    crate::topextra::focus_timer(true);
     crate::refresh_tools();
 }
 
@@ -359,6 +361,7 @@ fn finish_timer() {
     if let Ok(mut t) = TIMER_STATE.lock() {
         *t = Timer { end: None, paused: None, done: true };
     }
+    crate::topextra::focus_timer(false);
     unsafe {
         let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK);
     }
@@ -369,6 +372,7 @@ fn stop_timer() {
     if let Ok(mut t) = TIMER_STATE.lock() {
         *t = Timer { end: None, paused: None, done: false };
     }
+    crate::topextra::focus_timer(false);
     crate::refresh_tools();
 }
 
@@ -385,12 +389,17 @@ fn pause_timer() {
 
 struct TimerPanel;
 
+thread_local! {
+    /// Painel aberto pela barra do topo: abre embaixo do item, não em cima.
+    static FROM_BAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl PanelContent for TimerPanel {
     fn centered(&self) -> bool {
         true
     }
     fn above(&self) -> bool {
-        true
+        !FROM_BAR.get()
     }
     fn width(&self) -> f32 {
         260.0
@@ -600,7 +609,7 @@ impl PanelContent for ClipPanel {
         true
     }
     fn above(&self) -> bool {
-        true
+        !FROM_BAR.get()
     }
     fn width(&self) -> f32 {
         360.0
@@ -805,7 +814,39 @@ fn toggle_panel(key: &'static str, anchor: POINT, make: impl FnOnce() -> Box<dyn
     panel::toggle(key, anchor_rect(anchor), make);
 }
 
+/// Ferramentas mostradas na barra do topo (histórico, coletor e timer ligados).
+pub fn bar_tools() -> Vec<&'static str> {
+    [(CLIP, "tool_clip"), (PICKER, "tool_picker"), (TIMER, "tool_timer")]
+        .into_iter()
+        .filter(|(_, k)| extras::on(k))
+        .map(|(s, _)| s)
+        .collect()
+}
+
+/// Minutos que faltam no timer de foco (None = parado).
+pub fn timer_minutes() -> Option<u64> {
+    let (left, _) = timer_left();
+    left.map(|d| d.as_secs().div_ceil(60))
+}
+
+/// Clique numa ferramenta da barra do topo: o painel abre embaixo do item.
+pub fn bar_click(source: &str, item: RECT) {
+    FROM_BAR.set(true);
+    let anchor = POINT { x: (item.left + item.right) / 2, y: item.bottom };
+    match source {
+        CLIP => toggle_panel("clip", anchor, || Box::new(ClipPanel)),
+        TIMER => {
+            if timer_left().1 {
+                stop_timer();
+            }
+            toggle_panel("timer", anchor, || Box::new(TimerPanel));
+        }
+        s => click(s, anchor),
+    }
+}
+
 pub fn click(source: &str, anchor: POINT) {
+    FROM_BAR.set(false);
     match source {
         SHELF => toggle_panel("shelf", anchor, || Box::new(ShelfPanel { icons: Vec::new() })),
         CLIP => toggle_panel("clip", anchor, || Box::new(ClipPanel)),
