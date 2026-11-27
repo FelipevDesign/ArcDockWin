@@ -1,0 +1,147 @@
+# Uma vez por dia: junta a última versão publicada do projeto original neste branch, testa,
+# compila e, só se tudo passar, publica um release neste fork (de onde o dock se atualiza).
+name: Sincronizar com o original
+
+on:
+  schedule:
+    - cron: "23 12 * * *" # 09:23 em São Paulo
+  workflow_dispatch:
+  push:
+    branches: [instagram-separado]
+    paths: [".github/workflows/sync-upstream.yml"]
+
+concurrency:
+  group: sync-upstream
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM: claudsondouglas/ArcDockWin
+  BRANCH: instagram-separado
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      tag: ${{ steps.check.outputs.tag }}
+      base: ${{ steps.merge.outputs.base }}
+      head: ${{ steps.merge.outputs.head }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Procurar versão nova
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Tag inesperada: $tag"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name')
+          if grep -qxF "$tag" <<< "$releases"; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "A versão $tag já foi publicada neste fork."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Juntar com os ajustes
+        id: merge
+        if: steps.check.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" "refs/tags/$TAG"
+          git merge --no-edit -m "Junta a versão $TAG do projeto original" FETCH_HEAD
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Conferir ajustes e versão
+        if: steps.check.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.check.outputs.tag }}
+        run: |
+          grep -qF "const REPO: &str = \"$GITHUB_REPOSITORY\";" src/update.rs || { echo "::error::O dock não aponta mais para este fork"; exit 1; }
+          test "$(grep -c 'is_web_app_id(' src/apps.rs)" -ge 3 || { echo "::error::O ajuste dos apps do Chrome sumiu"; exit 1; }
+          test "$(grep -c 'shortcut_web_app_id(' src/apps.rs)" -ge 2 || { echo "::error::O ajuste dos atalhos sumiu"; exit 1; }
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          test "v$version" = "$TAG" || { echo "::error::Cargo.toml ($version) não bate com $TAG"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.publish == 'true'
+
+      - name: Testar
+        if: steps.check.outputs.publish == 'true'
+        run: cargo test --release --locked
+
+      - name: Compilar
+        if: steps.check.outputs.publish == 'true'
+        run: cargo build --release --locked
+
+      - name: Guardar resultado
+        if: steps.check.outputs.publish == 'true'
+        env:
+          BASE: ${{ steps.merge.outputs.base }}
+        run: |
+          mkdir out
+          cp target/release/arcdockwin.exe out/
+          if [ "$(git rev-parse HEAD)" != "$BASE" ]; then
+            git bundle create out/merge.bundle "$BASE..$BRANCH"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.check.outputs.publish == 'true'
+        with:
+          name: sync-result
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sync-result
+          path: ${{ runner.temp }}/out
+
+      - name: Atualizar o branch
+        env:
+          BASE: ${{ needs.build.outputs.base }}
+          HEAD_SHA: ${{ needs.build.outputs.head }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$BASE" || { echo "::error::O branch mudou durante a compilação"; exit 1; }
+          if [ "$HEAD_SHA" != "$BASE" ]; then
+            git fetch "$RUNNER_TEMP/out/merge.bundle" "$BRANCH"
+            git merge --ff-only "$HEAD_SHA"
+            git push origin "HEAD:$BRANCH"
+          fi
+
+      - name: Publicar a versão
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          HEAD_SHA: ${{ needs.build.outputs.head }}
+        run: >
+          gh release create "$TAG" "$RUNNER_TEMP/out/arcdockwin.exe" --target "$HEAD_SHA" --latest
+          --title "ArcDockWin $TAG (com meus ajustes)"
+          --notes "Versão $TAG do original com os ajustes deste fork. Compilada do commit $HEAD_SHA."

@@ -21,7 +21,7 @@ use crate::config;
 
 /// Estado mudou (postada para o dock principal); wParam = 1: exe novo no lugar, reabrir.
 pub const WM_UPDATE: u32 = WM_APP + 52;
-const REPO: &str = "claudsondouglas/ArcDockWin";
+const REPO: &str = "FelipevDesign/ArcDockWin";
 const FIRST_CHECK: Duration = Duration::from_secs(30);
 const EVERY: Duration = Duration::from_secs(6 * 3600);
 
