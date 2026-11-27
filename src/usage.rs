@@ -187,10 +187,20 @@ fn when(at: i64, now: i64, off: i64) -> When {
 fn pace_warning(limits: &[Limit], now: i64, off: i64) -> Option<String> {
     let (l, at) = limits
         .iter()
-        .filter(|l| !l.session)
+        .filter(|l| l.window == Some(WEEK_SECS))
         .filter_map(|l| runs_out_at(l, now).map(|at| (l, at)))
         .min_by_key(|(_, at)| *at)?;
-    let (out, reset) = (when(at, now, off), when(l.resets_at?, now, off));
+    let reset_at = l.resets_at?;
+    let (out, reset) = (when(at, now, off), when(reset_at, now, off));
+    let time = |t: i64| {
+        let seconds = (t + off).rem_euclid(86400);
+        let (hour, minute) = (seconds / 3600, seconds / 60 % 60);
+        if (at + off).div_euclid(60) == (reset_at + off).div_euclid(60) {
+            format!("{hour:02}:{minute:02}:{:02}", seconds % 60)
+        } else {
+            format!("{hour:02}:{minute:02}")
+        }
+    };
     let m = l.model.as_deref();
     Some(if crate::i18n::is_english() {
         let word = |w| match w {
@@ -200,7 +210,8 @@ fn pace_warning(limits: &[Limit], now: i64, off: i64) -> Option<String> {
             When::Weekday(d) => format!("on {}", ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][d]),
         };
         let what = m.map_or("the weekly limit".into(), |m| format!("the {m} limit"));
-        format!("At this pace, {what} runs out {}, before it resets {}.", word(out), word(reset))
+        let wording = |bucket, t| if out == reset { format!("at {}", time(t)) } else { word(bucket) };
+        format!("At this pace, {what} runs out {}, before it resets {}.", wording(out, at), wording(reset, reset_at))
     } else if crate::i18n::is_traditional_chinese() {
         let word = |w| match w {
             When::Tonight => "今晚",
@@ -209,7 +220,8 @@ fn pace_warning(limits: &[Limit], now: i64, off: i64) -> Option<String> {
             When::Weekday(d) => ["週日", "週一", "週二", "週三", "週四", "週五", "週六"][d],
         };
         let what = m.map_or("每週限額".into(), |m| format!("{m} 限額"));
-        format!("按目前速度，{what}會在{}用完，早於{}的重置。", word(out), word(reset))
+        let wording = |bucket, t| if out == reset { time(t) } else { word(bucket).to_string() };
+        format!("按目前速度，{what}會在{}用完，早於{}的重置。", wording(out, at), wording(reset, reset_at))
     } else {
         let word = |w| match w {
             When::Tonight => "esta noite",
@@ -218,7 +230,8 @@ fn pace_warning(limits: &[Limit], now: i64, off: i64) -> Option<String> {
             When::Weekday(d) => ["no domingo", "na segunda", "na terça", "na quarta", "na quinta", "na sexta", "no sábado"][d],
         };
         let what = m.map_or("o limite semanal".into(), |m| format!("o limite do {m}"));
-        format!("Nesse ritmo, {what} acaba {}, antes de renovar {}.", word(out), word(reset))
+        let wording = |bucket, t| if out == reset { format!("às {}", time(t)) } else { word(bucket).to_string() };
+        format!("Nesse ritmo, {what} acaba {}, antes de renovar {}.", wording(out, at), wording(reset, reset_at))
     })
 }
 
@@ -949,5 +962,25 @@ mod tests {
         assert_eq!(when(local_noon + day, now, off), When::Tomorrow);
         assert_eq!(when(local_noon + day / 2 + 3 * 3600, now, off), When::Tonight);
         assert_eq!(when(local_noon + 2 * day, now, off), When::Weekday(0));
+    }
+
+    #[test]
+    fn pace_warns_for_a_primary_codex_week_and_distinguishes_times() {
+        let now = parse_iso("2026-11-27T21:00:00Z").unwrap();
+        let reset = parse_iso("2026-11-27T23:00:00Z").unwrap();
+        let payload = serde_json::json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 99.94,
+                    "limit_window_seconds": WEEK_SECS,
+                    "reset_at": reset
+                },
+                "secondary_window": null
+            }
+        });
+        let limits = codex_limits(&payload);
+        let warning = pace_warning(&limits, now, -3 * 3600).unwrap();
+        assert!(warning.contains("18:05"), "{warning}");
+        assert!(warning.contains("20:00"), "{warning}");
     }
 }
