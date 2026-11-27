@@ -43,6 +43,17 @@ struct State {
     zones: Vec<([f32; 4], Hit)>,
     /// Barra da faixa (x, largura) para o clique virar posição.
     bar: (f32, f32),
+    /// Ampliação com o mouse em cima (como os ícones): atual, alvo e se já segue o mouse.
+    zoom: f32,
+    zoom_to: f32,
+    tracking: bool,
+}
+
+const TIMER_ZOOM: usize = 2;
+
+/// Quanto o quadro cresce com o mouse em cima (acompanha a ampliação dos ícones).
+fn max_zoom() -> f32 {
+    if crate::config::magnify() { (1.0 + (crate::config::magnify_scale() - 1.0) * 0.3).clamp(1.05, 1.25) } else { 1.08 }
 }
 
 thread_local! {
@@ -101,6 +112,9 @@ fn ensure() -> Option<HWND> {
                 visible: false,
                 zones: Vec::new(),
                 bar: (0.0, 1.0),
+                zoom: 1.0,
+                zoom_to: 1.0,
+                tracking: false,
             })
         });
         Some(hwnd)
@@ -176,7 +190,9 @@ fn move_now() {
     ST.with_borrow_mut(|s| {
         let Some(s) = s.as_mut() else { return };
         let Some((dock, scale)) = s.anchor else { return };
-        let pos = place(dock, s.size.0, scale);
+        let (h0, w0) = ((dock.bottom - dock.top).max(40), (WIDTH * scale).round() as i32);
+        let base = place(dock, w0, scale);
+        let pos = POINT { x: base.x + (w0 - s.size.0) / 2, y: base.y + h0 - s.size.1 };
         unsafe {
             let flags = SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER;
             let _ = SetWindowPos(s.glass, None, pos.x, pos.y, 0, 0, flags);
@@ -214,11 +230,13 @@ pub fn update() {
             }
         });
     }
-    let Some((dock, scale)) = ST.with_borrow(|s| s.as_ref().and_then(|s| s.anchor)) else { return hide() };
-    let h = (dock.bottom - dock.top).max(40);
-    let w = (WIDTH * scale).round() as i32;
-    let pos = place(dock, w, scale);
-    draw(hwnd, &m, w, h, scale, pos);
+    let Some((dock, scale, zoom)) = ST.with_borrow(|s| s.as_ref().and_then(|s| s.anchor.map(|(a, k)| (a, k, s.zoom)))) else { return hide() };
+    let (h0, w0) = ((dock.bottom - dock.top).max(40), (WIDTH * scale).round() as i32);
+    let base = place(dock, w0, scale);
+    // Ampliado: cresce a partir da base, mantendo o centro (como um ícone).
+    let (w, h) = ((w0 as f32 * zoom).round() as i32, (h0 as f32 * zoom).round() as i32);
+    let pos = POINT { x: base.x + (w0 - w) / 2, y: base.y + h0 - h };
+    draw(hwnd, &m, w, h, scale * zoom, pos);
     // Tocando: a barra anda; parado, nada a animar.
     unsafe {
         if m.playing {
@@ -406,6 +424,54 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == TIMER_ID => {
+                update();
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                let start = ST.with_borrow_mut(|s| {
+                    let s = s.as_mut()?;
+                    if !s.tracking {
+                        s.tracking = true;
+                        let mut tme = windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT {
+                            cbSize: size_of::<windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT>() as u32,
+                            dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::TME_LEAVE,
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::TrackMouseEvent(&mut tme);
+                    }
+                    let to = max_zoom();
+                    (s.zoom_to != to).then(|| s.zoom_to = to)
+                });
+                if start.is_some() {
+                    SetTimer(Some(hwnd), TIMER_ZOOM, 16, None);
+                }
+                LRESULT(0)
+            }
+            0x02A3 /* WM_MOUSELEAVE */ => {
+                ST.with_borrow_mut(|s| {
+                    if let Some(s) = s.as_mut() {
+                        s.tracking = false;
+                        s.zoom_to = 1.0;
+                    }
+                });
+                SetTimer(Some(hwnd), TIMER_ZOOM, 16, None);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == TIMER_ZOOM => {
+                // Mesmo jeito dos ícones: aproxima rápido e assenta suave.
+                let done = ST.with_borrow_mut(|s| {
+                    let Some(s) = s.as_mut() else { return true };
+                    s.zoom += (s.zoom_to - s.zoom) * 0.3;
+                    if (s.zoom_to - s.zoom).abs() < 0.004 {
+                        s.zoom = s.zoom_to;
+                        return true;
+                    }
+                    false
+                });
+                if done {
+                    let _ = KillTimer(Some(hwnd), TIMER_ZOOM);
+                }
                 update();
                 LRESULT(0)
             }

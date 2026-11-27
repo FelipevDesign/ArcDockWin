@@ -23,11 +23,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CLASSES_ROOT, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::UI::Controls::SetWindowTheme;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetActiveWindow, SetFocus, VK_CONTROL, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
 use windows::Win32::UI::Shell::{
-    IInitializeWithItem, IPreviewHandler, IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SHCreateStreamOnFileEx,
-    SIIGBF_BIGGERSIZEOK, ShellExecuteW,
+    IInitializeWithItem, IPreviewHandler, IShellItem, SHCreateItemFromParsingName, SHCreateStreamOnFileEx,
+    ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, w};
@@ -64,7 +64,20 @@ struct View {
     paused: bool,
     font: HFONT,
     ui_font: HFONT,
+    icon_font: HFONT,
+    /// Linhas embaixo do nome no cartão de informações (tipo, tamanho, data).
+    details: Vec<String>,
+    /// Vídeo/áudio: tem barra de controles; `video` = janela onde o vídeo aparece.
+    media: bool,
+    video: HWND,
+    /// Áreas da barra: botão tocar/pausar e trilho da faixa (coordenadas do conteúdo).
+    play_btn: RECT,
+    track: RECT,
 }
+
+/// Altura da barra de controles de vídeo/áudio (px a 100%).
+const CTRL_H: i32 = 52;
+const TIMER_MEDIA: usize = 7;
 
 thread_local! {
     static VIEW: RefCell<View> = RefCell::new(View::default());
@@ -189,6 +202,12 @@ fn run(file: &Path) {
         let px = |v: i32| -(v * dpi / 96);
         let font = CreateFontW(px(14), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH.0 as u32, w!("Cascadia Mono"));
         let ui_font = CreateFontW(px(13), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe UI"));
+        let icon_font = CreateFontW(px(18), 0, 0, 0, 400, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, 0, w!("Segoe Fluent Icons"));
+        // Janela do vídeo (o Media Foundation desenha nela), em cima da barra de controles.
+        let wc3 = WNDCLASSW { lpfnWndProc: Some(video_proc), hInstance: inst.into(), hCursor: arrow, hbrBackground: bg, lpszClassName: w!("ArcDockPeekVideo"), ..Default::default() };
+        RegisterClassW(&wc3);
+        let video = CreateWindowExW(WINDOW_EX_STYLE(0), w!("ArcDockPeekVideo"), w!(""), WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 10, 10, Some(content), None, Some(inst.into()), None)
+            .unwrap_or_default();
         SendMessageW(edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
 
         VIEW.with(|v| {
@@ -198,6 +217,8 @@ fn run(file: &Path) {
             v.index = index;
             v.font = font;
             v.ui_font = ui_font;
+            v.icon_font = icon_font;
+            v.video = video;
         });
         layout(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -235,20 +256,27 @@ fn run(file: &Path) {
     }
 }
 
-/// Primeiro plano mesmo aberta por outro processo (pega a fila de entrada emprestada).
+/// Primeiro plano mesmo aberta por outro processo: o Windows só deixa quem recebeu a última
+/// tecla trazer janelas para a frente, então a janela pega emprestada a fila de entrada do
+/// Explorador por um instante (como o Peek do PowerToys faz) e sobe para o topo.
 fn bring_front(hwnd: HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     unsafe {
-        if SetForegroundWindow(hwnd).as_bool() {
-            return;
-        }
-        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
         let fg = GetWindowThreadProcessId(GetForegroundWindow(), None);
         let me = GetCurrentThreadId();
-        if fg != 0 && AttachThreadInput(me, fg, true).as_bool() {
-            let _ = SetForegroundWindow(hwnd);
+        let attached = fg != 0 && fg != me && AttachThreadInput(me, fg, true).as_bool();
+        let flags = SWP_NOMOVE | SWP_NOSIZE;
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+        if attached {
             let _ = AttachThreadInput(me, fg, false);
         }
     }
+    crate::config::debug_log(&format!("previa: frente = {}", unsafe { GetForegroundWindow() } == hwnd));
 }
 
 /// Teclas da janela (vêm antes dos controles filhos). true = tratada.
@@ -331,6 +359,10 @@ fn layout(hwnd: HWND) {
         if let Some(Some(h)) = with(|v| v.handler.clone()) {
             let _ = h.SetRect(&inner);
         }
+        let ctrl = CTRL_H * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+        if let Some((video, media)) = with(|v| (v.video, v.media)) {
+            let _ = MoveWindow(video, 0, 0, rc.right, (rc.bottom - if media { ctrl } else { 0 }).max(1), true);
+        }
         if let Some(Some(p)) = with(|v| v.player.clone()) {
             let _ = p.UpdateVideo();
         }
@@ -368,7 +400,12 @@ fn load() {
         }
         v.image = None;
         v.caption.clear();
+        v.details.clear();
         v.paused = false;
+        v.media = false;
+        unsafe {
+            let _ = ShowWindow(v.video, SW_HIDE);
+        }
         v.list.get(v.index).map(|p| (v.hwnd, p.clone(), v.index, v.list.len()))
     })
     .flatten() else {
@@ -389,6 +426,8 @@ fn load() {
     let ext = ext_of(&path);
     let area = content_rect(hwnd);
 
+    let log = |m: &str| crate::config::debug_log(&format!("previa: etapa {m}"));
+    log("inicio");
     let shown: &str = if path.is_dir() {
         show_text(edit, &folder_text(&path));
         "Pasta"
@@ -400,22 +439,43 @@ fn load() {
     } else if ext == "zip" && let Some(t) = zip_text(&path) {
         show_text(edit, &t);
         "Arquivo compactado"
-    } else if MEDIA.contains(&ext.as_str()) && play(content, &path, AUDIO.contains(&ext.as_str())) {
+    } else if MEDIA.contains(&ext.as_str()) && {
+        log("midia");
+        play(content, &path, AUDIO.contains(&ext.as_str()))
+    } {
         if AUDIO.contains(&ext.as_str()) {
-            thumbnail(&path, area);
+            card(&path, area);
             "Áudio"
         } else {
-            "Vídeo · clique para pausar"
+            "Vídeo"
         }
-    } else if (TEXT.contains(&ext.as_str()) || looks_like_text(&path)) && let Some(t) = read_text(&path) {
+    } else if {
+        log("texto?");
+        TEXT.contains(&ext.as_str()) || looks_like_text(&path)
+    } && let Some(t) = read_text(&path)
+    {
         show_text(edit, &t);
         "Texto"
-    } else if preview_handler(content, &path, area) {
+    } else if {
+        log("visualizador?");
+        preview_handler(content, &path, area)
+    } {
         "Documento"
     } else {
-        thumbnail(&path, area);
+        log("cartao");
+        card(&path, area);
         "Arquivo"
     };
+    crate::config::debug_log(&format!("previa: {} -> {shown}", path.to_string_lossy()));
+    layout(hwnd);
+    unsafe {
+        let media = with(|v| v.media).unwrap_or(false);
+        if media {
+            SetTimer(Some(content), TIMER_MEDIA, 250, None);
+        } else {
+            let _ = KillTimer(Some(content), TIMER_MEDIA);
+        }
+    }
     let modified = meta
         .and_then(|m| m.modified().ok())
         .map(|t| {
@@ -615,45 +675,214 @@ fn decode_image(p: &Path, mw: i32, mh: i32) -> Option<(Vec<u8>, i32, i32)> {
     }
 }
 
-/// Miniatura do Windows (vídeo, PDF, qualquer tipo) com o nome embaixo.
-fn thumbnail(p: &Path, area: RECT) {
-    let side = (area.right.min(area.bottom) / 2).clamp(96, 512);
-    let img = unsafe {
-        (|| -> Option<(Vec<u8>, i32, i32)> {
-            let f: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(p.as_os_str()), None).ok()?;
-            let hb = f.GetImage(windows::Win32::Foundation::SIZE { cx: side, cy: side }, SIIGBF_BIGGERSIZEOK).ok()?;
-            let mut bm = BITMAP::default();
-            GetObjectW(HGDIOBJ(hb.0), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _));
-            let (w, h) = (bm.bmWidth, bm.bmHeight);
-            let mut bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
-                ..Default::default()
-            };
-            let mut buf = vec![0u8; (w * h * 4) as usize];
-            let dc = GetDC(None);
-            GetDIBits(dc, hb, 0, h as u32, Some(buf.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS);
-            ReleaseDC(None, dc);
-            let _ = DeleteObject(HGDIOBJ(hb.0));
-            Some((buf, w, h))
-        })()
-    };
+/// Cartão de arquivo sem pré-visualização (como o Peek): o ícone grande do Windows (ou a
+/// miniatura, se houver), o nome e o tipo, o tamanho e a data.
+fn card(p: &Path, area: RECT) {
+    let side = (area.right.min(area.bottom) / 3).clamp(96, 256);
+    let img = shell_image(p, side);
+    crate::config::debug_log("previa: etapa imagem pronta");
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut details = Vec::new();
+    if let Some(t) = type_name(p) {
+        details.push(t);
+    }
+    if let Ok(m) = std::fs::metadata(p) {
+        if m.is_file() {
+            details.push(human(m.len()));
+        }
+        if let Ok(t) = m.modified() {
+            let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            details.push(format!("{} {}", crate::i18n::tr("Modificado em"), date(secs)));
+        }
+    }
+    details.push(crate::i18n::tr("Enter abre no programa padrão"));
     with(|v| {
         v.image = img;
         v.caption = name;
+        v.details = details;
     });
 }
 
-fn play(content: HWND, p: &Path, audio: bool) -> bool {
+/// Nome do tipo de arquivo do Windows ("Aplicativo", "Arquivo MP3"...).
+fn type_name(p: &Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW};
+    let mut info = SHFILEINFOW::default();
     unsafe {
+        let r = SHGetFileInfoW(
+            &HSTRING::from(p.as_os_str()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
+        );
+        if r == 0 {
+            return None;
+        }
+    }
+    let n = info.szTypeName.iter().position(|&c| c == 0).unwrap_or(0);
+    (n > 0).then(|| String::from_utf16_lossy(&info.szTypeName[..n]))
+}
+
+/// Ícone grande do Windows para o arquivo (256 px, da lista "jumbo" do sistema), em BGRA
+/// pré-multiplicado. A miniatura (IShellItemImageFactory) travava e derrubava a janela com
+/// alguns tipos (.exe, .mp3).
+fn shell_image(p: &Path, side: i32) -> Option<(Vec<u8>, i32, i32)> {
+    use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+    use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_SYSICONINDEX, SHGetFileInfoW, SHGetImageList};
+    unsafe {
+        let mut info = SHFILEINFOW::default();
+        let r = SHGetFileInfoW(
+            &HSTRING::from(p.as_os_str()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX,
+        );
+        if r == 0 {
+            return None;
+        }
+        let list: IImageList = SHGetImageList(4 /* SHIL_JUMBO */).ok()?;
+        let icon = list.GetIcon(info.iIcon, ILD_TRANSPARENT.0).ok()?;
+        let n = side.clamp(48, 256);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: n, biHeight: -n, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        let mem = CreateCompatibleDC(None);
+        let old = SelectObject(mem, HGDIOBJ(dib.0));
+        let _ = DrawIconEx(mem, 0, 0, icon, n, n, 0, None, DI_NORMAL);
+        let buf = std::slice::from_raw_parts(bits as *const u8, (n * n * 4) as usize).to_vec();
+        SelectObject(mem, old);
+        let _ = DeleteDC(mem);
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DestroyIcon(icon);
+        Some((buf, n, n))
+    }
+}
+
+fn play(_content: HWND, p: &Path, audio: bool) -> bool {
+    unsafe {
+        let Some(video) = with(|v| v.video) else { return false };
         let mut player: Option<IMFPMediaPlayer> = None;
-        let target = if audio { None } else { Some(content) };
+        if !audio {
+            let _ = ShowWindow(video, SW_SHOW);
+        }
+        let target = if audio { None } else { Some(video) };
         if MFPCreateMediaPlayer(&HSTRING::from(p.as_os_str()), true, windows::Win32::Media::MediaFoundation::MFP_CREATION_OPTIONS(0), None, target, Some(&mut player)).is_err() {
+            let _ = ShowWindow(video, SW_HIDE);
             return false;
         }
         let Some(player) = player else { return false };
-        with(|v| v.player = Some(player));
+        with(|v| {
+            v.player = Some(player);
+            v.media = true;
+        });
         true
+    }
+}
+
+/// Posição e duração (segundos) do que está tocando.
+fn media_times() -> Option<(f64, f64)> {
+    let p = with(|v| v.player.clone()).flatten()?;
+    let null = GUID::zeroed();
+    unsafe {
+        let pos = p.GetPosition(&null).ok().and_then(|v| i64::try_from(&v).ok()).unwrap_or(0);
+        let dur = p.GetDuration(&null).ok().and_then(|v| i64::try_from(&v).ok()).unwrap_or(0);
+        Some((pos as f64 / 1e7, dur as f64 / 1e7))
+    }
+}
+
+fn clock(s: f64) -> String {
+    let s = s.max(0.0) as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+fn toggle_play() {
+    with(|v| {
+        if let Some(p) = &v.player {
+            unsafe {
+                let _ = if v.paused { p.Play() } else { p.Pause() };
+            }
+            v.paused = !v.paused;
+        }
+    });
+}
+
+/// Barra de controles: tocar/pausar, tempo e o trilho da faixa (clique pula).
+unsafe fn paint_controls(dc: HDC, rc: RECT, k: i32) {
+    unsafe {
+        let ctrl = CTRL_H * k / 96;
+        let bar = RECT { top: rc.bottom - ctrl, ..rc };
+        let br = CreateSolidBrush(COLORREF(0x00241F1F));
+        FillRect(dc, &bar, br);
+        let _ = DeleteObject(HGDIOBJ(br.0));
+        let (pos, dur) = media_times().unwrap_or((0.0, 0.0));
+        let Some((paused, icon_font, ui_font)) = with(|v| (v.paused, v.icon_font, v.ui_font)) else { return };
+        let s = |v: i32| v * k / 96;
+        let play_btn = RECT { left: bar.left + s(8), top: bar.top + s(6), right: bar.left + s(48), bottom: bar.bottom - s(6) };
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, COLORREF(0x00F0ECEA));
+        let old = SelectObject(dc, HGDIOBJ(icon_font.0));
+        let mut g: Vec<u16> = vec![if paused { 0xE768 } else { 0xE769 }];
+        let mut r = play_btn;
+        DrawTextW(dc, &mut g, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, HGDIOBJ(ui_font.0));
+        let mut t: Vec<u16> = format!("{} / {}", clock(pos), clock(dur)).encode_utf16().collect();
+        let tw = s(110);
+        let mut tr = RECT { left: bar.right - tw - s(12), top: bar.top, right: bar.right - s(12), bottom: bar.bottom };
+        SetTextColor(dc, COLORREF(0x00B4B0AE));
+        DrawTextW(dc, &mut t, &mut tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, old);
+        let cy = (bar.top + bar.bottom) / 2;
+        let track = RECT { left: play_btn.right + s(10), top: cy - s(2), right: tr.left - s(14), bottom: cy + s(2) };
+        let tb = CreateSolidBrush(COLORREF(0x00504A4A));
+        FillRect(dc, &track, tb);
+        let _ = DeleteObject(HGDIOBJ(tb.0));
+        if dur > 0.0 {
+            let fill = RECT { right: track.left + ((track.right - track.left) as f64 * (pos / dur).clamp(0.0, 1.0)) as i32, ..track };
+            let fb = CreateSolidBrush(COLORREF(0x00F0ECEA));
+            FillRect(dc, &fill, fb);
+            let _ = DeleteObject(HGDIOBJ(fb.0));
+        }
+        with(|v| {
+            v.play_btn = play_btn;
+            // Área de clique do trilho mais alta que o desenho.
+            v.track = RECT { top: bar.top, bottom: bar.bottom, ..track };
+        });
+    }
+}
+
+unsafe extern "system" fn video_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let _ = BeginPaint(hwnd, &mut ps);
+                if let Some(Some(p)) = with(|v| v.player.clone()) {
+                    let _ = p.UpdateVideo();
+                }
+                let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_SIZE => {
+                if let Some(Some(p)) = with(|v| v.player.clone()) {
+                    let _ = p.UpdateVideo();
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                toggle_play();
+                if let Some(parent) = GetParent(hwnd).ok() {
+                    let _ = InvalidateRect(Some(parent), None, false);
+                }
+                LRESULT(0)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
     }
 }
 
@@ -680,6 +909,7 @@ fn handler_clsid(ext: &str) -> Option<GUID> {
 
 fn preview_handler(content: HWND, p: &Path, area: RECT) -> bool {
     let Some(clsid) = handler_clsid(&ext_of(p)) else { return false };
+    crate::config::debug_log(&format!("previa: visualizador {clsid:?}"));
     unsafe {
         let h: IPreviewHandler = match CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER)
             .or_else(|_| CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER))
@@ -763,13 +993,31 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 LRESULT(EDIT_BRUSH.load(Ordering::Relaxed))
             }
             WM_LBUTTONUP => {
-                // Vídeo: clique pausa / continua.
-                with(|v| {
-                    if let Some(p) = &v.player {
-                        let _ = if v.paused { p.Play() } else { p.Pause() };
-                        v.paused = !v.paused;
+                let pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+                let inside = |r: RECT| pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom;
+                let Some((media, btn, track)) = with(|v| (v.media, v.play_btn, v.track)) else { return LRESULT(0) };
+                if media && inside(track) {
+                    if let Some((_, dur)) = media_times()
+                        && dur > 0.0
+                    {
+                        let f = (pt.x - track.left) as f64 / (track.right - track.left).max(1) as f64;
+                        let ticks = (f.clamp(0.0, 1.0) * dur * 1e7) as i64;
+                        if let Some(Some(p)) = with(|v| v.player.clone()) {
+                            let _ = p.SetPosition(&GUID::zeroed(), &windows::Win32::System::Com::StructuredStorage::PROPVARIANT::from(ticks));
+                        }
                     }
-                });
+                } else if media && (inside(btn) || !inside(RECT { top: track.top, ..RECT { left: 0, top: 0, right: 1 << 20, bottom: 1 << 20 } })) {
+                    toggle_play();
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == TIMER_MEDIA => {
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let ctrl = CTRL_H * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+                let bar = RECT { top: rc.bottom - ctrl, ..rc };
+                let _ = InvalidateRect(Some(hwnd), Some(&bar), false);
                 LRESULT(0)
             }
             WM_PAINT => {
@@ -777,13 +1025,17 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 let dc = BeginPaint(hwnd, &mut ps);
                 let mut rc = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rc);
+                let k = GetDpiForWindow(hwnd).max(96) as i32;
+                let media = with(|v| v.media).unwrap_or(false);
+                if media {
+                    paint_controls(dc, rc, k);
+                    rc.bottom -= CTRL_H * k / 96;
+                }
                 with(|v| {
-                    if let Some(p) = &v.player {
-                        let _ = p.UpdateVideo();
-                    }
                     let Some((buf, w, h)) = &v.image else { return };
                     let caption = !v.caption.is_empty();
-                    let avail_h = if caption { rc.bottom - 60 } else { rc.bottom };
+                    let text_h = (30 + 22 * v.details.len() as i32) * k / 96;
+                    let avail_h = if caption { rc.bottom - text_h } else { rc.bottom };
                     let (x, y) = ((rc.right - w) / 2, ((avail_h - h) / 2).max(0));
                     let bmi = BITMAPINFO {
                         bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: *w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
@@ -806,8 +1058,16 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                         SetBkMode(dc, TRANSPARENT);
                         SetTextColor(dc, COLORREF(0x00E6E2E0));
                         let mut t: Vec<u16> = v.caption.encode_utf16().collect();
-                        let mut r = RECT { left: 10, top: y + h + 12, right: rc.right - 10, bottom: y + h + 44 };
+                        let line = 22 * k / 96;
+                        let mut r = RECT { left: 10, top: y + h + 12, right: rc.right - 10, bottom: y + h + 12 + line + 4 };
                         DrawTextW(dc, &mut t, &mut r, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                        SetTextColor(dc, COLORREF(0x00A09C9A));
+                        for (n, d) in v.details.iter().enumerate() {
+                            let mut t: Vec<u16> = d.encode_utf16().collect();
+                            let top = y + h + 16 + line * (n as i32 + 1);
+                            let mut r = RECT { left: 10, top, right: rc.right - 10, bottom: top + line };
+                            DrawTextW(dc, &mut t, &mut r, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                        }
                         SelectObject(dc, old);
                     }
                 });

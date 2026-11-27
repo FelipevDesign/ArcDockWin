@@ -482,9 +482,12 @@ pub fn set_raw(key: &str, value: String) {
     set(key, value);
 }
 
-/// Registro de diagnóstico (só com `debug_log=1` no settings.txt): debug.log na pasta do dock.
+/// Registro de diagnóstico: debug.log na pasta do dock.
 pub fn debug_log(msg: &str) {
-    if get("debug_log").as_deref() != Some("1") {
+    // Ligado pelo arquivo `debug.on` na pasta do dock (lido uma vez) ou por `debug_log=1`.
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| crate::apps::config_path().with_file_name("debug.on").exists());
+    if !on && get("debug_log").as_deref() != Some("1") {
         return;
     }
     use std::io::Write;

@@ -821,14 +821,14 @@ fn store_app_id(path: &str) -> Option<String> {
     let parts: Vec<&str> = folder.split('_').collect();
     let [name, _, _, _, publisher] = parts[..] else { return None };
     let manifest = std::fs::read_to_string(Path::new(&path[..i]).join(folder).join("AppxManifest.xml")).ok()?;
-    manifest.split("<Application ").skip(1).find_map(|tag| {
-        let tag = &tag[..tag.find('>')?];
-        let executable = xml_attr(tag, "Executable")?.replace('/', "\\");
-        executable
-            .eq_ignore_ascii_case(exe)
-            .then(|| xml_attr(tag, "Id").map(|id| format!("{APPS_FOLDER}{name}_{publisher}!{id}")))
-            .flatten()
-    })
+    let id_of = |tag: &str| xml_attr(tag, "Id").map(|id| format!("{APPS_FOLDER}{name}_{publisher}!{id}"));
+    let tags: Vec<&str> = manifest.split("<Application ").skip(1).filter_map(|t| t.find('>').map(|i| &t[..i])).collect();
+    tags.iter()
+        .find(|tag| xml_attr(tag, "Executable").is_some_and(|e| e.replace('/', "\\").eq_ignore_ascii_case(exe)))
+        .and_then(|tag| id_of(tag))
+        // O .exe fixado não está no manifesto (o Spotify declara o SpotifyMigrator.exe e abre o
+        // Spotify.exe depois): vale o primeiro aplicativo do pacote, o principal.
+        .or_else(|| tags.first().and_then(|tag| id_of(tag)))
 }
 
 /// Valor do atributo `name="..."` dentro de uma tag XML.
@@ -1424,7 +1424,11 @@ mod tests {
             store_app_id(&exe).as_deref(),
             Some("shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App")
         );
-        assert_eq!(store_app_id(&pkg.join("Missing.exe").display().to_string()), None);
+        // .exe fora do manifesto: o primeiro aplicativo do pacote.
+        assert_eq!(
+            store_app_id(&pkg.join("Missing.exe").display().to_string()).as_deref(),
+            Some("shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!Other")
+        );
         assert_eq!(store_app_id(r"C:\Program Files\App\app.exe"), None);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
