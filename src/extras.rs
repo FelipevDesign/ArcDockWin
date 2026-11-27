@@ -44,10 +44,16 @@ pub const EXTRAS: &[Extra] = &[
     t("fx_islands", "Dock em ilhas", "Separa os grupos onde há separadores"),
     s("fx_islands_gap", "Espaço entre as ilhas", 4.0, 40.0, 12.0, "px", "fx_islands"),
     s("fx_dot_level", "Opacidade dos indicadores", 20.0, 100.0, 100.0, "%", ""),
+    t("fx_progress", "Progresso nos ícones", "A barrinha de download, cópia ou exportação dos apps"),
     // Atalhos
     t("pin_heal", "Corrigir atalhos quando um app atualiza", "Acha a versão nova na mesma pasta"),
     t("pin_drop", "Soltar arquivos no dock", "Sobre um app: abre com ele. Fora dos ícones: fixa"),
     t("pin_folder_stack", "Pastas fixadas abrem como pilha", "Mostra o conteúdo acima do ícone"),
+    t("pin_profiles", "Separar perfis do mesmo app", "Ex.: dois perfis do Claude, cada um no seu ícone"),
+    // Mouse
+    t("cur_shake", "Sacudir o mouse aumenta o cursor", "Feche o Shake to Find Cursor antes, para não brigarem"),
+    s("cur_shake_size", "Tamanho ao sacudir", 150.0, 500.0, 300.0, "%", "cur_shake"),
+    s("cur_shake_sens", "Sensibilidade", 1.0, 10.0, 5.0, "", "cur_shake"),
     // Ferramentas
     t("tool_shelf", "Prateleira", "Guarda arquivos de passagem (só o caminho)"),
     s("shelf_limit", "Itens na prateleira", 5.0, 50.0, 20.0, "", "tool_shelf"),
@@ -81,12 +87,16 @@ pub const PAGES: &[(&str, u16, &[&[&str]])] = &[
         "Efeitos",
         0xE706,
         &[
-            &["fx_style", "fx_dot_level"],
+            &["fx_style", "fx_dot_level", "fx_progress"],
             &["fx_glow", "fx_glow_level", "fx_dyncolor", "fx_dyncolor_level"],
             &["fx_islands", "fx_islands_gap"],
         ],
     ),
-    ("Atalhos", 0xE71B, &[&["pin_heal", "pin_drop", "pin_folder_stack"]]),
+    (
+        "Atalhos e mouse",
+        0xE71B,
+        &[&["pin_heal", "pin_drop", "pin_folder_stack", "pin_profiles"], &["cur_shake", "cur_shake_size", "cur_shake_sens"]],
+    ),
     (
         "Ferramentas",
         0xE90F,
@@ -194,7 +204,11 @@ pub fn set_choice(i: usize, c: usize) {
 /// Aplica a mudança da opção `key` em quem depende dela.
 pub fn changed(key: &str) {
     match key.split('_').next().unwrap_or("") {
-        "fx" => crate::apply_settings(false),
+        "fx" => {
+            crate::progress::sync();
+            crate::apply_settings(false);
+        }
+        "cur" => crate::shake::sync(),
         "tool" | "shelf" | "clip" | "picker" | "timer" => {
             crate::clipboard::sync();
             crate::tools::sync();

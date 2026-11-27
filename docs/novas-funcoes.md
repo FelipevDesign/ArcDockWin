@@ -56,8 +56,14 @@ pré-visualizadores do Explorador para PDF, Office etc. A janela é um processo 
 que só existe enquanto está aberta. Enquanto o Peek do PowerToys estiver rodando,
 o Espaço fica com ele.
 
-## Fora do alcance
-- **Progresso no ícone**: o Windows não deixa outro programa ler o progresso que os apps
-  mandam para a barra de tarefas.
-- **Segundo perfil do Claude separado**: as janelas dos dois perfis são do mesmo programa,
-  com a mesma identificação, então o dock não consegue separá-las com segurança.
+
+## Adicionadas depois
+- **Progresso nos ícones** (Efeitos): a barrinha que os apps mandam para a barra de tarefas
+  (downloads, cópias, exportações) aparece no pé do ícone: verde/cor de destaque, amarela
+  quando pausada, vermelha com erro. Funciona porque a barra de tarefas do Windows está
+  escondida pelo dock: ele se registra como destino desse progresso, e devolve ao sair.
+- **Separar perfis do mesmo app** (Atalhos e mouse): janelas de processos abertos com
+  `--user-data-dir` vão para o fixado com a mesma pasta de perfil (nos parâmetros do
+  atalho ou da linha do `pinned.txt`), ou viram um item à parte. Ex.: Claude e Claude2.
+- **Sacudir o mouse aumenta o cursor** (Atalhos e mouse): tamanho e sensibilidade
+  ajustáveis; não precisa de administrador. Feche o Shake to Find Cursor antes.

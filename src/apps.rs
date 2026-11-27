@@ -64,6 +64,79 @@ pub struct App {
     pub label: String,
     /// Itens de um grupo ou modo de trabalho (`::grupo Nome | a | b`).
     pub members: Vec<String>,
+    /// Pasta de perfil (`--user-data-dir`) do fixado, para separar perfis do mesmo app.
+    pub profile: Option<String>,
+}
+
+/// Pasta de perfil numa linha de comando (`--user-data-dir=...`), normalizada.
+pub fn profile_dir(cmd: &str) -> Option<String> {
+    let i = cmd.find("--user-data-dir=")? + "--user-data-dir=".len();
+    let rest = &cmd[i..];
+    let v = if let Some(r) = rest.strip_prefix('"') { r.split('"').next()? } else { rest.split_whitespace().next()? };
+    let v = v.trim().trim_end_matches(['\\', '/']).to_lowercase();
+    (!v.is_empty()).then_some(v)
+}
+
+/// Perfil de um fixado: dos parâmetros dele ou dos do atalho (.lnk).
+fn pin_profile(source: &str, args: &str) -> Option<String> {
+    profile_dir(args).or_else(|| lnk_arguments(Path::new(source)).and_then(|a| profile_dir(&a)))
+}
+
+fn lnk_arguments(lnk: &Path) -> Option<String> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    if !lnk.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+        return None;
+    }
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        link.cast::<IPersistFile>().ok()?.Load(&HSTRING::from(lnk.as_os_str()), STGM_READ).ok()?;
+        let mut buf = [0u16; 2048];
+        link.GetArguments(&mut buf).ok()?;
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(h: windows::Win32::Foundation::HANDLE, class: u32, buf: *mut core::ffi::c_void, len: u32, ret: *mut u32) -> i32;
+}
+
+thread_local! {
+    /// Perfil de cada processo já visto (pid → pasta), para não reler a linha de comando.
+    static PROC_PROFILE: std::cell::RefCell<HashMap<u32, Option<String>>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Perfil do processo `pid` (linha de comando com `--user-data-dir`).
+fn process_profile(pid: u32) -> Option<String> {
+    PROC_PROFILE.with_borrow_mut(|cache| {
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        cache
+            .entry(pid)
+            .or_insert_with(|| unsafe {
+                use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+                let mut buf = vec![0u8; 32768];
+                let mut ret = 0u32;
+                // ProcessCommandLineInformation (60): UNICODE_STRING seguida do texto.
+                let st = NtQueryInformationProcess(h, 60, buf.as_mut_ptr() as _, buf.len() as u32, &mut ret);
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+                if st < 0 {
+                    return None;
+                }
+                let len = u16::from_le_bytes([buf[0], buf[1]]) as usize / 2;
+                let ptr = usize::from_le_bytes(buf[8..16].try_into().ok()?) as *const u16;
+                if ptr.is_null() || len == 0 {
+                    return None;
+                }
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+                profile_dir(&text)
+            })
+            .clone()
+    })
 }
 
 /// Prefixos das linhas de grupo e de modo de trabalho no pinned.txt.
@@ -193,13 +266,20 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
                 None => continue,
             }
         }
+        let args = parts.get(1).map(|a| a.to_string()).unwrap_or_default();
+        let profile = crate::config::raw("pin_profiles").is_some_and(|v| v == "1").then(|| pin_profile(&source, &args)).flatten();
+        let mut key = source_key(&source);
+        if let Some(p) = &profile {
+            key = format!("{key}|perfil:{p}");
+        }
         apps.push(App {
-            key: source_key(&source),
+            key,
             icon: load_icon(&source, icon_size),
             source,
             pinned: true,
-            args: parts.get(1).map(|a| a.to_string()).unwrap_or_default(),
+            args,
             label: parts.get(2).map(|a| a.to_string()).unwrap_or_default(),
+            profile,
             ..Default::default()
         });
     }
@@ -534,8 +614,22 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
     let mut procs: HashMap<u32, String> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, (String, Vec<HWND>)> = HashMap::new();
+    let profiles = crate::config::raw("pin_profiles").is_some_and(|v| v == "1");
     for hwnd in hwnds {
-        let Some((key, source)) = window_app(hwnd, &mut procs) else { continue };
+        let Some((mut key, source)) = window_app(hwnd, &mut procs) else { continue };
+        // Outro perfil do mesmo app (`--user-data-dir`): vai para o fixado desse perfil, ou
+        // vira um item à parte.
+        if profiles {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if let Some(dir) = process_profile(pid) {
+                key = apps
+                    .iter()
+                    .find(|a| a.pinned && a.profile.as_deref() == Some(dir.as_str()))
+                    .map(|a| a.key.clone())
+                    .unwrap_or_else(|| format!("{key}|perfil:{dir}"));
+            }
+        }
         groups
             .entry(key.clone())
             .or_insert_with(|| {
@@ -1332,5 +1426,16 @@ mod tests {
         assert_eq!(store_app_id(&pkg.join("Missing.exe").display().to_string()), None);
         assert_eq!(store_app_id(r"C:\Program Files\App\app.exe"), None);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+}
+#[cfg(test)]
+mod profile_tests {
+    use super::profile_dir;
+
+    #[test]
+    fn le_a_pasta_do_perfil() {
+        assert_eq!(profile_dir(r#"--user-data-dir="C:\Claude\Claude2""#).as_deref(), Some(r"c:\claude\claude2"));
+        assert_eq!(profile_dir(r#"x.exe --type=gpu --user-data-dir=C:\Users\a\Claude\ --x"#).as_deref(), Some(r"c:\users\a\claude"));
+        assert_eq!(profile_dir(r#""C:\app\Claude.exe" "#), None);
     }
 }

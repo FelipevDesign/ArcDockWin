@@ -10,6 +10,8 @@ mod drag;
 mod extras;
 mod heal;
 mod peek;
+mod progress;
+mod shake;
 mod picker;
 mod tools;
 mod clipboard;
@@ -833,6 +835,11 @@ pub fn refresh_tools() {
         d.stacks.reload_tools();
         d.redraw();
     });
+}
+
+/// Progresso de algum app mudou: redesenha os docks.
+pub fn refresh_progress() {
+    with_docks(|d| d.redraw());
 }
 
 /// Escala do monitor principal (tamanho dos ícones nos painéis).
@@ -1843,6 +1850,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     preview::shutdown();
                     tooltip::shutdown();
                     minimize::shutdown();
+                    progress::shutdown();
+                    shake::shutdown();
                 }
                 LRESULT(0)
             }
@@ -1857,6 +1866,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     preview::shutdown();
                     tooltip::shutdown();
                     minimize::shutdown();
+                    progress::shutdown();
+                    shake::shutdown();
                     PostQuitMessage(0);
                 }
                 LRESULT(0)
@@ -1993,6 +2004,8 @@ fn main() -> windows::core::Result<()> {
         tools::sync();
         zones::sync();
         quicklook::sync();
+        progress::sync();
+        shake::sync();
         with_docks(|d| drop_target(d.hwnd));
         let _ = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,

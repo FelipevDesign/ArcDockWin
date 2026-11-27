@@ -303,6 +303,25 @@ pub fn draw(
                 }
             }
         }
+        // Progresso do app (download, cópia, exportação): barrinha discreta no pé do ícone.
+        if let Some((state, v)) = crate::progress::of(&app.windows) {
+            let bw = slot.size * 0.72;
+            let bh = (slot.size * 0.075).max(3.0);
+            let bx = sx + (slot.size - bw) / 2.0;
+            let by = y + slot.size - bh - slot.size * 0.03;
+            if let Some(track) = rounded_rect(bx - 1.0, by - 1.0, bw + 2.0, bh + 2.0, (bh + 2.0) / 2.0) {
+                pm.fill_path(&track, &solid([0, 0, 0, 150]), FillRule::Winding, id, None);
+            }
+            let color = match state {
+                crate::progress::ERROR => [248, 113, 113, 255],
+                crate::progress::PAUSED => [250, 204, 21, 255],
+                _ => [theme.accent[0], theme.accent[1], theme.accent[2], 255],
+            };
+            let (fx, fw) = if state == crate::progress::INDETERMINATE { (bx + bw * 0.3, bw * 0.4) } else { (bx, bw * v.max(0.04)) };
+            if let Some(fill) = rounded_rect(fx, by, fw, bh, bh / 2.0) {
+                pm.fill_path(&fill, &solid(color), FillRule::Winding, id, None);
+            }
+        }
         if alert {
             let r = m.dot * 2.5;
             if let Some(badge) = PathBuilder::from_circle(sx + slot.size - r, y + r, r) {
