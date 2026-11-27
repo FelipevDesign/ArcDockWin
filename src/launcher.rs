@@ -34,6 +34,8 @@ use crate::panel::{self, Event, Item, PanelContent, Widget};
 use crate::power;
 
 const FIELD: u32 = 1;
+/// Botão "Admin" da linha selecionada (abre o app como administrador).
+const RUN_AS_ADMIN: u32 = 2;
 /// Ids das linhas: ROW + posição entre todos os resultados.
 const ROW: u32 = 100;
 /// Linhas visíveis da lista sem busca; o resto rola com as setas ou a roda do mouse.
@@ -613,14 +615,24 @@ impl Launcher {
                 enter
             }
         };
-        Item { id: ROW + pos as u32, icon, glyph, text: h.text.clone(), hint }
+        // App selecionado: botão para abrir como administrador (o mesmo do Ctrl+Shift+Enter).
+        let button = (pos == self.sel && matches!(h.target, Target::App(_))).then(|| (0xEA18, tr("Admin"), RUN_AS_ADMIN));
+        Item { id: ROW + pos as u32, icon, glyph, text: h.text.clone(), hint, button }
     }
 
-    /// Abre a linha `pos` (entre todas).
-    fn run(&self, pos: usize) {
+    /// Abre a linha `pos` (entre todas). `admin`: app como administrador (verbo `runas`, o
+    /// mesmo do menu Iniciar; o Windows pede a confirmação do UAC).
+    fn run(&self, pos: usize, admin: bool) {
         let Some(h) = self.rows().nth(pos) else { return };
+        if admin && !matches!(h.target, Target::App(_)) {
+            return;
+        }
         let open = |target: &str| unsafe {
             ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
+        };
+        let open_app = |target: &str| unsafe {
+            let verb = if admin { w!("runas") } else { w!("open") };
+            ShellExecuteW(None, verb, &HSTRING::from(target), None, None, SW_SHOWNORMAL);
         };
         let target = h.target.clone();
         let query = self.query.trim().to_string();
@@ -629,7 +641,7 @@ impl Launcher {
         match target {
             Target::App(i) => {
                 count_launch(app_key(&all[i]));
-                open(&app_source(&all[i]));
+                open_app(&app_source(&all[i]));
             }
             Target::Doc(i) => {
                 count_launch(format!("doc:{}", docs[i].path));
@@ -749,11 +761,15 @@ impl PanelContent for Launcher {
                 true
             }
             Event::Submit(FIELD, _) => {
-                self.run(self.sel);
+                self.run(self.sel, false);
+                false
+            }
+            Event::SubmitAsAdmin(FIELD) | Event::Click(RUN_AS_ADMIN) => {
+                self.run(self.sel, true);
                 false
             }
             Event::Click(id) if id >= ROW => {
-                self.run((id - ROW) as usize);
+                self.run((id - ROW) as usize, false);
                 false
             }
             Event::Key(k) => {

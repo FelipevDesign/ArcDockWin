@@ -208,7 +208,8 @@ thread_local! {
 /// Descarta o render target compartilhado; o próximo `shared_d2d` cria outro. Um alvo que
 /// falhou no BindDC ou no EndDraw (ex.: D2DERR_RECREATE_TARGET) não volta sozinho: sem
 /// isso, o texto de todas as barras (relógio, CPU/RAM, glifos) sumia até reabrir o dock.
-fn reset_shared_d2d() {
+/// Também solta o par na saída do dock (`teardown`), antes da limpeza das `thread_local`.
+pub(crate) fn reset_shared_d2d() {
     D2D.with_borrow_mut(|slot| *slot = None);
 }
 
@@ -1592,19 +1593,6 @@ pub fn destroy() {
     KEYBOARD.with_borrow_mut(String::clear);
     MAIN.set(HWND(std::ptr::null_mut()));
     TRAY_BAR.set(HWND(std::ptr::null_mut()));
-}
-
-/// Tira as barras do sistema de AppBars (chamado onde o dock encerra).
-pub fn shutdown() {
-    let bars = BARS.with(|b| b.try_borrow_mut().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default());
-    for bar in bars {
-        let mut abd = bar.appbar_data();
-        unsafe {
-            SHAppBarMessage(ABM_REMOVE, &mut abd);
-            let _ = ShowWindow(bar.hwnd, SW_HIDE);
-            let _ = ShowWindow(bar.glass, SW_HIDE);
-        }
-    }
 }
 
 /// Algo mudou numa janela de topo: troca de app pinta na hora; o resto agenda uma releitura
