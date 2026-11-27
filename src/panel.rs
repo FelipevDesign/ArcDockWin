@@ -177,7 +177,26 @@ pub enum Widget {
     /// Linha compacta só de leitura: rótulo à esquerda, barra fina no meio e valor à direita
     /// (`frac` 0..1). `strong`: rótulo forte e barra na cor de destaque (ex.: hoje).
     Bar { label: String, value: String, frac: f32, strong: bool },
+    /// Galeria de miniaturas 16:9, duas por fileira, com o nome embaixo → [`Event::Click`].
+    Gallery(Vec<Shot>),
 }
+
+/// Miniatura de [`Widget::Gallery`]: imagem BGRA (sem ela, um quadro vazio com ⊘), nome e
+/// se é a escolhida (contorno na cor de destaque).
+pub struct Shot {
+    pub id: u32,
+    pub image: Option<Pixmap>,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// Altura de uma fileira da galeria (miniatura + nome) para a largura interna `inner` (px).
+fn gallery_row(inner: f32, s: f32) -> f32 {
+    let cw = (inner - GALLERY_GAP * s) / 2.0;
+    cw * 9.0 / 16.0 + 30.0 * s
+}
+
+const GALLERY_GAP: f32 = 10.0;
 
 /// Linha de [`Widget::List`]: imagem ou, sem ela, o glifo `glyph` (0 = nada). `hint`: texto
 /// pequeno à direita (ex.: a tecla e o que ela faz), vazio = nada.
@@ -260,6 +279,8 @@ fn stretch(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: usiz
 pub enum Card {
     /// Uma coluna: círculo com glifo + título e subtítulo.
     Tile(Tile),
+    /// Igual a [`Card::Tile`], na largura toda.
+    WideTile(Tile),
     /// Uma coluna e duas fileiras: capa (BGRA pré-multiplicado, quadrada), título, artista e
     /// três botões `(glifo, id)` → [`Event::Click`].
     Media { cover: Option<Pixmap>, title: String, artist: String, buttons: [(u16, u32); 3] },
@@ -273,6 +294,7 @@ impl Card {
     fn span(&self) -> (usize, usize) {
         match self {
             Card::Tile(_) => (1, 1),
+            Card::WideTile(_) => (2, 1),
             Card::Media { .. } => (1, 2),
             Card::Slider { .. } => (2, 1),
         }
@@ -355,7 +377,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
             Widget::Cards(cards) => {
                 for card in cards {
                     match card {
-                        Card::Tile(tile) => { translate(&mut tile.title); translate(&mut tile.sub); }
+                        Card::Tile(tile) | Card::WideTile(tile) => { translate(&mut tile.title); translate(&mut tile.sub); }
                         Card::Slider { title, .. } => translate(title),
                         // Titles and artists come from the active player, not the UI.
                         Card::Media { .. } => {}
@@ -363,6 +385,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
                 }
             }
             // App names, Wi-Fi SSIDs, and filenames are user/system content, not UI labels.
+            Widget::Gallery(shots) => shots.iter_mut().for_each(|shot| translate(&mut shot.label)),
             Widget::Icons { .. } | Widget::List { .. } | Widget::Slider { .. } | Widget::Separator | Widget::Space(_) => {}
         }
     }
@@ -1026,6 +1049,10 @@ impl Panel {
             Widget::Field { .. } => 40.0,
             Widget::Grid { cols, cells } => 32.0 * cells.len().div_ceil((*cols).max(1)) as f32,
             Widget::Icons { items } => ICON_CELL * items.len().div_ceil(self.icon_cols()) as f32,
+            Widget::Gallery(shots) => {
+                let inner = self.w as f32 / s - 2.0 * SIDE;
+                return gallery_row(inner * s, s) * shots.len().div_ceil(2) as f32;
+            }
             Widget::Cards(c) => {
                 let rows = pack(c).1 as f32;
                 2.0 * CARD_PAD + rows * CARD_H + (rows - 1.0).max(0.0) * CARD_GAP
@@ -1320,6 +1347,40 @@ impl Panel {
                         fill(&mut pm, bx, top, bw, tl, bw / 2.0, pal.strong);
                     }
                 }
+                Widget::Gallery(shots) => {
+                    let gap = GALLERY_GAP * s;
+                    let cw = (right - left - gap) / 2.0;
+                    let ih = cw * 9.0 / 16.0;
+                    let rowh = gallery_row(right - left, s);
+                    let r = 8.0 * s;
+                    let ring = Stroke { width: 2.5 * s, ..Default::default() };
+                    for (k, shot) in shots.iter().enumerate() {
+                        let gx = left + (k % 2) as f32 * (cw + gap);
+                        let gy = y + (k / 2) as f32 * rowh;
+                        zones.push(Zone { x: gx, y: gy, w: cw, h: ih + 24.0 * s, radius: r, kind: ZoneKind::Click(shot.id) });
+                        match (&shot.image, rounded_rect(gx, gy, cw, ih, r)) {
+                            (Some(img), Some(p)) => {
+                                let (kx, ky) = (cw / img.width().max(1) as f32, ih / img.height().max(1) as f32);
+                                let ts = Transform::from_scale(kx, ky).post_translate(gx, gy);
+                                let mut pt = Paint::default();
+                                pt.anti_alias = true;
+                                pt.shader = Pattern::new(img.as_ref(), SpreadMode::Pad, FilterQuality::Bicubic, 1.0, ts);
+                                pm.fill_path(&p, &pt, FillRule::Winding, tf, None);
+                            }
+                            _ => {
+                                fill(&mut pm, gx, gy, cw, ih, r, pal.circle);
+                                texts.push(mk(&glyph(0xE711), Font::IconLarge, [gx, gy, cw, ih], DWRITE_TEXT_ALIGNMENT_CENTER, pal.dim));
+                            }
+                        }
+                        if shot.selected
+                            && let Some(p) = rounded_rect(gx - 3.0 * s, gy - 3.0 * s, cw + 6.0 * s, ih + 6.0 * s, r + 3.0 * s)
+                        {
+                            pm.stroke_path(&p, &paint(pal.accent), &ring, tf, None);
+                        }
+                        let ink = if shot.selected { pal.ink } else { pal.dim };
+                        texts.push(mk(&shot.label, Font::Small, [gx, gy + ih + 5.0 * s, cw, 18.0 * s], DWRITE_TEXT_ALIGNMENT_CENTER, ink));
+                    }
+                }
                 Widget::Icons { items } => {
                     let cols = self.icon_cols();
                     let cell = ICON_CELL * s;
@@ -1348,7 +1409,7 @@ impl Panel {
                             pm.stroke_path(&p, &paint(pal.card_line), &stroke, tf, None);
                         }
                         match card {
-                            Card::Tile(t) => {
+                            Card::Tile(t) | Card::WideTile(t) => {
                                 let d = 38.0 * s;
                                 let (ox, oy) = (cx + (ch - d) / 2.0, cy + (ch - d) / 2.0);
                                 fill(&mut pm, ox, oy, d, d, d / 2.0, if t.on { [255, 255, 255, 255] } else { pal.circle });

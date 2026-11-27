@@ -34,6 +34,7 @@ mod tray;
 mod update;
 mod overflow;
 mod volume;
+mod wallpaper;
 mod wifi;
 mod winkey;
 
@@ -1616,6 +1617,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     preview::shutdown();
                     tooltip::shutdown();
                     minimize::shutdown();
+                    wallpaper::shutdown();
                 }
                 LRESULT(0)
             }
@@ -1630,6 +1632,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     preview::shutdown();
                     tooltip::shutdown();
                     minimize::shutdown();
+                    wallpaper::shutdown();
                     PostQuitMessage(0);
                 }
                 LRESULT(0)
@@ -1700,7 +1703,7 @@ unsafe extern "system" fn glass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 use windows::Win32::Foundation::HINSTANCE;
 
 fn main() -> windows::core::Result<()> {
-    if guard::run_if_requested() {
+    if guard::run_if_requested() || wallpaper::preview_if_requested() {
         return Ok(());
     }
     i18n::initialize();
@@ -1752,6 +1755,8 @@ fn main() -> windows::core::Result<()> {
             topbar::create();
             start_tray();
         }
+        wallpaper::apply();
+        wallpaper::prewarm();
         minimize::init();
         winkey::config_changed();
         launcher::preload();
