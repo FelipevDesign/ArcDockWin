@@ -38,8 +38,14 @@ pub const MUSIC: &str = "::tool-music";
 const ALL: [(&str, &str); 5] =
     [(SHELF, "tool_shelf"), (CLIP, "tool_clip"), (PICKER, "tool_picker"), (TIMER, "tool_timer"), (MUSIC, "tool_music")];
 
+/// Ferramentas que aparecem no dock agora. A prateleira só aparece com algo guardado (ela
+/// se enche soltando arquivos no dock); a música fica num quadro próprio (musicbar.rs).
 pub fn enabled() -> Vec<&'static str> {
-    ALL.iter().filter(|(_, k)| extras::on(k)).map(|(s, _)| *s).collect()
+    ALL.iter()
+        .filter(|(_, k)| extras::on(k))
+        .map(|(s, _)| *s)
+        .filter(|s| *s != MUSIC && (*s != SHELF || !shelf().is_empty()))
+        .collect()
 }
 
 pub fn is_tool(source: &str) -> bool {
@@ -74,30 +80,30 @@ fn light() -> bool {
 // ---------------------------------------------------------------------------------------------
 // Ícones
 
-/// Quadrado discreto com um glifo (e um texto pequeno embaixo, se houver).
-fn glyph_icon(glyph: u16, caption: Option<&str>, px: i32, accent: bool) -> Option<Pixmap> {
+/// Ícone discreto: só o glifo, menor que um app e sem fundo (e um número pequeno embaixo,
+/// se houver). `strong` = em destaque (timer acabou); `faded` = pausado.
+fn glyph_icon(glyph: u16, caption: Option<&str>, px: i32, strong: bool) -> Option<Pixmap> {
+    glyph_icon_ex(glyph, caption, px, strong, false)
+}
+
+fn glyph_icon_ex(glyph: u16, caption: Option<&str>, px: i32, strong: bool, faded: bool) -> Option<Pixmap> {
     let light = light();
     let buf = Buffer::new(px, px)?;
     let n = (px * px * 4) as usize;
     let bytes = unsafe { std::slice::from_raw_parts_mut(buf.bits, n) };
     bytes.fill(0);
-    {
-        let mut pm = PixmapMut::from_bytes(bytes, px as u32, px as u32)?;
-        let f = px as f32;
-        let (bg, line) = if light { ([0, 0, 0, 20], [0, 0, 0, 38]) } else { ([255, 255, 255, 26], [255, 255, 255, 46]) };
-        let id = Transform::identity();
-        if let Some(p) = rounded_rect(0.5, 0.5, f - 1.0, f - 1.0, f * 0.24) {
-            pm.fill_path(&p, &panel::paint(bg), FillRule::Winding, id, None);
-            let stroke = Stroke { width: if accent { 2.0 } else { 1.0 }, ..Default::default() };
-            let c = if accent { [96, 165, 250, 220] } else { line };
-            pm.stroke_path(&p, &panel::paint(c), &stroke, id, None);
-        }
-    }
-    let text = Text::new(px as f32 / 44.0).ok()?;
-    let ink = if light { [0.12, 0.13, 0.16, 0.9] } else { [1.0, 1.0, 1.0, 0.88] };
+    let text = Text::new(px as f32 / 62.0).ok()?;
+    let a = if faded { 0.38 } else if strong { 0.95 } else { 0.7 };
+    let ink = if strong {
+        [0.38, 0.65, 0.98, a]
+    } else if light {
+        [0.12, 0.13, 0.16, a]
+    } else {
+        [1.0, 1.0, 1.0, a]
+    };
     let f = px as f32;
     let mut ops = Vec::new();
-    let gy = if caption.is_some() { -f * 0.1 } else { 0.0 };
+    let gy = if caption.is_some() { -f * 0.08 } else { 0.0 };
     ops.push(TextOp {
         text: vec![glyph],
         font: Font::IconLarge,
@@ -110,14 +116,16 @@ fn glyph_icon(glyph: u16, caption: Option<&str>, px: i32, accent: bool) -> Optio
     if let Some(c) = caption {
         ops.push(TextOp {
             text: c.encode_utf16().collect(),
-            font: Font::Bold,
-            rect: [0.0, f * 0.58, f, f * 0.34],
+            font: Font::Small,
+            rect: [0.0, f * 0.6, f, f * 0.3],
             align: DWRITE_TEXT_ALIGNMENT_CENTER,
             color: ink,
             wrap: false,
             clip: None,
         });
     }
+    // Glifos de linha fina: o texto do DirectWrite vem com y no centro da caixa.
+    let _ = (&rounded_rect, PixmapMut::from_bytes, Stroke::default);
     text.draw(buf.memdc, px, px, &ops);
     to_pixmap(bytes, px)
 }
@@ -164,7 +172,7 @@ pub fn icon(source: &str, px: i32) -> Option<Pixmap> {
             let n = shelf().len();
             glyph_icon(0xE7B8, (n > 0).then(|| n.to_string()).as_deref(), px, false)
         }
-        CLIP => glyph_icon(0xE77F, None, px, crate::clipboard::paused()),
+        CLIP => glyph_icon_ex(0xE77F, None, px, false, crate::clipboard::paused()),
         PICKER => glyph_icon(0xE790, None, px, false),
         TIMER => {
             let (left, done) = timer_left();
@@ -419,9 +427,15 @@ fn shelf() -> Vec<PathBuf> {
 fn set_shelf(list: Vec<PathBuf>) {
     let text: String = list.iter().map(|p| format!("{}\n", p.to_string_lossy())).collect();
     let _ = std::fs::write(shelf_file(), text);
+    let empty = list.is_empty();
     if let Ok(mut s) = SHELF_ITEMS.lock() {
         *s = Some(list);
     }
+    if empty && panel::is_open("shelf") {
+        panel::close();
+    }
+    // A prateleira aparece/some do dock conforme tem algo guardado.
+    crate::apply_settings(false);
     crate::refresh_tools();
 }
 
@@ -457,7 +471,7 @@ impl PanelContent for ShelfPanel {
         }
         let mut out = vec![Widget::Label(tr("Prateleira"))];
         if list.is_empty() {
-            out.push(Widget::Text(tr("Solte arquivos no ícone da prateleira para guardá-los aqui.")));
+            out.push(Widget::Text(tr("Solte arquivos no dock para guardá-los aqui.")));
         } else {
             let items = list
                 .iter()

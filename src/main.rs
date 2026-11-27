@@ -108,6 +108,15 @@ const MENU_NEW_GROUP: usize = 12;
 const MENU_NEW_MODE: usize = 13;
 const MENU_UNGROUP: usize = 14;
 const MENU_RUN: usize = 15;
+/// Submenu "Ferramentas no dock" (opção e nome).
+const MENU_TOOLS: usize = 300;
+const MENU_TOOL_KEYS: [(&str, &str); 5] = [
+    ("tool_shelf", "Prateleira (ao soltar arquivos)"),
+    ("tool_clip", "Área de transferência"),
+    ("tool_picker", "Coletor de cores"),
+    ("tool_timer", "Timer de foco"),
+    ("tool_music", "Música (quadro ao lado do dock)"),
+];
 /// Grupos e modos existentes no submenu "Adicionar a…".
 const MENU_TO_GROUP: usize = 200;
 /// Itens das janelas do app: MENU_WINDOW + índice.
@@ -896,18 +905,21 @@ unsafe fn dropped(hwnd: HWND, wp: WPARAM) {
                 let args = if args.is_empty() { quoted } else { format!("{args} {quoted}") };
                 apps::launch(&src, &args);
             }
-            None if extras::on("pin_drop") => {
-                let lines: Vec<String> = files
-                    .iter()
-                    .filter(|f| {
-                        let e = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-                        f.is_dir() || ["exe", "lnk", "url", "bat", "cmd"].contains(&e.as_str())
-                    })
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .collect();
-                if !lines.is_empty() {
-                    apps::append_lines(&lines);
+            None => {
+                // Programas e atalhos: fixa. O resto (arquivos e, com a prateleira ligada,
+                // pastas) vai para a prateleira, que aparece no dock ao receber algo.
+                let shelf = extras::on("tool_shelf");
+                let program = |f: &std::path::PathBuf| {
+                    let e = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                    ["exe", "lnk", "url", "bat", "cmd"].contains(&e.as_str()) || (!shelf && f.is_dir())
+                };
+                let (pins, rest): (Vec<_>, Vec<_>) = files.into_iter().partition(program);
+                if extras::on("pin_drop") && !pins.is_empty() {
+                    apps::append_lines(&pins.iter().map(|f| f.to_string_lossy().into_owned()).collect::<Vec<_>>());
                     reload_pins();
+                }
+                if shelf && !rest.is_empty() {
+                    tools::shelf_add(&rest);
                 }
             }
             _ => {}
@@ -1489,6 +1501,14 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
             let text = HSTRING::from(crate::i18n::tr("Atualizar o ArcDockWin"));
             let _ = AppendMenuW(menu, MF_STRING, MENU_UPDATE, &text);
         }
+        // Ferramentas: ligar e desligar direto do dock.
+        if let Ok(sub) = CreatePopupMenu() {
+            for (k, (key, name)) in MENU_TOOL_KEYS.iter().enumerate() {
+                let flags = if extras::on(key) { MF_STRING | MF_CHECKED } else { MF_STRING };
+                let _ = AppendMenuW(sub, flags, MENU_TOOLS + k, &HSTRING::from(crate::i18n::tr(name)));
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &HSTRING::from(crate::i18n::tr("Ferramentas no dock")));
+        }
         let settings = HSTRING::from(crate::i18n::tr("Configurações…"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, &settings);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -1520,6 +1540,12 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
         let cmd = cmd.0 as usize;
         if cmd == MENU_QUIT {
             let _ = DestroyWindow(hwnd);
+            return;
+        }
+        if (MENU_TOOLS..MENU_TOOLS + MENU_TOOL_KEYS.len()).contains(&cmd) {
+            if let Some(i) = extras::index(MENU_TOOL_KEYS[cmd - MENU_TOOLS].0) {
+                extras::toggle(i);
+            }
             return;
         }
         if cmd == MENU_SETTINGS {

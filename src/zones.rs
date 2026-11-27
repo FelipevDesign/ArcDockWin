@@ -33,6 +33,8 @@ use crate::extras;
 thread_local! {
     static HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
     static SHADOWS: RefCell<Vec<Shadow>> = const { RefCell::new(Vec::new()) };
+    /// Última janela solta depois de arrastar, e quando.
+    static LAST_END: std::cell::Cell<Option<(isize, std::time::Instant)>> = const { std::cell::Cell::new(None) };
 }
 
 /// Janela sendo arrastada, a camada que mostra a zona e o timer que olha o Shift.
@@ -74,7 +76,8 @@ pub fn sync() {
     if !want || !extras::on("shadow_on") {
         shadows(|v| v.clear());
     } else {
-        shadows(|v| v.iter_mut().for_each(|s| s.update(true)));
+        shadows(|v| v.retain_mut(|s| s.update(true)));
+        scan();
     }
 }
 
@@ -125,38 +128,82 @@ unsafe extern "system" fn event(_: HWINEVENTHOOK, ev: u32, hwnd: HWND, obj: i32,
         EVENT_SYSTEM_MOVESIZESTART => {
             DRAGGING.store(hwnd.0 as isize, Ordering::Relaxed);
             start_poll();
+            shadows(|v| v.iter_mut().filter(|s| s.target == hwnd).for_each(|s| s.hide()));
         }
         EVENT_SYSTEM_MOVESIZEEND => {
             stop_poll();
             let shown = OVERLAY.load(Ordering::Relaxed) != 0 && unsafe { IsWindowVisible(HWND(OVERLAY.load(Ordering::Relaxed) as _)).as_bool() };
             hide_overlay();
             DRAGGING.store(0, Ordering::Relaxed);
-            if shown && shift() {
-                if let Some(z) = zone_at(cursor()) {
-                    snap(hwnd, z);
-                    if extras::on("shadow_on") {
-                        shadows(|v| {
-                            if !v.iter().any(|s| s.target == hwnd)
-                                && let Some(s) = Shadow::new(hwnd)
-                            {
-                                v.push(s);
-                            }
-                        });
-                    }
-                }
-            } else {
-                // Arrastada para fora da zona: deixa de ser encaixada.
-                shadows(|v| v.retain(|s| s.target != hwnd));
+            if shown && shift() && let Some(z) = zone_at(cursor()) {
+                snap(hwnd, z);
             }
+            // Encaixada por nós ou por outro programa (FancyZones): ganha sombra; fora, perde.
+            // O FancyZones encaixa logo depois de soltar: olha de novo nos próximos instantes.
+            LAST_END.set(Some((hwnd.0 as isize, std::time::Instant::now())));
+            track(hwnd);
+            shadows(|v| v.retain_mut(|s| if s.target == hwnd { s.update(true) } else { true }));
         }
         EVENT_OBJECT_DESTROY => shadows(|v| v.retain(|s| s.target != hwnd)),
-        _ => shadows(|v| {
-            // Primeiro plano mudou: cada sombra volta para trás da sua janela.
-            let all = ev == EVENT_SYSTEM_FOREGROUND;
-            for s in v.iter_mut().filter(|s| all || s.target == hwnd) {
-                s.update(false);
+        _ => {
+            let recent = LAST_END.get().is_some_and(|(h, t)| h == hwnd.0 as isize && t.elapsed().as_millis() < 1500);
+            if ev == EVENT_SYSTEM_FOREGROUND || ev == EVENT_SYSTEM_MINIMIZEEND || (ev == EVENT_OBJECT_LOCATIONCHANGE && recent) {
+                track(hwnd);
             }
-        }),
+            shadows(|v| {
+                // Primeiro plano mudou: cada sombra volta para trás da sua janela. Saiu da zona
+                // (Win+setas, maximizada...): a sombra some.
+                let all = ev == EVENT_SYSTEM_FOREGROUND;
+                v.retain_mut(|s| if all || s.target == hwnd { s.update(false) } else { true });
+            });
+        }
+    }
+}
+
+/// A janela está na zona do monitor dela (com folga de alguns pixels)?
+fn in_zone(hwnd: HWND) -> bool {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+            return false;
+        }
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        if style & WS_THICKFRAME.0 == 0 || style & WS_CHILD.0 != 0 {
+            return false;
+        }
+    }
+    let Some(f) = frame(hwnd) else { return false };
+    let c = POINT { x: (f.left + f.right) / 2, y: (f.top + f.bottom) / 2 };
+    let Some(z) = zone_at(c) else { return false };
+    let tol = (12.0 * crate::panel_scale()) as i32;
+    (f.left - z.left).abs() <= tol && (f.top - z.top).abs() <= tol && (f.right - z.right).abs() <= tol && (f.bottom - z.bottom).abs() <= tol
+}
+
+/// Dá sombra à janela se ela está na zona (e tira se não está mais).
+fn track(hwnd: HWND) {
+    if !extras::on("shadow_on") {
+        return;
+    }
+    let inside = in_zone(hwnd);
+    shadows(|v| {
+        let has = v.iter().any(|s| s.target == hwnd);
+        if inside && !has {
+            if let Some(s) = Shadow::new(hwnd) {
+                v.push(s);
+            }
+        } else if !inside && has {
+            v.retain(|s| s.target != hwnd);
+        }
+    });
+}
+
+/// Ao ligar: janelas que já estão na zona.
+fn scan() {
+    unsafe extern "system" fn each(h: HWND, _: LPARAM) -> windows::core::BOOL {
+        track(h);
+        windows::core::BOOL(1)
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(0));
     }
 }
 
@@ -342,16 +389,28 @@ impl Shadow {
     }
 
     /// Acompanha a janela: posição, tamanho, ordem e visibilidade. `force` redesenha.
-    fn update(&mut self, force: bool) {
+    /// Devolve false quando a janela saiu da zona (a sombra deve sumir).
+    fn update(&mut self, force: bool) -> bool {
         unsafe {
             let t = self.target;
+            if !IsWindow(Some(t)).as_bool() {
+                return false;
+            }
             let mut cloaked = 0u32;
             let _ = DwmGetWindowAttribute(t, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4);
-            if !IsWindowVisible(t).as_bool() || IsIconic(t).as_bool() || IsZoomed(t).as_bool() || cloaked != 0 {
+            if !IsWindowVisible(t).as_bool() || IsIconic(t).as_bool() || cloaked != 0 {
                 self.hide();
-                return;
+                return true;
             }
-            let Some(r) = frame(t) else { return };
+            // Sendo arrastada: escondida até soltar (aí decide se continua na zona).
+            if DRAGGING.load(Ordering::Relaxed) == t.0 as isize {
+                self.hide();
+                return true;
+            }
+            if !in_zone(t) {
+                return false;
+            }
+            let Some(r) = frame(t) else { return true };
             let soft = (extras::num("shadow_soft") * crate::panel_scale()).round() as i32;
             let level = extras::num("shadow_level") / 100.0;
             let same = self.last.is_some_and(|(lr, ls, ll)| {
@@ -376,6 +435,7 @@ impl Shadow {
             }
             self.last = Some((r, soft, level));
         }
+        true
     }
 }
 
