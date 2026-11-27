@@ -943,6 +943,9 @@ impl Bar {
             2 => Some(true),
             _ => None,
         };
+        // Sobre a cor de um app maximizado vale sempre o contraste com ela (texto escuro
+        // fixo num app escuro sumiria).
+        let forced = forced.filter(|_| app.is_none());
         if let Some(f) = forced {
             light = f;
         }

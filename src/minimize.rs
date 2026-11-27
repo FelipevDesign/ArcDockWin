@@ -41,6 +41,8 @@ const FIRST: f32 = 0.0167;
 static OVERLAY: AtomicIsize = AtomicIsize::new(0);
 /// Thread dos ganchos de baixo nível: 0 = desligados, u32::MAX = subindo.
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+/// Janela cujo "_" foi apertado (a da cópia preparada), para o gancho do mouse.
+static PRESSED: AtomicIsize = AtomicIsize::new(0);
 
 /// Foto da janela (BGRA em u32, alfa pré-multiplicado) no retângulo visível dela.
 struct Shot {
@@ -180,7 +182,17 @@ fn hook_thread() {
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if code == HC_ACTION as i32 && wp.0 as u32 == WM_LBUTTONUP {
-            let _ = PostMessageW(Some(overlay()), WM_ARM, WPARAM(0), LPARAM(0));
+            // A cópia só entra por cima já ao soltar quando o app segurou o mouse (botão "_"
+            // padrão do Windows): aí o soltar vai para ele de qualquer jeito. Apps que desenham
+            // os próprios botões (WhatsApp, WebView2) precisam receber o soltar sem nada na
+            // frente, senão não minimizam; para eles a cópia entra quando o minimizar começa.
+            let src = HWND(PRESSED.swap(0, Ordering::AcqRel) as *mut c_void);
+            let captured = !src.is_invalid() && {
+                let tid = GetWindowThreadProcessId(src, None);
+                let mut gi = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+                tid != 0 && GetGUIThreadInfo(tid, &mut gi).is_ok() && !gi.hwndCapture.is_invalid()
+            };
+            let _ = PostMessageW(Some(overlay()), WM_ARM, WPARAM(!captured as usize), LPARAM(0));
         }
         if code == HC_ACTION as i32 && wp.0 as u32 == WM_LBUTTONDOWN {
             let pt = (*(lp.0 as *const MSLLHOOKSTRUCT)).pt;
@@ -194,6 +206,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
                     // HTCLIENT em cima do "_": a posição dos botões do DWM decide.
                     || ((hit == HTCAPTION as usize || hit == HTCLIENT as usize) && on_dwm_min_button(root, pt)))
             {
+                PRESSED.store(root.0 as isize, Ordering::Release);
                 let _ = PostMessageW(Some(overlay()), WM_CAPTURE, WPARAM(root.0 as usize), LPARAM(0));
             }
         }
@@ -242,7 +255,9 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             WM_CAPTURE => capture_with(HWND(wp.0 as *mut c_void), lp.0 == 1),
             WM_ARM => {
                 if thumb::busy() && !thumb::running() {
-                    thumb::arm();
+                    if wp.0 == 0 {
+                        thumb::arm();
+                    }
                     // Soltou: o minimizar vem logo; se não vier, a cópia não fica por cima.
                     SetTimer(Some(hwnd), TIMER_PENDING, 700, None);
                 }
