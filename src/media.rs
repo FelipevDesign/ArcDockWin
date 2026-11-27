@@ -25,6 +25,8 @@ pub enum Action {
     Previous,
     PlayPause,
     Next,
+    /// Pular para este ponto da faixa (segundos).
+    Seek(f64),
 }
 
 #[derive(Clone)]
@@ -34,6 +36,20 @@ pub struct Media {
     pub playing: bool,
     /// Capa COVER×COVER em BGRA pré-multiplicado.
     pub cover: Option<Vec<u8>>,
+    /// Posição (segundos) no instante `at`, e duração da faixa (0 = desconhecida).
+    pub position: f64,
+    pub duration: f64,
+    pub at: std::time::Instant,
+    /// App que está tocando (para abrir ao clicar).
+    pub app_id: String,
+}
+
+impl Media {
+    /// Posição agora, andando sozinha enquanto toca.
+    pub fn position_now(&self) -> f64 {
+        let p = if self.playing { self.position + self.at.elapsed().as_secs_f64() } else { self.position };
+        if self.duration > 0.0 { p.min(self.duration) } else { p }
+    }
 }
 
 static NOW: Mutex<Option<Media>> = Mutex::new(None);
@@ -79,6 +95,7 @@ fn run(action: Action) -> windows::core::Result<bool> {
         Action::Previous => s.TrySkipPreviousAsync()?.join(),
         Action::PlayPause => s.TryTogglePlayPauseAsync()?.join(),
         Action::Next => s.TrySkipNextAsync()?.join(),
+        Action::Seek(secs) => s.TryChangePlaybackPositionAsync((secs * 10_000_000.0) as i64)?.join(),
     }
 }
 
@@ -96,7 +113,24 @@ fn read() -> windows::core::Result<Option<Media>> {
         Some(m) => m.cover,
         None => props.Thumbnail().ok().and_then(|t| cover(&t).ok()),
     };
-    Ok(Some(Media { title, artist, playing, cover }))
+    // Linha do tempo: a posição vem com a hora em que foi medida; corrige até agora.
+    let (mut position, mut duration) = (0.0, 0.0);
+    if let Ok(tl) = s.GetTimelineProperties() {
+        let secs = |t: windows::Foundation::TimeSpan| t.Duration as f64 / 10_000_000.0;
+        let start = tl.StartTime().map(secs).unwrap_or(0.0);
+        duration = (tl.EndTime().map(secs).unwrap_or(0.0) - start).max(0.0);
+        position = (tl.Position().map(secs).unwrap_or(0.0) - start).max(0.0);
+        if playing && let Ok(upd) = tl.LastUpdatedTime() {
+            let now = unsafe { windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime() };
+            let now = ((now.dwHighDateTime as i64) << 32) | now.dwLowDateTime as i64;
+            let late = (now - upd.UniversalTime) as f64 / 10_000_000.0;
+            if (0.0..86_400.0).contains(&late) {
+                position += late;
+            }
+        }
+    }
+    let app_id = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
+    Ok(Some(Media { title, artist, playing, cover, position, duration, at: std::time::Instant::now(), app_id }))
 }
 
 /// Capa recortada no quadrado do centro e reduzida para COVER×COVER.

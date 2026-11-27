@@ -63,7 +63,7 @@ pub const EXTRAS: &[Extra] = &[
     Extra { key: "picker_format", label: "Formato copiado", sub: "", kind: Kind::Choice(&["HEX", "RGB"]), needs: "tool_picker" },
     t("tool_timer", "Timer de foco", "Mostra o tempo restante no ícone"),
     s("timer_min", "Duração", 5.0, 90.0, 25.0, "min", "tool_timer"),
-    t("tool_music", "Música no dock", "Capa do que está tocando; clique para os controles"),
+    t("tool_music", "Música ao lado do dock", "Capa, controles e a barra da faixa num quadro à parte"),
     // Janelas
     t("zones_on", "Zona ao arrastar com Shift", "Desligue o FancyZones antes, para não brigarem"),
     s("zone_left", "Margem esquerda", 0.0, 300.0, 31.0, "px", "zones_on"),
@@ -213,6 +213,7 @@ pub fn changed(key: &str) {
             crate::clipboard::sync();
             crate::tools::sync();
             crate::apply_settings(false);
+            crate::musicbar::sync();
         }
         "zones" | "zone" | "shadow" => crate::zones::sync(),
         "ql" => crate::quicklook::sync(),

@@ -69,6 +69,10 @@ pub fn name(source: &str) -> String {
 }
 
 /// Tema das ferramentas: o do dock (o estilo escolhido vale mais que o do Windows).
+pub fn light_style() -> bool {
+    light()
+}
+
 fn light() -> bool {
     match extras::choice("fx_style") {
         1 => false,
@@ -267,6 +271,7 @@ unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
     let changed = LAST_LABEL.lock().map(|mut l| std::mem::replace(&mut *l, label.clone()) != label).unwrap_or(false);
     if changed {
         crate::refresh_tools();
+        crate::musicbar::update();
     }
     if changed || panel::is_open("timer") {
         panel::refresh();

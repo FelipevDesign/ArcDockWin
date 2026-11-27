@@ -9,6 +9,7 @@ mod control;
 mod drag;
 mod extras;
 mod heal;
+mod musicbar;
 mod peek;
 mod progress;
 mod shake;
@@ -520,8 +521,17 @@ impl Dock {
             unsafe {
                 let _ = ShowWindow(self.glass, SW_HIDE);
             }
+            if self.primary {
+                musicbar::anchor(None, self.scale);
+            }
             return;
         };
+        // Quadro da música ao lado do dock principal (só com o dock parado).
+        if self.primary && !self.animating {
+            let off = self.offset();
+            let r = RECT { left: self.pos.x + l, top: self.pos.y + t + off, right: self.pos.x + r, bottom: self.pos.y + b + off };
+            musicbar::anchor(Some(r), self.scale);
+        }
         let (w, h) = (r - l, b - t);
         if let Some(fx) = &self.glass_fx {
             fx.resize(w as f32, h as f32);

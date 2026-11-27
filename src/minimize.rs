@@ -79,6 +79,9 @@ struct Anim {
     dc: HDC,
     dib: HBITMAP,
     bits: *mut u32,
+    /// Parte do quadro com desenho (x0, y0, x1, y1): só ela é desenhada e mandada à tela.
+    /// A janela inteira de tela cheia, a cada quadro, era o que travava a animação.
+    area: std::cell::Cell<(usize, usize, usize, usize)>,
 }
 
 impl Drop for Anim {
@@ -396,7 +399,20 @@ fn build(shot: Shot, target: RECT) -> Option<Anim> {
     let h = (r.bottom.max(target.bottom) - origin.y) as usize;
     let (dc, dib, bits) = unsafe { new_dib(w, h) }?;
     let genie = crate::animcfg::effect() == crate::animcfg::Effect::Genie;
-    let anim = Anim { shot, target, genie, start: Instant::now(), running: false, origin, w, h, dc, dib, bits };
+    let anim = Anim {
+        shot,
+        target,
+        genie,
+        start: Instant::now(),
+        running: false,
+        origin,
+        w,
+        h,
+        dc,
+        dib,
+        bits,
+        area: std::cell::Cell::new((0, 0, w, h)),
+    };
     anim.render(0.0);
     anim.present();
     // O primeiro quadro em movimento já fica pronto no buffer: com a janela grande ele é o
@@ -474,6 +490,24 @@ impl Anim {
         let (w, h) = (self.w, self.h);
         let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, w * h) };
         let (geo, px, sw, sh) = (self.geo(), &self.shot.px[..], self.shot.w, self.shot.h);
+        // Só as linhas com algo neste quadro (a forma encolhe rápido): menos contas e, no
+        // `present`, bem menos pixels mandados para a tela.
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0usize, 0usize);
+        for y in 0..h {
+            if let Some((_, l, r, a)) = geo.row(t, y as f32 + 0.5)
+                && a > 0.002
+                && r - l >= 0.01
+            {
+                y0 = y0.min(y);
+                y1 = y + 1;
+                x0 = x0.min(l.floor().max(0.0) as usize);
+                x1 = x1.max((r.ceil() as usize + 1).min(w));
+            }
+        }
+        if y1 <= y0 || x1 <= x0 {
+            (x0, y0, x1, y1) = (0, 0, 1, 1);
+        }
+        self.area.set((x0, y0, x1, y1));
         let draw = |rows: Vec<(usize, &mut [u32])>| {
             for (y, out) in rows {
                 geo.draw_row(t, y, out, px, sw, sh);
@@ -481,7 +515,7 @@ impl Anim {
         };
         let n = if w * h < 300_000 { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get().min(4)) };
         let mut parts: Vec<Vec<(usize, &mut [u32])>> = (0..n).map(|_| Vec::with_capacity(h / n + 1)).collect();
-        for (y, out) in dst.chunks_exact_mut(w).enumerate() {
+        for (y, out) in dst.chunks_exact_mut(w).enumerate().skip(y0).take(y1 - y0) {
             parts[y % n].push((y, out));
         }
         if n == 1 {
@@ -593,17 +627,20 @@ impl Geo {
 impl Anim {
     /// Manda o buffer para a janela da animação.
     fn present(&self) {
-        let size = SIZE { cx: self.w as i32, cy: self.h as i32 };
+        let (x0, y0, x1, y1) = self.area.get();
+        let size = SIZE { cx: (x1 - x0) as i32, cy: (y1 - y0) as i32 };
+        let dst = POINT { x: self.origin.x + x0 as i32, y: self.origin.y + y0 as i32 };
+        let src = POINT { x: x0 as i32, y: y0 as i32 };
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
         // Posição e tamanho em todo quadro: só com o conteúdo o DWM não mostra a atualização.
         unsafe {
             let _ = UpdateLayeredWindow(
                 overlay(),
                 None,
-                Some(&self.origin),
+                Some(&dst),
                 Some(&size),
                 Some(self.dc),
-                Some(&POINT::default()),
+                Some(&src),
                 COLORREF(0),
                 Some(&blend),
                 ULW_ALPHA,

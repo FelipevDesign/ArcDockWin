@@ -32,7 +32,8 @@ C:\Caminho\app.exe | --parametros | Nome no dock
 Grupo: o clique mostra os apps do grupo. Modo de trabalho: o clique abre todos.
 
 ## Ferramentas (ficam antes de Downloads e Lixeira)
-- **Prateleira**: solte arquivos no ícone para guardar (só o caminho). Clique abre a lista;
+- **Prateleira**: não fica no dock à toa: solte arquivos (que não sejam programas) no fundo
+  do dock e ela aparece com eles; esvaziou, some. Guarda só o caminho. Clique abre a lista;
   botão direito num item tira da prateleira; "Copiar todos" para colar no Explorador.
 - **Histórico da área de transferência**: só texto, só na memória, com limite ajustável.
   Pausar, limpar e fixar (botão direito no item). Ignora o que gerenciadores de senha
@@ -40,13 +41,17 @@ Grupo: o clique mostra os apps do grupo. Modo de trabalho: o clique abre todos.
 - **Coletor de cores**: clique na ferramenta e depois em qualquer ponto da tela; copia em
   HEX ou RGB. Botão direito mostra as cores recentes.
 - **Timer de foco**: duração ajustável, mostra os minutos restantes no ícone e avisa com som.
-- **Música no dock**: a capa do que está tocando; clique para anterior/tocar/próxima.
+- **Música ao lado do dock**: um quadro à parte com capa, título, artista, anterior /
+  tocar / próxima e a barra da faixa andando (clique nela para pular). Clique na capa
+  abre o app que está tocando.
+- As ferramentas também ligam e desligam no botão direito do dock → **Ferramentas no dock**.
 
 ## Janelas
 - **Zona ao arrastar com Shift**: a área de trabalho menos as margens (padrão igual ao
   modelo do FancyZones: 31, 1, 25 e 32 px). Desligue o FancyZones para não brigarem.
-- **Sombra extra na janela encaixada**, com intensidade e suavidade ajustáveis.
-  Some quando a janela minimiza, maximiza, sai da zona ou fecha.
+- **Sombra extra na janela encaixada**, com intensidade e suavidade ajustáveis. Vale para
+  qualquer janela que esteja na zona (encaixada pelo dock ou pelo FancyZones). Some quando
+  a janela minimiza, maximiza, sai da zona ou fecha.
 
 ## Pré-visualização
 Selecione um arquivo no Explorador e aperte **Espaço** (ou Ctrl+Espaço, na opção).
