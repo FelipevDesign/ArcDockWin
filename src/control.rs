@@ -76,15 +76,6 @@ pub struct ControlCenter {
     wired: Net,
 }
 
-/// Glifos da fonte Segoe Fluent Icons.
-fn battery_glyph(b: &status::Battery) -> u16 {
-    let level = ((b.percent as u16 + 5) / 10).min(10);
-    match (b.charging, level) {
-        (true, l) => 0xEBAB + l,  // BatteryCharging0..10
-        (false, 10) => 0xE83F,    // Battery10
-        (false, l) => 0xE850 + l, // Battery0..9
-    }
-}
 
 /// Liga/desliga o tema escuro do Windows e dos apps e avisa todas as janelas.
 fn set_dark(dark: bool) {
@@ -124,7 +115,7 @@ impl ControlCenter {
             wifi,
             bt: BluetoothPanel::new(),
             volume: VolumePanel::new(),
-            power: PowerPanel,
+            power: PowerPanel { battery: false },
             wallpaper: None,
             wired,
         }
@@ -188,7 +179,7 @@ impl ControlCenter {
         let sub = if dark { "Ligado" } else { "Desligado" };
         cards.push(Card::Tile(Tile { glyph: GLYPH_DARK, title: "Modo Escuro".into(), sub: sub.into(), on: dark, toggle: DARK, open: DARK }));
         let (g, sub) = match status::battery() {
-            Some(b) => (battery_glyph(&b), format!("Bateria {}%", b.percent)),
+            Some(b) => (status::battery_glyph(&b), format!("Bateria {}%", b.percent)),
             None => (GLYPH_POWER, "Desligar, reiniciar…".into()),
         };
         cards.push(Card::Tile(Tile { glyph: g, title: "Energia".into(), sub, on: false, toggle: POWER, open: POWER }));

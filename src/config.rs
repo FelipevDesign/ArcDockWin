@@ -305,6 +305,9 @@ pub enum Module {
     /// Idioma de entrada (layout de teclado) do app em foco; o clique troca de layout.
     /// Só aparece com 2+ layouts instalados.
     Keyboard,
+    /// Bateria (glifo e %) e o menu de energia: bloquear, suspender, sair, reiniciar e
+    /// desligar. Sem bateria, só o botão de energia.
+    Power,
 }
 
 /// Zona da barra: a ordem dos módulos vale dentro de cada uma.
@@ -337,7 +340,7 @@ impl Zone {
 }
 
 impl Module {
-    pub const ALL: [Module; 8] = [
+    pub const ALL: [Module; 9] = [
         Module::Stats,
         Module::Clock,
         Module::Tray,
@@ -346,6 +349,7 @@ impl Module {
         Module::Codex,
         Module::Desktop,
         Module::Keyboard,
+        Module::Power,
     ];
 
     fn key(self) -> &'static str {
@@ -358,6 +362,7 @@ impl Module {
             Module::Codex => "codex",
             Module::Desktop => "desktop",
             Module::Keyboard => "keyboard",
+            Module::Power => "power",
         }
     }
 
@@ -372,6 +377,7 @@ impl Module {
             Module::Codex => "Uso do Codex",
             Module::Desktop => "Mostrar área de trabalho",
             Module::Keyboard => "Idioma do teclado",
+            Module::Power => "Bateria e energia",
         }
     }
 
@@ -383,6 +389,7 @@ impl Module {
             Module::Codex => "Codex",
             Module::Desktop => "Área de trabalho",
             Module::Keyboard => "Teclado",
+            Module::Power => "Energia",
             m => m.label(),
         }
     }
@@ -396,7 +403,7 @@ impl Module {
             Module::Control => (Zone::Right, 1),
             Module::Desktop => (Zone::Right, 2),
             // Depois da bandeja e antes da Central, como na barra de tarefas do Windows.
-            Module::Claude | Module::Codex | Module::Keyboard => (Zone::Right, 0),
+            Module::Claude | Module::Codex | Module::Keyboard | Module::Power => (Zone::Right, 0),
         }
     }
 }
