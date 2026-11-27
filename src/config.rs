@@ -50,6 +50,42 @@ fn number(key: &str, default: f32, min: f32, max: f32) -> f32 {
     get(key).and_then(|v| v.parse().ok()).unwrap_or(default).clamp(min, max)
 }
 
+/// Plano de fundo animado: chave do estilo (veja `wallpaper::STYLES`); `None` = desligado (padrão).
+pub fn wallpaper() -> Option<String> {
+    get("wallpaper").filter(|v| !v.is_empty() && v != "off")
+}
+
+pub fn set_wallpaper(style: Option<&str>) {
+    if let Some(s) = style {
+        set("wallpaper_last", s.to_string());
+    }
+    set("wallpaper", style.unwrap_or("off").to_string());
+}
+
+/// Último estilo ligado (o círculo do cartão religa nele).
+pub fn wallpaper_last() -> Option<String> {
+    get("wallpaper_last")
+}
+
+/// Plano de fundo segue o horário (claro de dia, dourado no nascer e pôr do sol, escuro à noite);
+/// desligado, segue o tema claro/escuro do Windows. Padrão: ligado.
+pub fn wallpaper_dynamic() -> bool {
+    flag("wallpaper_dynamic")
+}
+
+pub fn set_wallpaper_dynamic(on: bool) {
+    set_flag("wallpaper_dynamic", on);
+}
+
+/// Pausa o plano de fundo animado fora da tomada (padrão: ligado).
+pub fn wallpaper_battery_pause() -> bool {
+    flag("wallpaper_battery_pause")
+}
+
+pub fn set_wallpaper_battery_pause(on: bool) {
+    set_flag("wallpaper_battery_pause", on);
+}
+
 /// Tamanho dos ícones do dock (px antes da escala do monitor): 32 a 72, padrão 48.
 pub fn icon_size() -> f32 {
     number("icon_size", 48.0, 32.0, 72.0).round()
@@ -278,6 +314,9 @@ pub enum Module {
     /// Idioma de entrada (layout de teclado) do app em foco; o clique troca de layout.
     /// Só aparece com 2+ layouts instalados.
     Keyboard,
+    /// Bateria (glifo e %) e o menu de energia: bloquear, suspender, sair, reiniciar e
+    /// desligar. Sem bateria, só o botão de energia.
+    Power,
 }
 
 /// Zona da barra: a ordem dos módulos vale dentro de cada uma.
@@ -310,7 +349,7 @@ impl Zone {
 }
 
 impl Module {
-    pub const ALL: [Module; 8] = [
+    pub const ALL: [Module; 9] = [
         Module::Stats,
         Module::Clock,
         Module::Tray,
@@ -319,6 +358,7 @@ impl Module {
         Module::Codex,
         Module::Desktop,
         Module::Keyboard,
+        Module::Power,
     ];
 
     fn key(self) -> &'static str {
@@ -331,6 +371,7 @@ impl Module {
             Module::Codex => "codex",
             Module::Desktop => "desktop",
             Module::Keyboard => "keyboard",
+            Module::Power => "power",
         }
     }
 
@@ -345,6 +386,7 @@ impl Module {
             Module::Codex => "Uso do Codex",
             Module::Desktop => "Mostrar área de trabalho",
             Module::Keyboard => "Idioma do teclado",
+            Module::Power => "Bateria e energia",
         }
     }
 
@@ -356,6 +398,7 @@ impl Module {
             Module::Codex => "Codex",
             Module::Desktop => "Área de trabalho",
             Module::Keyboard => "Teclado",
+            Module::Power => "Energia",
             m => m.label(),
         }
     }
@@ -369,7 +412,7 @@ impl Module {
             Module::Control => (Zone::Right, 1),
             Module::Desktop => (Zone::Right, 2),
             // Depois da bandeja e antes da Central, como na barra de tarefas do Windows.
-            Module::Claude | Module::Codex | Module::Keyboard => (Zone::Right, 0),
+            Module::Claude | Module::Codex | Module::Keyboard | Module::Power => (Zone::Right, 0),
         }
     }
 }

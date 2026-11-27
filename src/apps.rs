@@ -85,6 +85,13 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         let _ = std::fs::write(&cfg, DEFAULT_CONFIG);
     }
     let text = std::fs::read_to_string(&cfg).unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
+    let text = match heal_store_pins(&text, &installed_packages(), |p| Path::new(p).exists()) {
+        Some(healed) => {
+            let _ = std::fs::write(&cfg, &healed);
+            healed
+        }
+        None => text,
+    };
 
     let start = |pinned: bool| App {
         source: START.to_string(),
@@ -137,6 +144,84 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         }
     }
     apps
+}
+
+const WINDOWS_APPS: &str = r"C:\Program Files\WindowsApps\";
+/// Pacotes da Store do usuário (uma subchave por nome completo, que é o nome da pasta).
+const PACKAGES_KEY: &str =
+    r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+
+/// Pasta de pacote `Nome_Versão_Arquitetura_Recurso_Editor` → (nome, versão, arquitetura, editor).
+fn package_parts(folder: &str) -> Option<(&str, Vec<u32>, &str, &str)> {
+    let p: Vec<&str> = folder.split('_').collect();
+    if p.len() != 5 {
+        return None;
+    }
+    let version = p[1].split('.').map(|n| n.parse().ok()).collect::<Option<Vec<u32>>>()?;
+    Some((p[0], version, p[2], p[4]))
+}
+
+/// Nomes dos pacotes da Store instalados para o usuário (a pasta WindowsApps não deixa listar).
+fn installed_packages() -> Vec<String> {
+    use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW};
+    let mut out = Vec::new();
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(PACKAGES_KEY), None, KEY_READ, &mut key).is_err() {
+            return out;
+        }
+        for i in 0.. {
+            let mut name = [0u16; 256];
+            let mut len = name.len() as u32;
+            if RegEnumKeyExW(key, i, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None).is_err() {
+                break;
+            }
+            out.push(String::from_utf16_lossy(&name[..len as usize]));
+        }
+        let _ = RegCloseKey(key);
+    }
+    out
+}
+
+/// Fixados da Store pelo caminho do .exe levam a versão no nome da pasta e somem quando o app
+/// atualiza. Cada linha assim cuja pasta não existe mais vira o mesmo arquivo na versão mais
+/// nova instalada do mesmo pacote (nome, arquitetura e editor), ou sai se esse caminho já está
+/// fixado. `None` se nada mudou.
+fn heal_store_pins(text: &str, installed: &[String], exists: impl Fn(&str) -> bool) -> Option<String> {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    // `None`: linha que sai (o caminho novo já estava fixado).
+    let mut lines: Vec<Option<String>> = text.lines().map(|l| Some(l.to_string())).collect();
+    let mut changed = false;
+    for i in 0..lines.len() {
+        let Some(line) = lines[i].as_deref().map(|l| l.trim().to_string()) else { continue };
+        let Some(rest) = line.get(..WINDOWS_APPS.len()).filter(|p| p.eq_ignore_ascii_case(WINDOWS_APPS)).map(|_| &line[WINDOWS_APPS.len()..])
+        else {
+            continue;
+        };
+        if exists(&line) {
+            continue;
+        }
+        let Some((folder, file)) = rest.split_once('\\') else { continue };
+        let Some((name, _, arch, publisher)) = package_parts(folder) else { continue };
+        let newest = installed
+            .iter()
+            .filter_map(|f| package_parts(f).map(|p| (f, p)))
+            .filter(|(_, (n, _, a, p))| n.eq_ignore_ascii_case(name) && a.eq_ignore_ascii_case(arch) && p.eq_ignore_ascii_case(publisher))
+            .map(|(f, (_, v, _, _))| (v, format!("{WINDOWS_APPS}{f}\\{file}")))
+            .filter(|(_, path)| exists(path))
+            .max_by(|a, b| a.0.cmp(&b.0));
+        let Some((_, path)) = newest else { continue };
+        let pinned = lines.iter().flatten().any(|l| l.trim().eq_ignore_ascii_case(&path));
+        lines[i] = (!pinned).then_some(path);
+        changed = true;
+    }
+    changed.then(|| {
+        let mut out: String = lines.iter().flatten().map(|l| format!("{l}{nl}")).collect();
+        if !text.ends_with('\n') && out.ends_with(nl) {
+            out.truncate(out.len() - nl.len());
+        }
+        out
+    })
 }
 
 /// Grava os fixados na ordem do dock: comentários e linhas de apps que não estão no dock
@@ -1192,5 +1277,53 @@ mod tests {
         assert_eq!(store_app_id(&pkg.join("Missing.exe").display().to_string()), None);
         assert_eq!(store_app_id(r"C:\Program Files\App\app.exe"), None);
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn heal_store_pins_follows_the_installed_version() {
+        let wa = r"C:\Program Files\WindowsApps\";
+        let installed: Vec<String> = [
+            "Claude_6.28899.6.0_x64__pzs8sxrjxfjjc",
+            "Claude_6.28899.10.0_x64__pzs8sxrjxfjjc",
+            "Claude_6.28899.12.0_arm64__pzs8sxrjxfjjc",
+            "Microsoft.WindowsTerminal_1.26.1.0_x64__8wekyb3d8bbwe",
+            "5319275A.WhatsAppDesktop_2.2623.103.0_neutral_split.scale-100_cv1g1gvanyjgm",
+        ]
+        .map(String::from)
+        .to_vec();
+        let exists = |p: &str| {
+            p.contains("6.28899.10.0") || p.contains("6.28899.6.0") || p.contains("1.26.1.0") || !p.contains("WindowsApps")
+        };
+        let text = [
+            "# comentário",
+            &format!(r"{wa}Claude_6.28899.2.0_x64__pzs8sxrjxfjjc\app\claude.exe"),
+            r"C:\Windows\explorer.exe",
+            &format!(r"{wa}Microsoft.WindowsTerminal_1.25.3131.0_x64__8wekyb3d8bbwe\WindowsTerminal.exe"),
+            &format!(r"{wa}5319275A.WhatsAppDesktop_2.2645.101.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe"),
+            "",
+        ]
+        .join("\r\n");
+        let healed = heal_store_pins(&text, &installed, exists).unwrap();
+        let expected = [
+            "# comentário",
+            // Versão mais nova do mesmo pacote e arquitetura (a arm64 fica de fora).
+            &format!(r"{wa}Claude_6.28899.10.0_x64__pzs8sxrjxfjjc\app\claude.exe"),
+            r"C:\Windows\explorer.exe",
+            &format!(r"{wa}Microsoft.WindowsTerminal_1.26.1.0_x64__8wekyb3d8bbwe\WindowsTerminal.exe"),
+            // Sem versão x64 instalada: a linha fica como está.
+            &format!(r"{wa}5319275A.WhatsAppDesktop_2.2645.101.0_x64__cv1g1gvanyjgm\WhatsApp.Root.exe"),
+            "",
+        ]
+        .join("\r\n");
+        assert_eq!(healed, expected);
+
+        // O caminho novo já fixado: a linha antiga sai em vez de virar duplicata.
+        let dup = format!(
+            "{wa}Claude_6.28899.2.0_x64__pzs8sxrjxfjjc\\app\\claude.exe\n{wa}Claude_6.28899.10.0_x64__pzs8sxrjxfjjc\\app\\claude.exe"
+        );
+        assert_eq!(heal_store_pins(&dup, &installed, exists).unwrap(), format!("{wa}Claude_6.28899.10.0_x64__pzs8sxrjxfjjc\\app\\claude.exe"));
+
+        // Tudo existe: nada a gravar.
+        assert_eq!(heal_store_pins(r"C:\Windows\explorer.exe", &installed, exists), None);
     }
 }

@@ -78,6 +78,16 @@ pub fn battery() -> Option<Battery> {
     Some(Battery { percent: s.BatteryLifePercent.min(100), charging: s.ACLineStatus == 1 })
 }
 
+/// Glifo do nível da bateria (Segoe Fluent Icons), com raio quando está na tomada.
+pub fn battery_glyph(b: &Battery) -> u16 {
+    let level = ((b.percent as u16 + 5) / 10).min(10);
+    match (b.charging, level) {
+        (true, l) => 0xEBAB + l,  // BatteryCharging0..10
+        (false, 10) => 0xE83F,    // Battery10
+        (false, l) => 0xE850 + l, // Battery0..9
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Net {
     None,

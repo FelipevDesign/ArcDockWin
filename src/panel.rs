@@ -93,8 +93,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
-    VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RIGHT, VK_TAB, VK_UP,
+    GetAsyncKeyState, GetCapture, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
+    VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_DOWN, VK_HOME, VK_LBUTTON, VK_LEFT, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -177,16 +177,37 @@ pub enum Widget {
     /// Linha compacta só de leitura: rótulo à esquerda, barra fina no meio e valor à direita
     /// (`frac` 0..1). `strong`: rótulo forte e barra na cor de destaque (ex.: hoje).
     Bar { label: String, value: String, frac: f32, strong: bool },
+    /// Galeria de miniaturas 16:9, duas por fileira, com o nome embaixo → [`Event::Click`].
+    Gallery(Vec<Shot>),
 }
 
+/// Miniatura de [`Widget::Gallery`]: imagem BGRA (sem ela, um quadro vazio com ⊘), nome e
+/// se é a escolhida (contorno na cor de destaque).
+pub struct Shot {
+    pub id: u32,
+    pub image: Option<Pixmap>,
+    pub label: String,
+    pub selected: bool,
+}
+
+/// Altura de uma fileira da galeria (miniatura + nome) para a largura interna `inner` (px).
+fn gallery_row(inner: f32, s: f32) -> f32 {
+    let cw = (inner - GALLERY_GAP * s) / 2.0;
+    cw * 9.0 / 16.0 + 30.0 * s
+}
+
+const GALLERY_GAP: f32 = 10.0;
+
 /// Linha de [`Widget::List`]: imagem ou, sem ela, o glifo `glyph` (0 = nada). `hint`: texto
-/// pequeno à direita (ex.: a tecla e o que ela faz), vazio = nada.
+/// pequeno à direita (ex.: a tecla e o que ela faz), vazio = nada. `button`: botão
+/// `(glifo, texto, id)` dentro da linha, à esquerda da dica → [`Event::Click`] com o id dele.
 pub struct Item {
     pub id: u32,
     pub icon: Option<Pixmap>,
     pub glyph: u16,
     pub text: String,
     pub hint: String,
+    pub button: Option<(u16, String, u32)>,
 }
 
 /// O que define o fundo do painel: tamanho do bitmap, vidro, cores e sombra.
@@ -260,6 +281,8 @@ fn stretch(src: &[u8], sw: usize, sh: usize, dst: &mut [u8], dw: usize, dh: usiz
 pub enum Card {
     /// Uma coluna: círculo com glifo + título e subtítulo.
     Tile(Tile),
+    /// Igual a [`Card::Tile`], na largura toda.
+    WideTile(Tile),
     /// Uma coluna e duas fileiras: capa (BGRA pré-multiplicado, quadrada), título, artista e
     /// três botões `(glifo, id)` → [`Event::Click`].
     Media { cover: Option<Pixmap>, title: String, artist: String, buttons: [(u16, u32); 3] },
@@ -273,6 +296,7 @@ impl Card {
     fn span(&self) -> (usize, usize) {
         match self {
             Card::Tile(_) => (1, 1),
+            Card::WideTile(_) => (2, 1),
             Card::Media { .. } => (1, 2),
             Card::Slider { .. } => (2, 1),
         }
@@ -355,7 +379,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
             Widget::Cards(cards) => {
                 for card in cards {
                     match card {
-                        Card::Tile(tile) => { translate(&mut tile.title); translate(&mut tile.sub); }
+                        Card::Tile(tile) | Card::WideTile(tile) => { translate(&mut tile.title); translate(&mut tile.sub); }
                         Card::Slider { title, .. } => translate(title),
                         // Titles and artists come from the active player, not the UI.
                         Card::Media { .. } => {}
@@ -363,6 +387,7 @@ fn localize_widgets(widgets: &mut [Widget]) {
                 }
             }
             // App names, Wi-Fi SSIDs, and filenames are user/system content, not UI labels.
+            Widget::Gallery(shots) => shots.iter_mut().for_each(|shot| translate(&mut shot.label)),
             Widget::Icons { .. } | Widget::List { .. } | Widget::Slider { .. } | Widget::Separator | Widget::Space(_) => {}
         }
     }
@@ -381,6 +406,8 @@ pub enum Event<'a> {
     Text(u32, &'a str),
     /// Enter no campo.
     Submit(u32, &'a str),
+    /// Ctrl+Shift+Enter no campo.
+    SubmitAsAdmin(u32),
     /// Seta para cima/baixo (a roda do mouse também chega assim): o código da tecla.
     Key(u16),
 }
@@ -1026,6 +1053,10 @@ impl Panel {
             Widget::Field { .. } => 40.0,
             Widget::Grid { cols, cells } => 32.0 * cells.len().div_ceil((*cols).max(1)) as f32,
             Widget::Icons { items } => ICON_CELL * items.len().div_ceil(self.icon_cols()) as f32,
+            Widget::Gallery(shots) => {
+                let inner = self.w as f32 / s - 2.0 * SIDE;
+                return gallery_row(inner * s, s) * shots.len().div_ceil(2) as f32;
+            }
             Widget::Cards(c) => {
                 let rows = pack(c).1 as f32;
                 2.0 * CARD_PAD + rows * CARD_H + (rows - 1.0).max(0.0) * CARD_GAP
@@ -1289,12 +1320,44 @@ impl Panel {
                     for (k, it) in items.iter().enumerate() {
                         let ry = y + k as f32 * rh;
                         let (zy, zh) = (ry + 2.0 * s, rh - 4.0 * s);
-                        zones.push(Zone { x: left, y: zy, w: right - left - bar, h: zh, radius: 8.0 * s, kind: ZoneKind::Click(it.id) });
                         let sel = *selected == Some(k);
+                        let ink = if sel { WHITE } else { pal.ink };
+                        // Botão da linha: encosta na dica pela largura real do texto dela. A zona
+                        // dele vem antes da zona da linha para o clique cair nele.
+                        let content_r = right - bar - inset;
+                        let text_w = |t: &str| -> f32 {
+                            if t.is_empty() {
+                                return 0.0;
+                            }
+                            let u: Vec<u16> = t.encode_utf16().collect();
+                            self.layout_text(&u, Font::Small, 1000.0 * s, rh)
+                                .and_then(|l| unsafe {
+                                    let mut m = DWRITE_TEXT_METRICS::default();
+                                    l.GetMetrics(&mut m).ok()?;
+                                    Some(m.width.ceil())
+                                })
+                                .unwrap_or(0.0)
+                        };
+                        let button = it.button.as_ref().map(|(g, label, bid)| {
+                            let hint_tw = text_w(&it.hint);
+                            let (bh, pad, gw) = (24.0 * s, 8.0 * s, 16.0 * s);
+                            let bw = pad + gw + 4.0 * s + text_w(label) + pad;
+                            let bx = content_r - hint_tw - if hint_tw > 0.0 { 10.0 * s } else { 0.0 } - bw;
+                            (bx, ry + (rh - bh) / 2.0, bw, bh, *g, label, *bid)
+                        });
+                        if let Some((bx, by, bw, bh, _, _, bid)) = button {
+                            zones.push(Zone { x: bx, y: by, w: bw, h: bh, radius: bh / 2.0, kind: ZoneKind::Click(bid) });
+                        }
+                        zones.push(Zone { x: left, y: zy, w: right - left - bar, h: zh, radius: 8.0 * s, kind: ZoneKind::Click(it.id) });
                         if sel {
                             fill(&mut pm, left, zy, right - left - bar, zh, 8.0 * s, pal.accent);
                         }
-                        let ink = if sel { WHITE } else { pal.ink };
+                        if let Some((bx, by, bw, bh, g, label, _)) = button {
+                            fill(&mut pm, bx, by, bw, bh, bh / 2.0, if sel { [255, 255, 255, 48] } else { pal.circle });
+                            let gx = bx + 8.0 * s;
+                            texts.push(mk(&glyph(g), Font::Icon, [gx, by, 16.0 * s, bh], DWRITE_TEXT_ALIGNMENT_CENTER, ink));
+                            texts.push(mk(label, Font::Small, [gx + 20.0 * s, by, bw - 28.0 * s, bh], DWRITE_TEXT_ALIGNMENT_LEADING, ink));
+                        }
                         let tx = left + inset;
                         let cx = tx + (gap - 16.0 * s) / 2.0;
                         if let Some(icon) = &it.icon {
@@ -1309,7 +1372,8 @@ impl Panel {
                             let hc = if sel { [1.0, 1.0, 1.0, 0.85] } else { pal.dim };
                             texts.push(mk(&it.hint, Font::Small, [right - bar - inset - hint_w, ry, hint_w, rh], DWRITE_TEXT_ALIGNMENT_TRAILING, hc));
                         }
-                        let name_w = right - bar - inset - tx - gap - hint_w;
+                        let name_r = button.map_or(content_r - hint_w, |(bx, ..)| (content_r - hint_w).min(bx - 8.0 * s));
+                        let name_w = name_r - tx - gap;
                         texts.push(mk(&it.text, font, [tx + gap, ry, name_w, rh], DWRITE_TEXT_ALIGNMENT_LEADING, ink));
                     }
                     if let Some((start, size)) = scroll {
@@ -1318,6 +1382,40 @@ impl Panel {
                         let tl = (th * size).max(24.0 * s).min(th);
                         let top = ty + (th - tl) * (start / (1.0 - size).max(0.0001)).clamp(0.0, 1.0);
                         fill(&mut pm, bx, top, bw, tl, bw / 2.0, pal.strong);
+                    }
+                }
+                Widget::Gallery(shots) => {
+                    let gap = GALLERY_GAP * s;
+                    let cw = (right - left - gap) / 2.0;
+                    let ih = cw * 9.0 / 16.0;
+                    let rowh = gallery_row(right - left, s);
+                    let r = 8.0 * s;
+                    let ring = Stroke { width: 2.5 * s, ..Default::default() };
+                    for (k, shot) in shots.iter().enumerate() {
+                        let gx = left + (k % 2) as f32 * (cw + gap);
+                        let gy = y + (k / 2) as f32 * rowh;
+                        zones.push(Zone { x: gx, y: gy, w: cw, h: ih + 24.0 * s, radius: r, kind: ZoneKind::Click(shot.id) });
+                        match (&shot.image, rounded_rect(gx, gy, cw, ih, r)) {
+                            (Some(img), Some(p)) => {
+                                let (kx, ky) = (cw / img.width().max(1) as f32, ih / img.height().max(1) as f32);
+                                let ts = Transform::from_scale(kx, ky).post_translate(gx, gy);
+                                let mut pt = Paint::default();
+                                pt.anti_alias = true;
+                                pt.shader = Pattern::new(img.as_ref(), SpreadMode::Pad, FilterQuality::Bicubic, 1.0, ts);
+                                pm.fill_path(&p, &pt, FillRule::Winding, tf, None);
+                            }
+                            _ => {
+                                fill(&mut pm, gx, gy, cw, ih, r, pal.circle);
+                                texts.push(mk(&glyph(0xE711), Font::IconLarge, [gx, gy, cw, ih], DWRITE_TEXT_ALIGNMENT_CENTER, pal.dim));
+                            }
+                        }
+                        if shot.selected
+                            && let Some(p) = rounded_rect(gx - 3.0 * s, gy - 3.0 * s, cw + 6.0 * s, ih + 6.0 * s, r + 3.0 * s)
+                        {
+                            pm.stroke_path(&p, &paint(pal.accent), &ring, tf, None);
+                        }
+                        let ink = if shot.selected { pal.ink } else { pal.dim };
+                        texts.push(mk(&shot.label, Font::Small, [gx, gy + ih + 5.0 * s, cw, 18.0 * s], DWRITE_TEXT_ALIGNMENT_CENTER, ink));
                     }
                 }
                 Widget::Icons { items } => {
@@ -1348,7 +1446,7 @@ impl Panel {
                             pm.stroke_path(&p, &paint(pal.card_line), &stroke, tf, None);
                         }
                         match card {
-                            Card::Tile(t) => {
+                            Card::Tile(t) | Card::WideTile(t) => {
                                 let d = 38.0 * s;
                                 let (ox, oy) = (cx + (ch - d) / 2.0, cy + (ch - d) / 2.0);
                                 fill(&mut pm, ox, oy, d, d, d / 2.0, if t.on { [255, 255, 255, 255] } else { pal.circle });
@@ -1833,6 +1931,18 @@ impl Panel {
 
     fn key_down(&mut self, vk: u16) {
         match vk {
+            v if v == VK_RETURN.0 => {
+                let Some(id) = self.focus else { return };
+                // O teclado pode não gerar WM_CHAR para Ctrl+Shift+Enter.
+                let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+                if down(VK_CONTROL) && down(VK_SHIFT) {
+                    self.emit(Event::SubmitAsAdmin(id));
+                } else if !down(VK_CONTROL) {
+                    let Some(field) = self.fields.iter().find(|f| f.id == id) else { return };
+                    let text = String::from_utf16_lossy(&field.text);
+                    self.emit(Event::Submit(id, &text));
+                }
+            }
             v if (v == VK_TAB.0 || v == VK_RIGHT.0) && self.accept_completion(v == VK_TAB.0) => {}
             v if v == VK_LEFT.0 => self.edit(|f| {
                 f.cursor = f.cursor.saturating_sub(1);
@@ -1874,12 +1984,6 @@ impl Panel {
                     false
                 }
             }),
-            0x0D => {
-                let Some(id) = self.focus else { return };
-                let Some(field) = self.fields.iter().find(|x| x.id == id) else { return };
-                let text = String::from_utf16_lossy(&field.text);
-                self.emit(Event::Submit(id, &text));
-            }
             c if c < 0x20 || c == 0x7F => {}
             c => self.edit(|f| {
                 f.text.insert(f.cursor, c);

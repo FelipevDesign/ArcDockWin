@@ -18,6 +18,7 @@ use crate::panel::{Card, Event, PanelContent, Tile, Widget, glyph};
 use crate::power::PowerPanel;
 use crate::status::{self, Net};
 use crate::volume::VolumePanel;
+use crate::wallpaper::WallpaperPanel;
 use crate::wifi::WifiPanel;
 
 /// Repassada pela topbar a cada STATS_MS (via `panel::notify`): relê bateria e mídia.
@@ -41,6 +42,9 @@ const BRIGHT: u32 = BASE + 8;
 const PREV: u32 = BASE + 9;
 const PLAY: u32 = BASE + 10;
 const NEXT: u32 = BASE + 11;
+const WALL: u32 = BASE + 12;
+const WALL_OPEN: u32 = BASE + 13;
+const GLYPH_WALL: u16 = 0xE771;
 
 const GLYPH_POWER: u16 = 0xE7E8;
 const GLYPH_DARK: u16 = 0xE793;
@@ -57,6 +61,7 @@ enum View {
     Bluetooth,
     Sound,
     Power,
+    Wallpaper,
 }
 
 pub struct ControlCenter {
@@ -65,19 +70,12 @@ pub struct ControlCenter {
     bt: BluetoothPanel,
     volume: VolumePanel,
     power: PowerPanel,
+    /// Criado ao abrir (as miniaturas usam a placa de vídeo).
+    wallpaper: Option<WallpaperPanel>,
     /// Rede cabeada (só quando não há Wi‑Fi).
     wired: Net,
 }
 
-/// Glifos da fonte Segoe Fluent Icons.
-fn battery_glyph(b: &status::Battery) -> u16 {
-    let level = ((b.percent as u16 + 5) / 10).min(10);
-    match (b.charging, level) {
-        (true, l) => 0xEBAB + l,  // BatteryCharging0..10
-        (false, 10) => 0xE83F,    // Battery10
-        (false, l) => 0xE850 + l, // Battery0..9
-    }
-}
 
 /// Liga/desliga o tema escuro do Windows e dos apps e avisa todas as janelas.
 fn set_dark(dark: bool) {
@@ -105,10 +103,22 @@ fn set_dark(dark: bool) {
 impl ControlCenter {
     pub fn new() -> Self {
         let wifi = WifiPanel::new();
-        let wired = if wifi.summary().0 { Net::None } else { status::network(&status::Wlan::open()) };
+        // Rota da internet agora: com placa de Wi‑Fi também, para mostrar o cabo quando o
+        // Wi‑Fi não está conectado.
+        let wired = status::network(&status::Wlan::open());
         media::refresh(None);
         brightness::refresh();
-        Self { view: View::Main, wifi, bt: BluetoothPanel::new(), volume: VolumePanel::new(), power: PowerPanel, wired }
+        // Miniaturas dos planos de fundo prontas antes de alguém abrir a galeria.
+        crate::wallpaper::prewarm();
+        Self {
+            view: View::Main,
+            wifi,
+            bt: BluetoothPanel::new(),
+            volume: VolumePanel::new(),
+            power: PowerPanel { battery: false },
+            wallpaper: None,
+            wired,
+        }
     }
 
     fn sub(&mut self) -> &mut dyn PanelContent {
@@ -116,13 +126,17 @@ impl ControlCenter {
             View::Wifi => &mut self.wifi,
             View::Bluetooth => &mut self.bt,
             View::Power => &mut self.power,
+            View::Wallpaper => self.wallpaper.get_or_insert_with(WallpaperPanel::new),
             View::Main | View::Sound => &mut self.volume,
         }
     }
 
     fn main(&mut self) -> Vec<Widget> {
         let (has_wifi, radio, ssid) = self.wifi.summary();
-        let wifi = if has_wifi {
+        let on_cable = self.wired == Net::Ethernet;
+        // Wi‑Fi sem rede e internet pelo cabo: o cartão mostra o cabo (o clique abre a lista
+        // de redes, onde o Wi‑Fi continua controlável).
+        let wifi = if has_wifi && (ssid.is_some() || !on_cable) {
             let sub = match (radio, ssid) {
                 (Some(false), _) => "Desligado".into(),
                 (_, Some(name)) => name,
@@ -165,7 +179,7 @@ impl ControlCenter {
         let sub = if dark { "Ligado" } else { "Desligado" };
         cards.push(Card::Tile(Tile { glyph: GLYPH_DARK, title: "Modo Escuro".into(), sub: sub.into(), on: dark, toggle: DARK, open: DARK }));
         let (g, sub) = match status::battery() {
-            Some(b) => (battery_glyph(&b), format!("Bateria {}%", b.percent)),
+            Some(b) => (status::battery_glyph(&b), format!("Bateria {}%", b.percent)),
             None => (GLYPH_POWER, "Desligar, reiniciar…".into()),
         };
         cards.push(Card::Tile(Tile { glyph: g, title: "Energia".into(), sub, on: false, toggle: POWER, open: POWER }));
@@ -186,6 +200,15 @@ impl ControlCenter {
                 button: Some((glyph::CHEVRON_RIGHT, SOUND)),
             });
         }
+        let wall = crate::wallpaper::current_name();
+        cards.push(Card::WideTile(Tile {
+            glyph: GLYPH_WALL,
+            title: "Plano de fundo".into(),
+            sub: wall.unwrap_or("Desligado").into(),
+            on: wall.is_some(),
+            toggle: WALL,
+            open: WALL_OPEN,
+        }));
         vec![Widget::Cards(cards)]
     }
 }
@@ -226,6 +249,11 @@ impl PanelContent for ControlCenter {
             Event::Click(BT_OPEN) => View::Bluetooth,
             Event::Click(SOUND) => View::Sound,
             Event::Click(POWER) => View::Power,
+            Event::Click(WALL_OPEN) => View::Wallpaper,
+            Event::Click(WALL) => {
+                crate::wallpaper::toggle();
+                return true;
+            }
             Event::Click(WIFI) => {
                 let on = self.wifi.summary().1 == Some(true);
                 return self.wifi.set_radio(!on);
