@@ -127,6 +127,8 @@ thread_local! {
     /// todas as barras, e o (layout, nº de layouts) de que ela saiu.
     static KEYBOARD: RefCell<String> = const { RefCell::new(String::new()) };
     static KEYBOARD_SEEN: Cell<(isize, usize)> = const { Cell::new((0, 0)) };
+    /// Bateria mostrada no módulo de energia (None: sem bateria), igual em todas as barras.
+    static BATTERY: Cell<Option<status::Battery>> = const { Cell::new(None) };
 }
 
 /// A barra existe (foi criada e não foi desligada nas Configurações).
@@ -152,7 +154,12 @@ enum Kind {
     /// Idioma de entrada (layout de teclado): o clique abre a lista para trocar e a roda passa
     /// para o próximo.
     Keyboard,
+    /// Bateria (glifo e %) ou só o botão de energia; o clique abre o menu de energia.
+    Power,
 }
+
+/// Glifo do botão de energia (PowerButton), no lugar da bateria quando não há uma.
+const GLYPH_POWER: u16 = 0xE7E8;
 
 /// Glifo do botão da área de trabalho (TVMonitor; existe na Fluent Icons e na MDL2 Assets).
 const GLYPH_DESKTOP: u16 = 0xE7F4;
@@ -585,6 +592,27 @@ impl Bar {
                     items.push(Item { kind: Kind::Keyboard, l: 0.0, r: w, text: vec![(t, pad, 1.0)] });
                 }
             }
+            // Glifo da bateria + "80%"; sem bateria (desktop), o botão de energia.
+            Module::Power => match BATTERY.get() {
+                Some(b) => {
+                    let gw = GLYPH_W * s;
+                    let mut text = Vec::new();
+                    if let Some(t) = self.text_layout(&[status::battery_glyph(&b)], &self.icon_fmt, gw) {
+                        text.push((t, pad, 1.0));
+                    }
+                    let mut r = pad + gw + pad;
+                    let value: Vec<u16> = format!("{}%", b.percent).encode_utf16().collect();
+                    if let Some(t) = self.text_layout(&value, &self.text_fmt, 200.0) {
+                        let x = pad + gw + 3.0 * s;
+                        r = x + Self::text_width(&t) + pad;
+                        text.push((t, x, 1.0));
+                    }
+                    items.push(Item { kind: Kind::Power, l: 0.0, r, text });
+                }
+                None => {
+                    self.glyph_item(&mut items, 0.0, Kind::Power, &[(GLYPH_POWER, 1.0)]);
+                }
+            },
             // Logo do provedor (desenhado em `redraw`) + % da sessão de 5 h.
             Module::Claude | Module::Codex => {
                 let p = if m == Module::Claude { Provider::Claude } else { Provider::Codex };
@@ -911,6 +939,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::Stats => ("stats", || Box::new(crate::perf::PerfPanel::new())),
         Kind::Usage(Provider::Claude) => ("claude", || Box::new(crate::usage::UsagePanel::new(Provider::Claude))),
         Kind::Usage(Provider::Codex) => ("codex", || Box::new(crate::usage::UsagePanel::new(Provider::Codex))),
+        Kind::Power => ("power", || Box::new(crate::power::PowerPanel { battery: true })),
         Kind::Tray(_) | Kind::Desktop | Kind::Keyboard => return None,
     })
 }
@@ -966,6 +995,20 @@ pub fn settings_changed() {
     update_stats();
     update_usage();
     update_keyboard();
+    update_battery();
+    for_bars(|b| {
+        b.relayout();
+        b.redraw();
+    });
+}
+
+/// Relê a bateria e, se o nível ou a tomada mudou, refaz as barras.
+fn update_battery() {
+    let now = if config::module_on(Module::Power) { status::battery() } else { None };
+    if now == BATTERY.get() {
+        return;
+    }
+    BATTERY.set(now);
     for_bars(|b| {
         b.relayout();
         b.redraw();
@@ -1213,6 +1256,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     TIMER_CLOCK => update_clock(),
                     TIMER_STATS => {
                         update_stats();
+                        update_battery();
                         panel::notify(crate::control::TICK, 0);
                     }
                     TIMER_USAGE => update_usage(),
@@ -1313,6 +1357,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_POWERBROADCAST if main => {
                 // Volta da suspensão ou mudança na energia: relógio e bateria na hora.
                 update_clock();
+                update_battery();
                 panel::notify(crate::control::TICK, 0);
                 LRESULT(1)
             }
@@ -1508,6 +1553,7 @@ pub fn create() {
         update_usage();
         SetTimer(Some(hwnd), TIMER_KEYBOARD, KEYBOARD_MS, None);
         update_keyboard();
+        update_battery();
         crate::bluetooth::watch(hwnd);
         // Eventos de janela (foco, minimizar, mover, maximizar) relêem a cor do app.
         let hooks = [

@@ -52,6 +52,8 @@ valor original volta logo depois, quando o ArcDockWin é fechado e também pelo 
   Cada um pode ser desligado, ir para a zona da esquerda, do centro ou da direita e mudar de ordem dentro da zona.
 - Módulo de **idioma do teclado** (como o indicador "POR/ENG" da barra de tarefas): mostra o layout do app em foco;
   clique para escolher outro layout ou role a roda do mouse sobre ele para alternar. Some com um layout só.
+- Módulo de **bateria e energia**: nível e porcentagem da bateria (com um raio quando está na tomada); o clique abre
+  Bloquear, Suspender, Sair, Reiniciar e Desligar. Sem bateria, fica só o botão de energia.
 - Relógio com calendário ao clicar; 24 h ou 12 h, segundos e data opcionais.
 - Ícones da bandeja com painel dos ocultos e escolha de quais ficam na barra. Quando falta espaço, os ícones se
   recolhem sozinhos para a seta (sem mudar a sua escolha) e o CPU/RAM é o último a sumir.

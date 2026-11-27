@@ -53,6 +53,8 @@ crashes.
   be turned off, placed in the left, centre or right zone, and ordered inside its zone.
 - **Keyboard language** module (like the "ENG/POR" indicator on the Windows taskbar): shows the layout of the
   focused app; click it to pick another layout, or scroll over it to cycle. Hidden when only one layout is installed.
+- **Battery & power** module: battery level and percentage (with a bolt while plugged in); click it for Lock, Sleep,
+  Sign out, Restart and Shut down. Without a battery it is just a power button.
 - Clock with a calendar when clicked; 24 h or 12 h, optional seconds and date.
 - Tray icons with a panel for hidden icons and a choice of which ones stay on the bar. When the bar runs out of
   room, tray icons fold into the arrow on their own (your choice of visible icons is kept) and CPU/RAM is the last
