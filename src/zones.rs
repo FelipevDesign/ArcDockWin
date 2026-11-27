@@ -489,7 +489,8 @@ fn paint_strip(h: HWND, sr: RECT, win: RECT, m: i32, level: f32) {
                 let d = (dx * dx + dy * dy).sqrt();
                 let inside = dx == 0.0 && dy == 0.0;
                 let f = if inside { 1.0 } else { (1.0 - d / m as f32).max(0.0) };
-                let a = (level * 150.0 * f * f).round() as u8;
+                // Mais escura colada na janela, sumindo devagar (curva parecida com a do macOS).
+                let a = (level * 235.0 * f.powf(1.7)).round().min(255.0) as u8;
                 let i = ((y * w + x) * 4) as usize;
                 px[i..i + 4].copy_from_slice(&[0, 0, 0, a]);
             }

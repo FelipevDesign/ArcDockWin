@@ -689,6 +689,7 @@ impl Dock {
             || preview::is_open()
             || self.at_edge()
             || self.mouse_over()
+            || (self.primary && musicbar::hovered())
             || !self.covered()
         {
             self.last_inside = Some(now);

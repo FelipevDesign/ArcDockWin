@@ -73,6 +73,8 @@ struct View {
     /// Áreas da barra: botão tocar/pausar e trilho da faixa (coordenadas do conteúdo).
     play_btn: RECT,
     track: RECT,
+    /// PDF aberto: arquivo, página atual e total de páginas.
+    pdf: Option<(PathBuf, u32, u32)>,
 }
 
 /// Altura da barra de controles de vídeo/áudio (px a 100%).
@@ -279,9 +281,93 @@ fn bring_front(hwnd: HWND) {
     crate::config::debug_log(&format!("previa: frente = {}", unsafe { GetForegroundWindow() } == hwnd));
 }
 
+/// PDF: troca de página (`d` = -1 ou +1). true = era um PDF.
+fn pdf_page(hwnd: HWND, d: i32) -> bool {
+    let Some(Some((path, page, count))) = with(|v| v.pdf.clone()) else { return false };
+    let next = (page as i32 + d).clamp(0, count as i32 - 1) as u32;
+    if next != page && show_pdf(&path, next, content_rect(hwnd)) {
+        let info = with(|v| {
+            let base = v.info.split("  ·  ").next().unwrap_or("").to_string();
+            v.info = format!("{base}  ·  {} {} {} {count}  (PgUp/PgDn)", crate::i18n::tr("Página"), next + 1, crate::i18n::tr("de"));
+        });
+        let _ = info;
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, true);
+            let _ = InvalidateRect(Some(HWND(CONTENT.load(Ordering::Relaxed) as _)), None, true);
+        }
+    }
+    true
+}
+
+/// Mostra a página `page` do PDF (leitor de PDF do próprio Windows, numa thread à parte).
+fn show_pdf(p: &Path, page: u32, area: RECT) -> bool {
+    let path = p.to_path_buf();
+    let (mw, mh) = (area.right.max(100), area.bottom.max(100));
+    let got = std::thread::spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        render_pdf(&path, page, mw, mh)
+    })
+    .join()
+    .ok()
+    .flatten();
+    let Some((buf, w, h, count)) = got else { return false };
+    let page = page.min(count.saturating_sub(1));
+    with(|v| {
+        v.image = Some((buf, w, h));
+        v.pdf = Some((p.to_path_buf(), page, count));
+    });
+    true
+}
+
+fn render_pdf(p: &Path, page: u32, mw: i32, mh: i32) -> Option<(Vec<u8>, i32, i32, u32)> {
+    use windows::Data::Pdf::{PdfDocument, PdfPageRenderOptions};
+    use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat, BitmapTransform, ColorManagementMode, ExifOrientationMode};
+    use windows::Storage::StorageFile;
+    use windows::Storage::Streams::InMemoryRandomAccessStream;
+    let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(p.as_os_str())).ok()?.join().ok()?;
+    let doc = PdfDocument::LoadFromFileAsync(&file).ok()?.join().ok()?;
+    let count = doc.PageCount().ok()?;
+    if count == 0 {
+        return None;
+    }
+    let pg = doc.GetPage(page.min(count - 1)).ok()?;
+    let size = pg.Size().ok()?;
+    let k = (mw as f32 / size.Width.max(1.0)).min(mh as f32 / size.Height.max(1.0));
+    let (w, h) = (((size.Width * k) as u32).max(1), ((size.Height * k) as u32).max(1));
+    let opts = PdfPageRenderOptions::new().ok()?;
+    opts.SetDestinationWidth(w).ok()?;
+    opts.SetDestinationHeight(h).ok()?;
+    let stream = InMemoryRandomAccessStream::new().ok()?;
+    pg.RenderWithOptionsToStreamAsync(&stream, &opts).ok()?.join().ok()?;
+    let dec = BitmapDecoder::CreateAsync(&stream).ok()?.join().ok()?;
+    let (pw, ph) = (dec.PixelWidth().ok()?, dec.PixelHeight().ok()?);
+    let px = dec
+        .GetPixelDataTransformedAsync(
+            BitmapPixelFormat::Bgra8,
+            BitmapAlphaMode::Premultiplied,
+            &BitmapTransform::new().ok()?,
+            ExifOrientationMode::IgnoreExifOrientation,
+            ColorManagementMode::DoNotColorManage,
+        )
+        .ok()?
+        .join()
+        .ok()?
+        .DetachPixelData()
+        .ok()?;
+    Some((px.to_vec(), pw as i32, ph as i32, count))
+}
+
 /// Teclas da janela (vêm antes dos controles filhos). true = tratada.
 fn key(hwnd: HWND, vk: u16) -> bool {
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    if (vk == VK_NEXT.0 || vk == VK_DOWN.0) && pdf_page(hwnd, 1) {
+        return true;
+    }
+    if (vk == VK_PRIOR.0 || vk == VK_UP.0) && pdf_page(hwnd, -1) {
+        return true;
+    }
     match vk {
         v if v == VK_ESCAPE.0 || v == VK_SPACE.0 => unsafe {
             let _ = DestroyWindow(hwnd);
@@ -403,6 +489,7 @@ fn load() {
         v.details.clear();
         v.paused = false;
         v.media = false;
+        v.pdf = None;
         unsafe {
             let _ = ShowWindow(v.video, SW_HIDE);
         }
@@ -436,6 +523,8 @@ fn load() {
         true
     }) {
         "Imagem"
+    } else if ext == "pdf" && show_pdf(&path, 0, area) {
+        "PDF"
     } else if ext == "zip" && let Some(t) = zip_text(&path) {
         show_text(edit, &t);
         "Arquivo compactado"
@@ -484,6 +573,9 @@ fn load() {
         })
         .unwrap_or_default();
     let mut info = crate::i18n::tr(shown);
+    if let Some(Some((_, page, count))) = with(|v| v.pdf.clone()) {
+        info.push_str(&format!("  ·  {} {} {} {count}  (PgUp/PgDn)", crate::i18n::tr("Página"), page + 1, crate::i18n::tr("de")));
+    }
     for part in [size, modified] {
         if !part.is_empty() {
             info.push_str("  ·  ");
@@ -968,6 +1060,13 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                     SelectObject(dc, old);
                 }
                 let _ = EndPaint(hwnd, &ps);
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let delta = ((wp.0 >> 16) & 0xffff) as i16;
+                if !pdf_page(hwnd, if delta < 0 { 1 } else { -1 }) {
+                    return DefWindowProcW(hwnd, msg, wp, lp);
+                }
                 LRESULT(0)
             }
             WM_ACTIVATE if (wp.0 & 0xffff) != 0 => {

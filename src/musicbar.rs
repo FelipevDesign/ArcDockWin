@@ -206,6 +206,21 @@ thread_local! {
     static PENDING: std::cell::Cell<Option<(RECT, f32)>> = const { std::cell::Cell::new(None) };
 }
 
+/// Mouse em cima do quadro (o dock não se esconde enquanto isso).
+pub fn hovered() -> bool {
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return false;
+    }
+    ST.with(|s| {
+        s.try_borrow().ok().is_some_and(|s| {
+            s.as_ref().is_some_and(|s| {
+                s.visible && pt.x >= s.pos.x && pt.x < s.pos.x + s.size.0 && pt.y >= s.pos.y && pt.y < s.pos.y + s.size.1
+            })
+        })
+    })
+}
+
 /// Opção ligada/desligada.
 pub fn sync() {
     if !crate::extras::on("tool_music") {
