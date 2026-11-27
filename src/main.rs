@@ -16,6 +16,7 @@ mod guard;
 mod i18n;
 mod keyboard;
 mod launcher;
+mod log;
 mod media;
 mod minimize;
 mod panel;
@@ -1330,6 +1331,7 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
 
         let cmd = cmd.0 as usize;
         if cmd == MENU_QUIT {
+            log::line("saída pelo menu (Sair)");
             let _ = DestroyWindow(hwnd);
             return;
         }
@@ -1608,31 +1610,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 });
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
+            // Sem tratar, o DefWindowProc destrói a janela e o dock sai: fica no log quem pediu.
+            WM_CLOSE => {
+                log::line("WM_CLOSE recebido (outro programa pediu para fechar o dock)");
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
             WM_ENDSESSION => {
-                if wp.0 != 0 && !SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
-                    with_docks(|d| d.appbar_remove());
-                    tray::stop();
-                    topbar::shutdown();
-                    taskbar::restore();
-                    preview::shutdown();
-                    tooltip::shutdown();
-                    minimize::shutdown();
-                    wallpaper::shutdown();
+                if wp.0 != 0 && !SHUTTING_DOWN.load(Ordering::Acquire) {
+                    log::line("fim da sessão do Windows (desligar, reiniciar ou sair)");
+                    // O Windows pode terminar o processo assim que o handler retornar.
+                    teardown();
+                    PostQuitMessage(0);
                 }
                 LRESULT(0)
             }
             WM_DESTROY => {
                 if !REBUILDING_DOCKS.load(Ordering::Acquire)
-                    && !SHUTTING_DOWN.swap(true, Ordering::AcqRel)
+                    && !SHUTTING_DOWN.load(Ordering::Acquire)
                 {
-                    with_docks(|d| d.appbar_remove());
-                    tray::stop();
-                    topbar::shutdown();
-                    taskbar::restore();
-                    preview::shutdown();
-                    tooltip::shutdown();
-                    minimize::shutdown();
-                    wallpaper::shutdown();
+                    log::line("janela do dock destruída: saindo");
                     PostQuitMessage(0);
                 }
                 LRESULT(0)
@@ -1715,8 +1711,10 @@ fn main() -> windows::core::Result<()> {
         // Uma cópia só.
         let _single = windows::Win32::System::Threading::CreateMutexW(None, true, w!("ArcDockWin.Single"))?;
         if windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
+            log::line("outra cópia já está aberta: esta sai");
             return Ok(());
         }
+        log::line(&format!("início (versão {})", env!("CARGO_PKG_VERSION")));
 
         let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
         register(hinst, w!("ArcDockWinGlass"), Some(glass_proc))?;
@@ -1739,6 +1737,8 @@ fn main() -> windows::core::Result<()> {
             .filter_map(|(monitor, bounds, primary)| create_dock(monitor, bounds, primary))
             .collect();
         if docks.is_empty() {
+            log::line("nenhum dock criado (nenhum monitor ou janela recusada): saindo");
+            teardown();
             return Ok(());
         }
         let main_hwnd = docks
@@ -1794,11 +1794,11 @@ fn main() -> windows::core::Result<()> {
         // Parado: espera mensagens. Animando: um quadro por atualização da tela (DwmFlush
         // espera o próximo quadro do compositor), na taxa do monitor (60, 120, 144 Hz...).
         let mut msg = MSG::default();
-        loop {
+        'pump: loop {
             if docks_animating() || minimize::busy() {
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                     if msg.message == WM_QUIT {
-                        return Ok(());
+                        break 'pump;
                     }
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
@@ -1814,6 +1814,30 @@ fn main() -> windows::core::Result<()> {
                 DispatchMessageW(&msg);
             }
         }
+        teardown();
     }
     Ok(())
+}
+
+/// Desmonta as janelas que ainda estão nas `thread_local` enquanto o processo está de pé.
+/// Sem isso, elas só caíam no fim do `ExitProcess`, na limpeza das `thread_local`, e destruir
+/// janelas ali derruba o processo (0xC000000D no ntdll): toda saída virava um travamento.
+unsafe fn teardown() {
+    if SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    with_docks(|d| d.appbar_remove());
+    tray::stop();
+    topbar::destroy();
+    taskbar::restore();
+    preview::shutdown();
+    tooltip::shutdown();
+    minimize::shutdown();
+    wallpaper::shutdown();
+    panel::close();
+    let docks = DOCKS.with(|d| d.try_borrow_mut().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default());
+    docks.into_iter().for_each(dispose_dock);
+    topbar::reset_shared_d2d();
+    glass::shutdown();
+    log::line("saída limpa");
 }

@@ -250,7 +250,7 @@ impl PanelContent for Pile {
         let n = self.files.len();
         let end = (self.top + VISIBLE).min(n);
         let items = (self.top..end)
-            .map(|i| Item { id: ROW + (i - self.top) as u32, icon: self.icon(i), glyph: 0, text: self.files[i].1.clone(), hint: String::new() })
+            .map(|i| Item { id: ROW + (i - self.top) as u32, icon: self.icon(i), glyph: 0, text: self.files[i].1.clone(), hint: String::new(), button: None })
             .collect();
         let scroll = (n > VISIBLE).then(|| (self.top as f32 / n as f32, VISIBLE as f32 / n as f32));
         let mut out = vec![Widget::Label("Downloads".into())];
