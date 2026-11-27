@@ -96,6 +96,7 @@ fn read_list(file: &Path) -> (Vec<PathBuf>, usize) {
 }
 
 fn run(file: &Path) {
+    crate::i18n::initialize();
     let (list, index) = read_list(file);
     if list.is_empty() {
         return;
