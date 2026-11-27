@@ -105,7 +105,9 @@ fn set_dark(dark: bool) {
 impl ControlCenter {
     pub fn new() -> Self {
         let wifi = WifiPanel::new();
-        let wired = if wifi.summary().0 { Net::None } else { status::network(&status::Wlan::open()) };
+        // Rota da internet agora: com placa de Wi‑Fi também, para mostrar o cabo quando o
+        // Wi‑Fi não está conectado.
+        let wired = status::network(&status::Wlan::open());
         media::refresh(None);
         brightness::refresh();
         Self { view: View::Main, wifi, bt: BluetoothPanel::new(), volume: VolumePanel::new(), power: PowerPanel, wired }
@@ -122,7 +124,10 @@ impl ControlCenter {
 
     fn main(&mut self) -> Vec<Widget> {
         let (has_wifi, radio, ssid) = self.wifi.summary();
-        let wifi = if has_wifi {
+        let on_cable = self.wired == Net::Ethernet;
+        // Wi‑Fi sem rede e internet pelo cabo: o cartão mostra o cabo (o clique abre a lista
+        // de redes, onde o Wi‑Fi continua controlável).
+        let wifi = if has_wifi && (ssid.is_some() || !on_cable) {
             let sub = match (radio, ssid) {
                 (Some(false), _) => "Desligado".into(),
                 (_, Some(name)) => name,
