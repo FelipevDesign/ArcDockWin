@@ -275,10 +275,10 @@ fn source_key(source: &str) -> String {
     }
 }
 
-/// AppUserModelID de um app instalado pelo navegador (`Chrome._crx_<id>`): cada um tem o
-/// seu, diferente do das janelas comuns do navegador.
+/// AppUserModelID de um app instalado pelo navegador (`Chrome._crx_<id>`) ou de uma janela
+/// aberta com `--app=<url>` (`Chrome.<host>_/<caminho>`): diferente do das janelas comuns.
 fn is_web_app_id(id: &str) -> bool {
-    id.contains("._crx_")
+    id.contains("._crx_") || id.contains("_/")
 }
 
 /// AUMID gravado no atalho (.lnk) de um app instalado pelo navegador.
@@ -516,7 +516,9 @@ fn window_app(hwnd: HWND, procs: &mut HashMap<u32, String>) -> Option<(String, S
     if (key == "chrome.exe" || key == "msedge.exe")
         && let Some(id) = window_aumid(hwnd).filter(|id| is_web_app_id(id))
     {
-        return Some((format!("aumid:{}", id.to_lowercase()), format!("{APPS_FOLDER}{id}")));
+        // Janela `--app=` não existe na pasta Aplicativos: sem atalho fixado, usa o navegador.
+        let source = if id.contains("._crx_") { format!("{APPS_FOLDER}{id}") } else { path };
+        return Some((format!("aumid:{}", id.to_lowercase()), source));
     }
     // App da Store com .exe próprio (Claude, Slack, WhatsApp): chave pelo AUMID, a mesma do
     // fixado por `shell:AppsFolder\...`.
