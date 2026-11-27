@@ -137,6 +137,102 @@ struct Limit {
     /// Unix (s) da renovação.
     resets_at: Option<i64>,
     session: bool,
+    /// Duração da janela (s), para calcular o ritmo; `None` se não se sabe.
+    window: Option<i64>,
+    /// Modelo do limite semanal só de um modelo (ex.: "Fable").
+    model: Option<String>,
+}
+
+const WEEK_SECS: i64 = 7 * 86400;
+const SESSION_SECS: i64 = 5 * 3600;
+
+/// Quando o limite acaba no ritmo atual (Unix s), se for antes de renovar: o uso médio desde
+/// o início da janela (renovação − duração) projetado até 100%, como o aviso do claude.ai.
+/// Com menos de 12 h de janela o ritmo ainda não diz nada.
+fn runs_out_at(l: &Limit, now: i64) -> Option<i64> {
+    let (reset, window) = (l.resets_at?, l.window?);
+    let elapsed = now - (reset - window);
+    let pct = l.percent as f64;
+    if elapsed < 12 * 3600 || pct <= 0.0 || pct >= 100.0 || now >= reset {
+        return None;
+    }
+    let at = now + ((100.0 - pct) * elapsed as f64 / pct) as i64;
+    (at < reset).then_some(at)
+}
+
+/// Momento de `at` em palavras, no fuso `off` (s): de madrugada ainda conta como esta noite.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum When {
+    Tonight,
+    Today,
+    Tomorrow,
+    /// Dia da semana, 0 = domingo.
+    Weekday(usize),
+}
+
+fn when(at: i64, now: i64, off: i64) -> When {
+    let day = |t: i64| (t + off).div_euclid(86400);
+    let hour = (at + off).rem_euclid(86400) / 3600;
+    match day(at) - day(now) {
+        0 if hour >= 18 => When::Tonight,
+        0 => When::Today,
+        1 if hour < 5 => When::Tonight,
+        1 => When::Tomorrow,
+        // 1970-01-01 foi quinta-feira.
+        _ => When::Weekday((day(at) + 4).rem_euclid(7) as usize),
+    }
+}
+
+/// Aviso de ritmo do limite semanal que acaba primeiro antes de renovar, se algum acaba.
+fn pace_warning(limits: &[Limit], now: i64, off: i64) -> Option<String> {
+    let (l, at) = limits
+        .iter()
+        .filter(|l| l.window == Some(WEEK_SECS))
+        .filter_map(|l| runs_out_at(l, now).map(|at| (l, at)))
+        .min_by_key(|(_, at)| *at)?;
+    let reset_at = l.resets_at?;
+    let (out, reset) = (when(at, now, off), when(reset_at, now, off));
+    let time = |t: i64| {
+        let seconds = (t + off).rem_euclid(86400);
+        let (hour, minute) = (seconds / 3600, seconds / 60 % 60);
+        if (at + off).div_euclid(60) == (reset_at + off).div_euclid(60) {
+            format!("{hour:02}:{minute:02}:{:02}", seconds % 60)
+        } else {
+            format!("{hour:02}:{minute:02}")
+        }
+    };
+    let m = l.model.as_deref();
+    Some(if crate::i18n::is_english() {
+        let word = |w| match w {
+            When::Tonight => "tonight".to_string(),
+            When::Today => "today".into(),
+            When::Tomorrow => "tomorrow".into(),
+            When::Weekday(d) => format!("on {}", ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][d]),
+        };
+        let what = m.map_or("the weekly limit".into(), |m| format!("the {m} limit"));
+        let wording = |bucket, t| if out == reset { format!("at {}", time(t)) } else { word(bucket) };
+        format!("At this pace, {what} runs out {}, before it resets {}.", wording(out, at), wording(reset, reset_at))
+    } else if crate::i18n::is_traditional_chinese() {
+        let word = |w| match w {
+            When::Tonight => "今晚",
+            When::Today => "今天",
+            When::Tomorrow => "明天",
+            When::Weekday(d) => ["週日", "週一", "週二", "週三", "週四", "週五", "週六"][d],
+        };
+        let what = m.map_or("每週限額".into(), |m| format!("{m} 限額"));
+        let wording = |bucket, t| if out == reset { time(t) } else { word(bucket).to_string() };
+        format!("按目前速度，{what}會在{}用完，早於{}的重置。", wording(out, at), wording(reset, reset_at))
+    } else {
+        let word = |w| match w {
+            When::Tonight => "esta noite",
+            When::Today => "hoje",
+            When::Tomorrow => "amanhã",
+            When::Weekday(d) => ["no domingo", "na segunda", "na terça", "na quarta", "na quinta", "na sexta", "no sábado"][d],
+        };
+        let what = m.map_or("o limite semanal".into(), |m| format!("o limite do {m}"));
+        let wording = |bucket, t| if out == reset { format!("às {}", time(t)) } else { word(bucket).to_string() };
+        format!("Nesse ritmo, {what} acaba {}, antes de renovar {}.", wording(out, at), wording(reset, reset_at))
+    })
 }
 
 struct Tokens {
@@ -276,7 +372,9 @@ fn claude_limits(v: &Value) -> Vec<Limit> {
                 (_, Some(m)) => (format!("{weekly} · {m}"), GLYPH_CALENDAR, false),
                 _ => continue,
             };
-            out.push(Limit { label, glyph, percent: percent as f32, resets_at, session });
+            let window = Some(if session { SESSION_SECS } else { WEEK_SECS });
+            let model = model.filter(|_| !session && l["kind"].as_str() != Some("weekly_all")).map(str::to_string);
+            out.push(Limit { label, glyph, percent: percent as f32, resets_at, session, window, model });
         }
     }
     if out.is_empty() {
@@ -289,7 +387,10 @@ fn claude_limits(v: &Value) -> Vec<Limit> {
         ] {
             let w = &v[key];
             if let Some(p) = w["utilization"].as_f64() {
-                out.push(Limit { label, glyph, percent: p as f32, resets_at: w["resets_at"].as_str().and_then(parse_iso), session });
+                let resets_at = w["resets_at"].as_str().and_then(parse_iso);
+                let window = Some(if session { SESSION_SECS } else { WEEK_SECS });
+                let model = label.split_once(" · ").map(|(_, m)| m.to_string());
+                out.push(Limit { label, glyph, percent: p as f32, resets_at, session, window, model });
             }
         }
     }
@@ -328,7 +429,8 @@ fn codex_limits(v: &Value) -> Vec<Limit> {
             s => (format!("{}d", s / 86400), GLYPH_CALENDAR),
         };
         let resets_at = w["reset_at"].as_i64().or_else(|| w["reset_after_seconds"].as_i64().map(|s| now() + s));
-        out.push(Limit { label, glyph, percent: percent as f32, resets_at, session: primary });
+        let window = Some(secs).filter(|&s| s > 0);
+        out.push(Limit { label, glyph, percent: percent as f32, resets_at, session: primary, window, model: None });
     }
     out
 }
@@ -608,6 +710,10 @@ impl PanelContent for UsagePanel {
                     level: lvl,
                 });
             }
+            // Embaixo dos semanais, como o aviso do claude.ai.
+            if let Some(t) = pace_warning(&s.limits, now(), local_offset()) {
+                w.push(Widget::Text(t));
+            }
         }
         if let Some(t) = &s.tokens {
             w.push(Widget::Separator);
@@ -820,5 +926,61 @@ mod tests {
         for p in Provider::ALL {
             assert!(logo(p, 32, [0, 0, 0, 255]).is_some_and(|m| m.pixels().iter().any(|c| c.alpha() > 0)), "{p:?}");
         }
+    }
+
+    #[test]
+    fn pace_projects_when_the_week_runs_out() {
+        // Caso real: 90% numa sexta às 08:10 (UTC−3), semana renova domingo 01:59.
+        let now = parse_iso("2026-11-27T11:10:45Z").unwrap();
+        let reset = parse_iso("2026-11-29T04:59:59Z");
+        let off = -3 * 3600;
+        let week = |percent: f32, model: Option<&str>| Limit {
+            label: String::new(),
+            glyph: 0,
+            percent,
+            resets_at: reset,
+            session: false,
+            window: Some(WEEK_SECS),
+            model: model.map(str::to_string),
+        };
+        let at = runs_out_at(&week(90.0, None), now).unwrap();
+        // 90% em 5d 6h ⇒ os 10% restantes em ~14 h: por volta das 22h30 locais.
+        assert_eq!(when(at, now, off), When::Tonight);
+        assert_eq!(when(reset.unwrap(), now, off), When::Weekday(0));
+        // No ritmo, 28% não acaba antes de renovar.
+        assert_eq!(runs_out_at(&week(28.0, Some("Fable")), now), None);
+        // Já esgotado ou sem uso: sem aviso.
+        assert_eq!(runs_out_at(&week(100.0, None), now), None);
+        assert_eq!(runs_out_at(&week(0.0, None), now), None);
+        // Começo da semana (menos de 12 h): ritmo ainda não vale.
+        let early = parse_iso("2026-11-22T10:00:00Z").unwrap();
+        assert_eq!(runs_out_at(&week(50.0, None), early), None);
+        // Dias seguintes e madrugada.
+        let day = 86400;
+        let local_noon = now - (now + off).rem_euclid(day) + day / 2;
+        assert_eq!(when(local_noon, now, off), When::Today);
+        assert_eq!(when(local_noon + day, now, off), When::Tomorrow);
+        assert_eq!(when(local_noon + day / 2 + 3 * 3600, now, off), When::Tonight);
+        assert_eq!(when(local_noon + 2 * day, now, off), When::Weekday(0));
+    }
+
+    #[test]
+    fn pace_warns_for_a_primary_codex_week_and_distinguishes_times() {
+        let now = parse_iso("2026-11-27T21:00:00Z").unwrap();
+        let reset = parse_iso("2026-11-27T23:00:00Z").unwrap();
+        let payload = serde_json::json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 99.94,
+                    "limit_window_seconds": WEEK_SECS,
+                    "reset_at": reset
+                },
+                "secondary_window": null
+            }
+        });
+        let limits = codex_limits(&payload);
+        let warning = pace_warning(&limits, now, -3 * 3600).unwrap();
+        assert!(warning.contains("18:05"), "{warning}");
+        assert!(warning.contains("20:00"), "{warning}");
     }
 }
