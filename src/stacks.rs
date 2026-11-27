@@ -34,8 +34,10 @@ const THEME: &str = r"C:\Icones\MacTahoe\sistema";
 const TRASH_SHELL: &str = "::{645FF040-5081-101B-9F08-00AA002F954E}";
 
 pub struct Stacks {
-    /// Downloads e Lixeira, nessa ordem.
+    /// Ferramentas ligadas (tools.rs), Downloads e Lixeira, nessa ordem (só os que aparecem).
     pub items: Vec<App>,
+    /// Quais itens a lista tem (para refazer quando as opções mudam).
+    pub wanted: Vec<&'static str>,
     trash_full: bool,
     icon_size: i32,
 }
@@ -47,10 +49,11 @@ impl Stacks {
             key: source.to_string(),
             pinned: true,
             icon: None,
-            windows: Vec::new(),
-            sep_after: false,
+            ..Default::default()
         };
-        let mut s = Self { items: vec![item(DOWNLOADS), item(TRASH)], trash_full: trash_full(), icon_size };
+        let wanted = wanted();
+        let items = wanted.iter().map(|w| item(w)).collect();
+        let mut s = Self { items, wanted, trash_full: trash_full(), icon_size };
         s.reload_icons();
         s
     }
@@ -58,8 +61,20 @@ impl Stacks {
     pub fn reload_icons(&mut self) {
         let downloads = downloads_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let trash = if self.trash_full { "user-trash-full" } else { "user-trash" };
-        self.items[0].icon = themed("folder-download", &downloads, self.icon_size);
-        self.items[1].icon = themed(trash, TRASH_SHELL, self.icon_size);
+        for it in &mut self.items {
+            it.icon = match it.source.as_str() {
+                DOWNLOADS => themed("folder-download", &downloads, self.icon_size),
+                TRASH => themed(trash, TRASH_SHELL, self.icon_size),
+                src => crate::tools::icon(src, self.icon_size),
+            };
+        }
+    }
+
+    /// Só os ícones das ferramentas (o tempo do timer, a capa da música...).
+    pub fn reload_tools(&mut self) {
+        for it in self.items.iter_mut().filter(|i| crate::tools::is_tool(&i.source)) {
+            it.icon = crate::tools::icon(&it.source, self.icon_size);
+        }
     }
 
     /// Lixeira mudou de vazia para cheia (ou o contrário), ou os ícones do tema mudaram.
@@ -74,6 +89,18 @@ impl Stacks {
         self.reload_icons();
         true
     }
+}
+
+/// Itens da ponta direita conforme as opções.
+pub fn wanted() -> Vec<&'static str> {
+    let mut v = crate::tools::enabled();
+    if crate::config::show_downloads() {
+        v.push(DOWNLOADS);
+    }
+    if crate::config::show_trash() {
+        v.push(TRASH);
+    }
+    v
 }
 
 /// Ícone do tema, se existir; senão o do Windows para `fallback`.
@@ -141,6 +168,10 @@ fn open_downloads() {
 /// Clique no item: a Lixeira abre no Explorador; Downloads abre a pilha acima do ícone.
 /// `anchor`: ponto acima do centro do ícone (em coordenadas de tela).
 pub fn click(source: &str, anchor: POINT) {
+    if crate::tools::is_tool(source) {
+        crate::tools::click(source, anchor);
+        return;
+    }
     match source {
         TRASH => open_trash(),
         DOWNLOADS => {
@@ -153,7 +184,14 @@ pub fn click(source: &str, anchor: POINT) {
             let item = RECT { left: anchor.x, top: anchor.y, right: anchor.x, bottom: anchor.y };
             panel::toggle("downloads", item, || {
                 let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
-                Box::new(Pile { files: recent_files(), top: 0, icon_px: (24.0 * scale).round() as i32, icons: Vec::new() })
+                Box::new(Pile {
+                    files: recent_files(),
+                    top: 0,
+                    icon_px: (24.0 * scale).round() as i32,
+                    icons: Vec::new(),
+                    dir: downloads_dir().unwrap_or_default(),
+                    title: "Downloads".into(),
+                })
             });
         }
         _ => {}
@@ -165,6 +203,10 @@ const MENU_EMPTY: usize = 2;
 
 /// Menu do botão direito do item (Abrir; na Lixeira, também Esvaziar).
 pub fn context_menu(hwnd: HWND, source: &str, anchor: POINT) {
+    if crate::tools::is_tool(source) {
+        crate::tools::context_menu(hwnd, source, anchor);
+        return;
+    }
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let open = HSTRING::from(crate::i18n::tr("Abrir"));
@@ -224,6 +266,9 @@ fn recent_files() -> Vec<(PathBuf, String)> {
 
 /// Pilha da Downloads: lista dos arquivos recentes no painel, acima do ícone.
 struct Pile {
+    /// Pasta mostrada e o título do painel.
+    dir: PathBuf,
+    title: String,
     files: Vec<(PathBuf, String)>,
     top: usize,
     icon_px: i32,
@@ -253,7 +298,7 @@ impl PanelContent for Pile {
             .map(|i| Item { id: ROW + (i - self.top) as u32, icon: self.icon(i), glyph: 0, text: self.files[i].1.clone(), hint: String::new() })
             .collect();
         let scroll = (n > VISIBLE).then(|| (self.top as f32 / n as f32, VISIBLE as f32 / n as f32));
-        let mut out = vec![Widget::Label("Downloads".into())];
+        let mut out = vec![Widget::Label(self.title.clone())];
         if n == 0 {
             out.push(Widget::Text("A pasta está vazia.".into()));
         } else {
@@ -267,7 +312,7 @@ impl PanelContent for Pile {
         match ev {
             Event::Click(EXPLORER) => {
                 panel::close();
-                open_downloads();
+                open(&self.dir.to_string_lossy());
                 false
             }
             Event::Click(id) if id >= ROW => {
@@ -293,4 +338,34 @@ impl PanelContent for Pile {
             _ => false,
         }
     }
+}
+
+/// Pasta fixada aberta como pilha: pastas primeiro, depois arquivos, por nome.
+pub fn open_folder(dir: &std::path::Path, anchor: POINT) {
+    if panel::is_open("folder") {
+        panel::close();
+        return;
+    }
+    let mut files: Vec<(bool, PathBuf, String)> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let meta = e.metadata().ok()?;
+                    if meta.file_attributes() & 0x6 != 0 {
+                        return None;
+                    }
+                    Some((!meta.is_dir(), e.path(), e.file_name().to_string_lossy().into_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort_by(|a, b| (a.0, a.2.to_lowercase()).cmp(&(b.0, b.2.to_lowercase())));
+    let files: Vec<(PathBuf, String)> = files.into_iter().take(200).map(|(_, p, n)| (p, n)).collect();
+    let title = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.to_string_lossy().into_owned());
+    let dir = dir.to_path_buf();
+    let item = RECT { left: anchor.x, top: anchor.y, right: anchor.x, bottom: anchor.y };
+    panel::toggle("folder", item, move || {
+        let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
+        Box::new(Pile { files, top: 0, icon_px: (24.0 * scale).round() as i32, icons: Vec::new(), dir, title })
+    });
 }

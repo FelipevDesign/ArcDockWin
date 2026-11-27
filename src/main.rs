@@ -8,6 +8,8 @@ mod config;
 mod control;
 mod drag;
 mod extras;
+mod heal;
+mod picker;
 mod tools;
 mod clipboard;
 mod zones;
@@ -98,6 +100,13 @@ const MENU_LOCATION: usize = 7;
 const MENU_MORE: usize = 8;
 const MENU_UPDATE: usize = 9;
 const MENU_SEP: usize = 10;
+const MENU_EDIT: usize = 11;
+const MENU_NEW_GROUP: usize = 12;
+const MENU_NEW_MODE: usize = 13;
+const MENU_UNGROUP: usize = 14;
+const MENU_RUN: usize = 15;
+/// Grupos e modos existentes no submenu "Adicionar a…".
+const MENU_TO_GROUP: usize = 200;
 /// Itens das janelas do app: MENU_WINDOW + índice.
 const MENU_WINDOW: usize = 100;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -284,14 +293,8 @@ impl Dock {
 
 /// Downloads e Lixeira conforme as opções (separado do `Dock` para não emprestá-lo inteiro).
 fn visible_stacks(items: &[App]) -> &[App] {
-    {
-        match (config::show_downloads(), config::show_trash()) {
-            (true, true) => items,
-            (true, false) => &items[..1],
-            (false, true) => &items[1..],
-            (false, false) => &[],
-        }
-    }
+    // A lista já vem só com os itens ligados (stacks::wanted).
+    items
 }
 
 impl Dock {
@@ -323,7 +326,10 @@ impl Dock {
             self.icon_size = size;
             apps::reload_icons(&mut self.apps, size);
             self.stacks = stacks::Stacks::new(size);
+        } else if self.stacks.wanted != stacks::wanted() {
+            self.stacks = stacks::Stacks::new(self.icon_size);
         }
+        drop_target(self.hwnd);
         self.glass_rect = None;
         self.appbar_sync();
         self.edge_tick();
@@ -711,8 +717,8 @@ impl Dock {
             .flatten()
             .filter(|_| !preview::is_open() && !MENU_OPEN.load(Ordering::Relaxed));
         let shown = item.and_then(|i| {
-            let source = self.apps.get(i).or_else(|| self.stack_items().get(i - self.apps.len()))?.source.clone();
-            Some((apps::display_name(&source), self.menu_anchor(i)?))
+            let a = self.apps.get(i).or_else(|| self.stack_items().get(i - self.apps.len()))?;
+            Some((apps::item_name(a), self.menu_anchor(i)?))
         });
         match shown {
             Some((name, anchor)) => tooltip::show(&name, anchor, self.scale, self.theme.light),
@@ -818,6 +824,87 @@ fn dib(w: i32, h: i32) -> (HGDIOBJ, *mut u8) {
 /// Aplica as opções do dock mudadas nas Configurações (ver `Dock::apply_settings`).
 pub fn apply_settings(reload: bool) {
     with_docks(|d| d.apply_settings(reload));
+}
+
+/// Ícones das ferramentas mudaram (tempo do timer, capa da música, prateleira...).
+pub fn refresh_tools() {
+    with_docks(|d| {
+        d.stacks.reload_tools();
+        d.redraw();
+    });
+}
+
+/// Escala do monitor principal (tamanho dos ícones nos painéis).
+pub fn panel_scale() -> f32 {
+    unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() as f32 / 96.0 }
+}
+
+/// Aceita arquivos soltos no dock só com a opção (ou a prateleira) ligada.
+fn drop_target(hwnd: HWND) {
+    let on = extras::on("pin_drop") || extras::on("tool_shelf");
+    unsafe {
+        windows::Win32::UI::Shell::DragAcceptFiles(hwnd, on);
+        if on {
+            // Arrastar de um Explorador comum para o dock (mesmo nível de permissão).
+            use windows::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW};
+            for m in [WM_DROPFILES, 0x0049 /* WM_COPYGLOBALDATA */] {
+                let _ = ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, None);
+            }
+        }
+    }
+}
+
+/// Arquivos soltos no dock: no ícone de um app, abre com ele; na prateleira, guarda; numa
+/// pasta fixada, abre a pasta; fora dos ícones, fixa os programas, atalhos e pastas.
+unsafe fn dropped(hwnd: HWND, wp: WPARAM) {
+    use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
+    unsafe {
+        let drop = HDROP(wp.0 as _);
+        let n = DragQueryFileW(drop, u32::MAX, None);
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for i in 0..n {
+            let mut buf = [0u16; 1024];
+            let len = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+            files.push(String::from_utf16_lossy(&buf[..len]).into());
+        }
+        let mut pt = POINT::default();
+        let _ = DragQueryPoint(drop, &mut pt);
+        DragFinish(drop);
+        if files.is_empty() {
+            return;
+        }
+        let target = with_dock(hwnd, |d| {
+            let i = d.hit(pt.x as f32)?;
+            let a = d.apps.get(i).or_else(|| d.stack_items().get(i - d.apps.len()))?;
+            Some((a.source.clone(), a.args.clone()))
+        })
+        .flatten();
+        let quoted = files.iter().map(|f| format!("\"{}\"", f.to_string_lossy())).collect::<Vec<_>>().join(" ");
+        match target {
+            Some((src, _)) if src == tools::SHELF => tools::shelf_add(&files),
+            Some((src, _)) if src == stacks::TRASH || src == stacks::DOWNLOADS || src == apps::START => {}
+            Some((src, _)) if apps::is_group(&src) || apps::is_mode(&src) || tools::is_tool(&src) => {}
+            Some((src, args)) if extras::on("pin_drop") => {
+                let args = if args.is_empty() { quoted } else { format!("{args} {quoted}") };
+                apps::launch(&src, &args);
+            }
+            None if extras::on("pin_drop") => {
+                let lines: Vec<String> = files
+                    .iter()
+                    .filter(|f| {
+                        let e = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                        f.is_dir() || ["exe", "lnk", "url", "bat", "cmd"].contains(&e.as_str())
+                    })
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .collect();
+                if !lines.is_empty() {
+                    apps::append_lines(&lines);
+                    reload_pins();
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Recria as barras quando a topologia de monitores ou a opção de exibição muda.
@@ -1262,10 +1349,73 @@ unsafe extern "system" fn on_window_change(
 /// Menu do botão direito: com `target` (key, source, fixado, janelas, separador depois), as
 /// opções do app; sempre "Sair".
 /// `anchor`: ponto acima do centro do ícone onde o menu se apoia (sem ícone, abre no mouse).
-unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>, bool)>, anchor: Option<POINT>) {
+/// Cópia do item fixado `key` (args, nome, membros) para os painéis de edição.
+fn pinned_copy(hwnd: HWND, key: &str) -> Option<App> {
+    with_dock(hwnd, |d| {
+        d.apps.iter().find(|a| a.key == key).map(|a| App {
+            source: a.source.clone(),
+            key: a.key.clone(),
+            pinned: a.pinned,
+            args: a.args.clone(),
+            label: a.label.clone(),
+            members: a.members.clone(),
+            ..Default::default()
+        })
+    })
+    .flatten()
+}
+
+/// Menu de um grupo ou modo de trabalho.
+unsafe fn group_menu(hwnd: HWND, key: &str, source: &str, anchor: Option<POINT>) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
+        let add = |id: usize, t: &str| {
+            let t = HSTRING::from(crate::i18n::tr(t));
+            let _ = AppendMenuW(menu, MF_STRING, id, &t);
+        };
+        let group = apps::is_group(source);
+        add(MENU_RUN, if group { "Abrir todos" } else { "Abrir os apps do modo" });
+        add(MENU_EDIT, "Editar…");
+        if group {
+            add(MENU_UNGROUP, "Desfazer grupo");
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        add(MENU_PIN, "Remover do dock");
+        let pt = anchor.unwrap_or_else(|| {
+            let mut p = POINT::default();
+            let _ = GetCursorPos(&mut p);
+            p
+        });
+        let _ = SetForegroundWindow(hwnd);
+        MENU_OPEN.store(true, Ordering::Relaxed);
+        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_CENTERALIGN, pt.x, pt.y, None, hwnd, None);
+        MENU_OPEN.store(false, Ordering::Relaxed);
+        let _ = DestroyMenu(menu);
+        let Some(a) = pinned_copy(hwnd, key) else { return };
+        match cmd.0 as usize {
+            MENU_RUN => a.members.iter().for_each(|m| apps::launch(apps::line_source(&m.replace(';', "|")), "")),
+            MENU_EDIT => tools::edit(&a, pt),
+            MENU_UNGROUP => tools::ungroup(&a),
+            MENU_PIN => {
+                apps::replace_line(&a.source, None);
+                reload_pins();
+            }
+            _ => {}
+        }
+    }
+}
+
+unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWND>, bool)>, anchor: Option<POINT>) {
+    unsafe {
+        if let Some((key, source, ..)) = &target
+            && (apps::is_group(source) || apps::is_mode(source))
+        {
+            group_menu(hwnd, key, source, anchor);
+            return;
+        }
+        let Ok(menu) = CreatePopupMenu() else { return };
         let fg = GetForegroundWindow();
+        let groups = tools::groups();
         if let Some((_, source, pinned, windows, sep)) = &target {
             if windows.len() >= 2 {
                 for (k, &win) in windows.iter().enumerate() {
@@ -1294,6 +1444,25 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
                 let text = if *sep { "Remover separador depois" } else { "Adicionar separador depois" };
                 let text = HSTRING::from(crate::i18n::tr(text));
                 let _ = AppendMenuW(menu, MF_STRING, MENU_SEP, &text);
+                let text = HSTRING::from(crate::i18n::tr("Editar atalho…"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_EDIT, &text);
+                // Submenus "Adicionar a um grupo" e "Adicionar a um modo de trabalho".
+                for (mode, new_id, title, new_text) in [
+                    (false, MENU_NEW_GROUP, "Adicionar a um grupo", "Novo grupo"),
+                    (true, MENU_NEW_MODE, "Adicionar a um modo de trabalho", "Novo modo de trabalho"),
+                ] {
+                    let Ok(sub) = CreatePopupMenu() else { continue };
+                    for (k, (src, name)) in groups.iter().enumerate() {
+                        if apps::is_mode(src) == mode {
+                            let _ = AppendMenuW(sub, MF_STRING, MENU_TO_GROUP + k, &HSTRING::from(name.as_str()));
+                        }
+                    }
+                    if groups.iter().any(|(src, _)| apps::is_mode(src) == mode) {
+                        let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+                    }
+                    let _ = AppendMenuW(sub, MF_STRING, new_id, &HSTRING::from(crate::i18n::tr(new_text)));
+                    let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &HSTRING::from(crate::i18n::tr(title)));
+                }
             }
             match windows.len() {
                 0 => {}
@@ -1355,6 +1524,22 @@ unsafe fn context_menu(hwnd: HWND, target: Option<(String, String, bool, Vec<HWN
         }
         let Some((key, source, pinned, windows, _)) = target else { return };
         match cmd {
+            MENU_EDIT => {
+                if let Some(a) = pinned_copy(hwnd, &key) {
+                    tools::edit(&a, pt);
+                }
+                return;
+            }
+            MENU_NEW_GROUP | MENU_NEW_MODE => {
+                tools::new_group(&source, cmd == MENU_NEW_MODE);
+                return;
+            }
+            c if (MENU_TO_GROUP..MENU_TO_GROUP + 100).contains(&c) => {
+                if let Some((g, _)) = groups.get(c - MENU_TO_GROUP) {
+                    tools::add_to_group(&source, g);
+                }
+                return;
+            }
             MENU_NEW => {
                 ShellExecuteW(None, w!("open"), &HSTRING::from(&source), None, None, SW_SHOWNORMAL);
                 return;
@@ -1433,6 +1618,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_DROPFILES => {
+                dropped(hwnd, wp);
+                LRESULT(0)
+            }
             WM_MOUSEMOVE => {
                 // App com 2+ janelas sob o mouse: a prévia delas abre depois de uma pequena espera.
                 let preview_target = with_dock(hwnd, |d| {
@@ -1569,11 +1758,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         d.redraw();
                     }
                     // get: depois do refresh o índice pode cair numa pilha.
-                    d.hit(mouse_x(lp)).and_then(|i| d.apps.get(i)).map(|a| (a.source.clone(), a.windows.clone()))
+                    let i = d.hit(mouse_x(lp))?;
+                    let a = d.apps.get(i)?;
+                    let copy = App {
+                        source: a.source.clone(),
+                        windows: a.windows.clone(),
+                        args: a.args.clone(),
+                        label: a.label.clone(),
+                        members: a.members.clone(),
+                        ..Default::default()
+                    };
+                    Some((copy, d.menu_anchor(i)))
                 })
                 .flatten();
-                if let Some((source, windows)) = target {
-                    apps::activate(&source, &windows);
+                if let Some((a, anchor)) = target {
+                    let anchor = anchor.unwrap_or_default();
+                    if apps::is_group(&a.source) {
+                        tools::open_group(&a, anchor);
+                    } else if apps::is_mode(&a.source) {
+                        tools::run_mode(&a);
+                    } else if a.windows.is_empty()
+                        && extras::on("pin_folder_stack")
+                        && std::path::Path::new(&a.source).is_dir()
+                    {
+                        tools::open_folder(&a.source, anchor);
+                    } else if a.windows.is_empty() && !a.args.is_empty() {
+                        apps::launch(&a.source, &a.args);
+                    } else {
+                        apps::activate(&a.source, &a.windows);
+                    }
                 }
                 LRESULT(0)
             }
@@ -1770,6 +1983,12 @@ fn main() -> windows::core::Result<()> {
         launcher::preload();
         autostart();
         update::start(main_hwnd);
+        // Funções extras ligadas nas Configurações (desligadas não criam nada).
+        clipboard::sync();
+        tools::sync();
+        zones::sync();
+        quicklook::sync();
+        with_docks(|d| drop_target(d.hwnd));
         let _ = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,

@@ -1052,7 +1052,12 @@ impl Panel {
         self.fields.retain(|f| ids.contains(&f.id));
         for &id in &ids {
             if !self.fields.iter().any(|f| f.id == id) {
-                self.fields.push(Field { id, text: Vec::new(), cursor: 0 });
+                let text: Vec<u16> = PREFILL
+                    .with_borrow_mut(|p| p.iter().position(|(i, _)| *i == id).map(|k| p.remove(k).1))
+                    .map(|t| t.encode_utf16().collect())
+                    .unwrap_or_default();
+                let cursor = text.len();
+                self.fields.push(Field { id, text, cursor });
                 if self.focus.is_none_or(|f| !ids.contains(&f)) {
                     self.focus = Some(id);
                 }
@@ -2038,6 +2043,19 @@ fn outside(prev_fg: HWND) -> bool {
         }
         true
     }
+}
+
+thread_local! {
+    /// Texto inicial de campos que ainda vão aparecer ([`prefill`]).
+    static PREFILL: RefCell<Vec<(u32, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Dá um texto inicial ao campo `id` do próximo painel (antes de abrir).
+pub fn prefill(id: u32, text: &str) {
+    PREFILL.with_borrow_mut(|p| {
+        p.retain(|(i, _)| *i != id);
+        p.push((id, text.to_string()));
+    });
 }
 
 /// Fecha o painel aberto, se houver. Seguro de chamar de dentro de [`PanelContent::event`].

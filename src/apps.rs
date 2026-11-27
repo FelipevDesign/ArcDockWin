@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::{
     GPS_DEFAULT, IPropertyStore, SHGetPropertyStoreForWindow, SHGetPropertyStoreFromParsingName,
 };
 use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY, ShellExecuteW,
+    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
@@ -34,7 +34,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_D, VK_X,
 };
 use windows::core::{BOOL, HSTRING, PWSTR, w};
-use windows::core::{Interface, PCSTR};
+use windows::core::{Interface, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{LRESULT, POINT};
 use windows::Win32::UI::Shell::{
     BHID_SFUIObject, CMF_NORMAL, CMINVOKECOMMANDINFO, IContextMenu, IContextMenu3, IShellItem,
@@ -46,6 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub const APPS_FOLDER: &str = "shell:AppsFolder\\";
 
+#[derive(Default)]
 pub struct App {
     /// Caminho do .exe ou `shell:AppsFolder\<id>` (apps da Store).
     pub source: String,
@@ -57,6 +58,57 @@ pub struct App {
     pub windows: Vec<HWND>,
     /// Separador depois deste app (linha `---` no pinned.txt; só nos fixados).
     pub sep_after: bool,
+    /// Parâmetros ao abrir (`caminho | parâmetros | nome` no pinned.txt).
+    pub args: String,
+    /// Nome trocado pelo usuário (vazio = o do Windows).
+    pub label: String,
+    /// Itens de um grupo ou modo de trabalho (`::grupo Nome | a | b`).
+    pub members: Vec<String>,
+}
+
+/// Prefixos das linhas de grupo e de modo de trabalho no pinned.txt.
+pub const GROUP: &str = "::grupo ";
+pub const MODE: &str = "::modo ";
+
+pub fn is_group(source: &str) -> bool {
+    source.starts_with(GROUP)
+}
+
+pub fn is_mode(source: &str) -> bool {
+    source.starts_with(MODE)
+}
+
+/// Parte do caminho de uma linha do pinned.txt (antes do primeiro `|`).
+pub fn line_source(line: &str) -> &str {
+    line.split('|').next().unwrap_or("").trim()
+}
+
+/// Linha do pinned.txt de um item fixado.
+pub fn pin_line(a: &App) -> String {
+    if is_group(&a.source) || is_mode(&a.source) {
+        let mut l = a.source.clone();
+        for m in &a.members {
+            l.push_str(" | ");
+            l.push_str(m);
+        }
+        return l;
+    }
+    match (a.args.is_empty(), a.label.is_empty()) {
+        (true, true) => a.source.clone(),
+        (_, true) => format!("{} | {}", a.source, a.args),
+        _ => format!("{} | {} | {}", a.source, a.args, a.label),
+    }
+}
+
+/// Nome mostrado de um item (o escolhido pelo usuário ou o do Windows).
+pub fn item_name(a: &App) -> String {
+    if !a.label.is_empty() {
+        return a.label.clone();
+    }
+    if let Some(n) = a.source.strip_prefix(GROUP).or_else(|| a.source.strip_prefix(MODE)) {
+        return n.trim().to_string();
+    }
+    display_name(&a.source)
 }
 
 /// Linha do pinned.txt que põe um separador depois do app de cima.
@@ -91,12 +143,12 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
         key: START.to_string(),
         pinned,
         icon: load_icon(START, icon_size),
-        windows: Vec::new(),
-        sep_after: false,
+        ..Default::default()
     };
     // Posição do Iniciar: a linha `::start` entre os fixados, `::start-end` na ponta direita
     // (depois dos abertos) ou, sem nenhuma das duas, o primeiro item.
     let mut apps: Vec<App> = Vec::new();
+    let mut healed: Vec<(String, String)> = Vec::new();
     let (mut placed, mut at_end) = (false, false);
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         if line == SEP_LINE {
@@ -116,17 +168,43 @@ pub fn load_pinned(icon_size: i32) -> Vec<App> {
             }
             continue;
         }
-        if !(line.starts_with(APPS_FOLDER) || Path::new(line).exists()) {
+        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        let head = parts[0];
+        if is_group(head) || is_mode(head) {
+            let members: Vec<String> = parts[1..].iter().filter(|m| !m.is_empty()).map(|m| m.to_string()).collect();
+            apps.push(App {
+                key: head.to_lowercase(),
+                icon: crate::tools::group_icon(head, &members, icon_size),
+                source: head.to_string(),
+                pinned: true,
+                members,
+                ..Default::default()
+            });
             continue;
         }
+        let mut source = head.to_string();
+        if !(source.starts_with(APPS_FOLDER) || Path::new(&source).exists()) {
+            // App atualizado para uma pasta com outro número de versão: procura a nova.
+            match crate::config::raw("pin_heal").is_some_and(|v| v == "1").then(|| crate::heal::find(&source)).flatten() {
+                Some(new) => {
+                    healed.push((source.clone(), new.clone()));
+                    source = new;
+                }
+                None => continue,
+            }
+        }
         apps.push(App {
-            key: source_key(line),
-            icon: load_icon(line, icon_size),
-            source: line.to_string(),
+            key: source_key(&source),
+            icon: load_icon(&source, icon_size),
+            source,
             pinned: true,
-            windows: Vec::new(),
-            sep_after: false,
+            args: parts.get(1).map(|a| a.to_string()).unwrap_or_default(),
+            label: parts.get(2).map(|a| a.to_string()).unwrap_or_default(),
+            ..Default::default()
         });
+    }
+    if !healed.is_empty() {
+        crate::heal::rewrite(&cfg, &healed);
     }
     if !placed {
         if at_end {
@@ -155,7 +233,7 @@ pub fn save_pinned(list: &[App], gone: Option<&str>) {
         if l != SEP_LINE
             && l != START
             && l != START_END_LINE
-            && !pinned.iter().any(|a| a.source == l)
+            && !pinned.iter().any(|a| a.source == line_source(l))
             && gone != Some(l)
         {
             out.push_str(line);
@@ -163,7 +241,7 @@ pub fn save_pinned(list: &[App], gone: Option<&str>) {
         }
     }
     for a in pinned {
-        out.push_str(&a.source);
+        out.push_str(&pin_line(a));
         out.push_str(nl);
         if a.sep_after {
             out.push_str(SEP_LINE);
@@ -202,6 +280,7 @@ pub fn display_name(source: &str) -> String {
         START => return crate::i18n::tr("Lançador"),
         crate::stacks::DOWNLOADS => return crate::i18n::tr("Downloads"),
         crate::stacks::TRASH => return crate::i18n::tr("Lixeira"),
+        s if crate::tools::is_tool(s) => return crate::tools::name(s),
         _ => {}
     }
     if let Some(name) = CACHE.with_borrow(|c| c.get(source).cloned()) {
@@ -348,12 +427,16 @@ pub fn load_icon(source: &str, size: i32) -> Option<Pixmap> {
     if source == START && path.is_none() {
         return start_icon(size as u32);
     }
+    let image = path.as_deref().is_some_and(|p| {
+        let p = p.to_lowercase();
+        [".png", ".jpg", ".jpeg", ".bmp"].iter().any(|x| p.ends_with(x))
+    });
     let source = path.unwrap_or_else(|| source.to_string());
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(source), None).ok()?;
         let hbmp = factory
-            .GetImage(SIZE { cx: size, cy: size }, SIIGBF_ICONONLY)
+            .GetImage(SIZE { cx: size, cy: size }, if image { SIIGBF_RESIZETOFIT } else { SIIGBF_ICONONLY })
             .ok()?;
         let pixmap = hbitmap_to_pixmap(hbmp);
         let _ = DeleteObject(HGDIOBJ(hbmp.0));
@@ -484,14 +567,7 @@ pub fn refresh(apps: &mut Vec<App>, icon_size: i32) -> bool {
             let icon = load_icon(&source, icon_size);
             // Abertos não fixados vão para o fim (antes do Iniciar, se ele estiver na ponta).
             let at = apps.iter().position(|a| a.source == START && !a.pinned).unwrap_or(apps.len());
-            apps.insert(at, App {
-                icon,
-                source,
-                key,
-                pinned: false,
-                windows,
-                sep_after: false,
-            });
+            apps.insert(at, App { icon, source, key, pinned: false, windows, ..Default::default() });
             changed = true;
         }
     }
@@ -670,6 +746,70 @@ fn xml_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Clique no ícone: abre o app, alterna entre as janelas dele ou minimiza a única em foco.
+/// Abre um novo processo do app, com os parâmetros escolhidos (se houver).
+pub fn launch(source: &str, args: &str) {
+    unsafe {
+        let target = store_app_id(source).unwrap_or_else(|| source.to_string());
+        let params = HSTRING::from(args);
+        let params = if args.is_empty() { PCWSTR::null() } else { PCWSTR(params.as_ptr()) };
+        ShellExecuteW(None, w!("open"), &HSTRING::from(target), params, None, SW_SHOWNORMAL);
+    }
+}
+
+/// Troca o ícone de um app (`icons.txt`); `None` volta ao original.
+pub fn set_icon_override(source: &str, icon: Option<&str>) {
+    let key = exe_key(source);
+    let p = icons_path();
+    let text = std::fs::read_to_string(&p).unwrap_or_default();
+    let mut out: Vec<String> = text
+        .lines()
+        .filter(|l| !l.split_once('=').is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case(&key)))
+        .map(str::to_string)
+        .collect();
+    if let Some(icon) = icon {
+        out.push(format!("{key}={icon}"));
+    }
+    let _ = std::fs::write(p, out.join("\n") + "\n");
+}
+
+/// Troca o nome e os parâmetros de um item fixado (linha dele no pinned.txt).
+pub fn edit_pin(source: &str, args: &str, label: &str) {
+    let cfg = config_path();
+    let text = std::fs::read_to_string(&cfg).unwrap_or_default();
+    let a = App { source: source.to_string(), args: args.trim().to_string(), label: label.trim().to_string(), ..Default::default() };
+    let line = pin_line(&a);
+    let out: Vec<String> =
+        text.lines().map(|l| if line_source(l) == source { line.clone() } else { l.to_string() }).collect();
+    let _ = std::fs::write(&cfg, out.join("\n") + "\n");
+}
+
+/// Troca uma linha inteira do pinned.txt (grupos e modos); `None` apaga.
+pub fn replace_line(source: &str, new: Option<&str>) {
+    let cfg = config_path();
+    let text = std::fs::read_to_string(&cfg).unwrap_or_default();
+    let out: Vec<String> = text
+        .lines()
+        .filter_map(|l| if line_source(l) == source { new.map(str::to_string) } else { Some(l.to_string()) })
+        .collect();
+    let _ = std::fs::write(&cfg, out.join("\n") + "\n");
+}
+
+/// Acrescenta linhas no fim do pinned.txt (sem repetir caminhos já fixados).
+pub fn append_lines(lines: &[String]) {
+    let cfg = config_path();
+    let mut text = std::fs::read_to_string(&cfg).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for l in lines {
+        if !text.lines().any(|x| line_source(x).eq_ignore_ascii_case(line_source(l))) {
+            text.push_str(l);
+            text.push('\n');
+        }
+    }
+    let _ = std::fs::write(&cfg, text);
+}
+
 pub fn activate(source: &str, windows: &[HWND]) {
     if source == START {
         open_start();
@@ -1095,7 +1235,7 @@ pub fn set_pinned(apps: &mut Vec<App>, key: &str, pin: bool) {
         let mut out = String::new();
         let mut skip_sep = false;
         for l in text.split_inclusive('\n') {
-            if l.trim() == source {
+            if line_source(l) == source {
                 skip_sep = true;
                 continue;
             }
