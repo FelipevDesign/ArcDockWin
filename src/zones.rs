@@ -72,9 +72,9 @@ pub fn sync() {
     }
     // Sombras: desligada (ou sem zonas) some com todas; mudou a intensidade, redesenha.
     if !want || !extras::on("shadow_on") {
-        SHADOWS.with_borrow_mut(|v| v.clear());
+        shadows(|v| v.clear());
     } else {
-        SHADOWS.with_borrow_mut(|v| v.iter_mut().for_each(|s| s.update(true)));
+        shadows(|v| v.iter_mut().for_each(|s| s.update(true)));
     }
 }
 
@@ -94,6 +94,15 @@ fn zone_at(pt: POINT) -> Option<RECT> {
         let r = RECT { left: w.left + m("zone_left"), top: w.top + m("zone_top"), right: w.right - m("zone_right"), bottom: w.bottom - m("zone_bottom") };
         (r.right - r.left > 100 && r.bottom - r.top > 100).then_some(r)
     }
+}
+
+/// Mexe nas sombras sem nunca travar (um aviso pode chegar no meio de outro).
+fn shadows(f: impl FnOnce(&mut Vec<Shadow>)) {
+    SHADOWS.with(|s| {
+        if let Ok(mut v) = s.try_borrow_mut() {
+            f(&mut v);
+        }
+    });
 }
 
 fn shift() -> bool {
@@ -126,7 +135,7 @@ unsafe extern "system" fn event(_: HWINEVENTHOOK, ev: u32, hwnd: HWND, obj: i32,
                 if let Some(z) = zone_at(cursor()) {
                     snap(hwnd, z);
                     if extras::on("shadow_on") {
-                        SHADOWS.with_borrow_mut(|v| {
+                        shadows(|v| {
                             if !v.iter().any(|s| s.target == hwnd)
                                 && let Some(s) = Shadow::new(hwnd)
                             {
@@ -137,11 +146,11 @@ unsafe extern "system" fn event(_: HWINEVENTHOOK, ev: u32, hwnd: HWND, obj: i32,
                 }
             } else {
                 // Arrastada para fora da zona: deixa de ser encaixada.
-                SHADOWS.with_borrow_mut(|v| v.retain(|s| s.target != hwnd));
+                shadows(|v| v.retain(|s| s.target != hwnd));
             }
         }
-        EVENT_OBJECT_DESTROY => SHADOWS.with_borrow_mut(|v| v.retain(|s| s.target != hwnd)),
-        _ => SHADOWS.with_borrow_mut(|v| {
+        EVENT_OBJECT_DESTROY => shadows(|v| v.retain(|s| s.target != hwnd)),
+        _ => shadows(|v| {
             // Primeiro plano mudou: cada sombra volta para trás da sua janela.
             let all = ev == EVENT_SYSTEM_FOREGROUND;
             for s in v.iter_mut().filter(|s| all || s.target == hwnd) {
