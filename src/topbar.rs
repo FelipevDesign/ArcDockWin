@@ -1549,19 +1549,6 @@ pub fn destroy() {
     TRAY_BAR.set(HWND(std::ptr::null_mut()));
 }
 
-/// Tira as barras do sistema de AppBars (chamado onde o dock encerra).
-pub fn shutdown() {
-    let bars = BARS.with(|b| b.try_borrow_mut().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default());
-    for bar in bars {
-        let mut abd = bar.appbar_data();
-        unsafe {
-            SHAppBarMessage(ABM_REMOVE, &mut abd);
-            let _ = ShowWindow(bar.hwnd, SW_HIDE);
-            let _ = ShowWindow(bar.glass, SW_HIDE);
-        }
-    }
-}
-
 /// Algo mudou numa janela de topo: troca de app pinta na hora; o resto agenda uma releitura
 /// em cada barra.
 unsafe extern "system" fn on_window_event(

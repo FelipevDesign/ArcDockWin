@@ -1615,31 +1615,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_ENDSESSION => {
-                if wp.0 != 0 {
+                if wp.0 != 0 && !SHUTTING_DOWN.load(Ordering::Acquire) {
                     log::line("fim da sessão do Windows (desligar, reiniciar ou sair)");
-                }
-                if wp.0 != 0 && !SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
-                    with_docks(|d| d.appbar_remove());
-                    tray::stop();
-                    topbar::shutdown();
-                    taskbar::restore();
-                    preview::shutdown();
-                    tooltip::shutdown();
-                    minimize::shutdown();
+                    // O Windows pode terminar o processo assim que o handler retornar.
+                    teardown();
+                    PostQuitMessage(0);
                 }
                 LRESULT(0)
             }
             WM_DESTROY => {
                 if !REBUILDING_DOCKS.load(Ordering::Acquire)
-                    && !SHUTTING_DOWN.swap(true, Ordering::AcqRel)
+                    && !SHUTTING_DOWN.load(Ordering::Acquire)
                 {
-                    with_docks(|d| d.appbar_remove());
-                    tray::stop();
-                    topbar::shutdown();
-                    taskbar::restore();
-                    preview::shutdown();
-                    tooltip::shutdown();
-                    minimize::shutdown();
                     log::line("janela do dock destruída: saindo");
                     PostQuitMessage(0);
                 }
@@ -1750,6 +1737,7 @@ fn main() -> windows::core::Result<()> {
             .collect();
         if docks.is_empty() {
             log::line("nenhum dock criado (nenhum monitor ou janela recusada): saindo");
+            teardown();
             return Ok(());
         }
         let main_hwnd = docks
@@ -1832,10 +1820,18 @@ fn main() -> windows::core::Result<()> {
 /// Sem isso, elas só caíam no fim do `ExitProcess`, na limpeza das `thread_local`, e destruir
 /// janelas ali derruba o processo (0xC000000D no ntdll): toda saída virava um travamento.
 unsafe fn teardown() {
+    if SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    with_docks(|d| d.appbar_remove());
+    tray::stop();
+    topbar::destroy();
+    taskbar::restore();
+    preview::shutdown();
+    tooltip::shutdown();
+    minimize::shutdown();
     panel::close();
     let docks = DOCKS.with(|d| d.try_borrow_mut().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default());
-    // A limpeza do WM_DESTROY já rodou: as janelas que caem agora não repetem.
-    REBUILDING_DOCKS.store(true, Ordering::Release);
     docks.into_iter().for_each(dispose_dock);
     topbar::reset_shared_d2d();
     glass::shutdown();
