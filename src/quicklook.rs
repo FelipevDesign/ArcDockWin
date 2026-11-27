@@ -108,15 +108,29 @@ fn explorer_list() -> Option<HWND> {
         if !matches!(cls.as_str(), "CabinetWClass" | "ExploreWClass" | "Progman" | "WorkerW") {
             return None;
         }
-        let tid = GetWindowThreadProcessId(fg, None);
+        // Thread com o foco do teclado (no Explorador com abas, a aba pode ter thread própria).
         let mut gi = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
-        GetGUIThreadInfo(tid, &mut gi).ok()?;
-        // Só com o foco na lista de arquivos (renomeando, o foco é um campo "Edit"; na barra
-        // de endereço ou na busca, outra classe): aí o Espaço é nosso.
-        if class_of(gi.hwndFocus) != "DirectUIHWND" {
-            return None;
+        let tid = GetWindowThreadProcessId(fg, None);
+        let _ = GetGUIThreadInfo(0, &mut gi);
+        if gi.hwndFocus.is_invalid() {
+            let _ = GetGUIThreadInfo(tid, &mut gi);
         }
-        Some(fg)
+        let focus = class_of(gi.hwndFocus);
+        let caret = !gi.hwndCaret.is_invalid();
+        crate::config::debug_log(&format!("previa: janela {cls} foco [{focus}] cursor de texto {caret}"));
+        // Digitando (renomear, endereço, busca): o Espaço é do texto. Na lista de arquivos (ou
+        // nas janelas da aba em volta dela), é nosso.
+        let typing = caret
+            || focus.eq_ignore_ascii_case("Edit")
+            || focus.starts_with("RichEdit")
+            || focus.contains("DesktopChildSiteBridge")
+            || focus.contains("InputSite")
+            || focus.starts_with("Windows.UI");
+        let list = matches!(
+            focus.as_str(),
+            "DirectUIHWND" | "SHELLDLL_DefView" | "CtrlNotifySink" | "DUIViewWndClassName" | "ShellTabWindowClass" | "CabinetWClass" | "Progman" | "WorkerW" | "SysListView32"
+        );
+        (list && !typing).then_some(fg)
     }
 }
 

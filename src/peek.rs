@@ -518,7 +518,7 @@ fn load() {
     let shown: &str = if path.is_dir() {
         show_text(edit, &folder_text(&path));
         "Pasta"
-    } else if IMAGES.contains(&ext.as_str()) && decode_image(&path, area.right, area.bottom).is_some_and(|img| {
+    } else if IMAGES.contains(&ext.as_str()) && load_image(&path, area.right, area.bottom).is_some_and(|img| {
         with(|v| v.image = Some(img));
         true
     }) {
@@ -722,6 +722,57 @@ fn zip_text(p: &Path) -> Option<String> {
         o += 46 + n + x + c;
     }
     Some(out)
+}
+
+/// Imagem numa thread à parte, com prazo: alguns decodificadores (WEBP, HEIC, das extensões
+/// da Store) travavam a janela. Primeiro o decodificador do Windows Runtime (mesmo do app
+/// Fotos, já gira pela câmera); sem ele, o WIC.
+fn load_image(p: &Path, mw: i32, mh: i32) -> Option<(Vec<u8>, i32, i32)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = p.to_path_buf();
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let img = decode_rt(&path, mw, mh).or_else(|| decode_image(&path, mw, mh));
+        let _ = tx.send(img);
+    });
+    let img = rx.recv_timeout(std::time::Duration::from_secs(6)).ok().flatten();
+    crate::config::debug_log(&format!("previa: imagem = {:?}", img.as_ref().map(|i| (i.1, i.2))));
+    img
+}
+
+fn decode_rt(p: &Path, mw: i32, mh: i32) -> Option<(Vec<u8>, i32, i32)> {
+    use windows::Graphics::Imaging::{
+        BitmapAlphaMode, BitmapDecoder, BitmapInterpolationMode, BitmapPixelFormat, BitmapTransform, ColorManagementMode, ExifOrientationMode,
+    };
+    use windows::Storage::{FileAccessMode, StorageFile};
+    let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(p.as_os_str())).ok()?.join().ok()?;
+    let stream = file.OpenAsync(FileAccessMode::Read).ok()?.join().ok()?;
+    let dec = BitmapDecoder::CreateAsync(&stream).ok()?.join().ok()?;
+    let (w, h) = (dec.OrientedPixelWidth().ok()?.max(1), dec.OrientedPixelHeight().ok()?.max(1));
+    let k = (mw.max(1) as f32 / w as f32).min(mh.max(1) as f32 / h as f32).min(1.0);
+    let (tw, th) = (((w as f32 * k) as u32).max(1), ((h as f32 * k) as u32).max(1));
+    let t = BitmapTransform::new().ok()?;
+    // A escala vale antes da rotação: no retrato (90°/270°), largura e altura trocam.
+    let (rw, rh) = if dec.PixelWidth().ok()? == w { (tw, th) } else { (th, tw) };
+    t.SetScaledWidth(rw).ok()?;
+    t.SetScaledHeight(rh).ok()?;
+    t.SetInterpolationMode(BitmapInterpolationMode::Fant).ok()?;
+    let px = dec
+        .GetPixelDataTransformedAsync(
+            BitmapPixelFormat::Bgra8,
+            BitmapAlphaMode::Premultiplied,
+            &t,
+            ExifOrientationMode::RespectExifOrientation,
+            ColorManagementMode::DoNotColorManage,
+        )
+        .ok()?
+        .join()
+        .ok()?
+        .DetachPixelData()
+        .ok()?;
+    (px.len() == (tw * th * 4) as usize).then(|| (px.to_vec(), tw as i32, th as i32))
 }
 
 /// Decodifica a imagem já reduzida para caber em `mw` × `mh` e na orientação da câmera.
