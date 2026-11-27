@@ -1,0 +1,24 @@
+# Compila o .exe a cada envio para o branch instagram-separado e guarda como artefato.
+name: Build Instagram
+
+on:
+  push:
+    branches: [instagram-separado]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compilar
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arcdockwin-instagram
+          path: target/release/arcdockwin.exe
+          if-no-files-found: error

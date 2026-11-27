@@ -17,7 +17,9 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+use windows::Win32::UI::Shell::PropertiesSystem::{
+    GPS_DEFAULT, IPropertyStore, SHGetPropertyStoreForWindow, SHGetPropertyStoreFromParsingName,
+};
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY, ShellExecuteW,
 };
@@ -260,12 +262,35 @@ fn start_icon(size: u32) -> Option<Pixmap> {
 }
 
 fn source_key(source: &str) -> String {
+    // Atalho de app instalado pelo Chrome/Edge: a mesma chave da janela dele.
+    if let Some(id) = shortcut_web_app_id(source) {
+        return format!("aumid:{}", id.to_lowercase());
+    }
     match source.strip_prefix(APPS_FOLDER) {
         Some(id) => format!("aumid:{}", id.to_lowercase()),
         None => match packaged_aumid(source) {
             Some(id) => format!("aumid:{}", id.to_lowercase()),
             None => exe_key(source),
         },
+    }
+}
+
+/// AppUserModelID de um app instalado pelo navegador (`Chrome._crx_<id>`): cada um tem o
+/// seu, diferente do das janelas comuns do navegador.
+fn is_web_app_id(id: &str) -> bool {
+    id.contains("._crx_")
+}
+
+/// AUMID gravado no atalho (.lnk) de um app instalado pelo navegador.
+fn shortcut_web_app_id(source: &str) -> Option<String> {
+    if !source.to_lowercase().ends_with(".lnk") {
+        return None;
+    }
+    unsafe {
+        let store: IPropertyStore =
+            SHGetPropertyStoreFromParsingName(&HSTRING::from(source), None, GPS_DEFAULT).ok()?;
+        let id = store.GetValue(&PKEY_AppUserModel_ID).ok()?.to_string();
+        is_web_app_id(&id).then_some(id)
     }
 }
 
@@ -485,6 +510,12 @@ fn window_app(hwnd: HWND, procs: &mut HashMap<u32, String>) -> Option<(String, S
     if key == "applicationframehost.exe" {
         // Apps da Store rodam dentro do ApplicationFrameHost; o app real vem do AppUserModelID.
         let id = window_aumid(hwnd)?;
+        return Some((format!("aumid:{}", id.to_lowercase()), format!("{APPS_FOLDER}{id}")));
+    }
+    // Apps instalados pelo Chrome/Edge rodam no .exe do navegador: separa pelo AUMID da janela.
+    if (key == "chrome.exe" || key == "msedge.exe")
+        && let Some(id) = window_aumid(hwnd).filter(|id| is_web_app_id(id))
+    {
         return Some((format!("aumid:{}", id.to_lowercase()), format!("{APPS_FOLDER}{id}")));
     }
     // App da Store com .exe próprio (Claude, Slack, WhatsApp): chave pelo AUMID, a mesma do
