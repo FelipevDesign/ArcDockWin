@@ -180,13 +180,15 @@ pub enum Widget {
 }
 
 /// Linha de [`Widget::List`]: imagem ou, sem ela, o glifo `glyph` (0 = nada). `hint`: texto
-/// pequeno à direita (ex.: a tecla e o que ela faz), vazio = nada.
+/// pequeno à direita (ex.: a tecla e o que ela faz), vazio = nada. `button`: botão
+/// `(glifo, texto, id)` dentro da linha, à esquerda da dica → [`Event::Click`] com o id dele.
 pub struct Item {
     pub id: u32,
     pub icon: Option<Pixmap>,
     pub glyph: u16,
     pub text: String,
     pub hint: String,
+    pub button: Option<(u16, String, u32)>,
 }
 
 /// O que define o fundo do painel: tamanho do bitmap, vidro, cores e sombra.
@@ -1289,12 +1291,44 @@ impl Panel {
                     for (k, it) in items.iter().enumerate() {
                         let ry = y + k as f32 * rh;
                         let (zy, zh) = (ry + 2.0 * s, rh - 4.0 * s);
-                        zones.push(Zone { x: left, y: zy, w: right - left - bar, h: zh, radius: 8.0 * s, kind: ZoneKind::Click(it.id) });
                         let sel = *selected == Some(k);
+                        let ink = if sel { WHITE } else { pal.ink };
+                        // Botão da linha: encosta na dica pela largura real do texto dela. A zona
+                        // dele vem antes da zona da linha para o clique cair nele.
+                        let content_r = right - bar - inset;
+                        let text_w = |t: &str| -> f32 {
+                            if t.is_empty() {
+                                return 0.0;
+                            }
+                            let u: Vec<u16> = t.encode_utf16().collect();
+                            self.layout_text(&u, Font::Small, 1000.0 * s, rh)
+                                .and_then(|l| unsafe {
+                                    let mut m = DWRITE_TEXT_METRICS::default();
+                                    l.GetMetrics(&mut m).ok()?;
+                                    Some(m.width.ceil())
+                                })
+                                .unwrap_or(0.0)
+                        };
+                        let button = it.button.as_ref().map(|(g, label, bid)| {
+                            let hint_tw = text_w(&it.hint);
+                            let (bh, pad, gw) = (24.0 * s, 8.0 * s, 16.0 * s);
+                            let bw = pad + gw + 4.0 * s + text_w(label) + pad;
+                            let bx = content_r - hint_tw - if hint_tw > 0.0 { 10.0 * s } else { 0.0 } - bw;
+                            (bx, ry + (rh - bh) / 2.0, bw, bh, *g, label, *bid)
+                        });
+                        if let Some((bx, by, bw, bh, _, _, bid)) = button {
+                            zones.push(Zone { x: bx, y: by, w: bw, h: bh, radius: bh / 2.0, kind: ZoneKind::Click(bid) });
+                        }
+                        zones.push(Zone { x: left, y: zy, w: right - left - bar, h: zh, radius: 8.0 * s, kind: ZoneKind::Click(it.id) });
                         if sel {
                             fill(&mut pm, left, zy, right - left - bar, zh, 8.0 * s, pal.accent);
                         }
-                        let ink = if sel { WHITE } else { pal.ink };
+                        if let Some((bx, by, bw, bh, g, label, _)) = button {
+                            fill(&mut pm, bx, by, bw, bh, bh / 2.0, if sel { [255, 255, 255, 48] } else { pal.circle });
+                            let gx = bx + 8.0 * s;
+                            texts.push(mk(&glyph(g), Font::Icon, [gx, by, 16.0 * s, bh], DWRITE_TEXT_ALIGNMENT_CENTER, ink));
+                            texts.push(mk(label, Font::Small, [gx + 20.0 * s, by, bw - 28.0 * s, bh], DWRITE_TEXT_ALIGNMENT_LEADING, ink));
+                        }
                         let tx = left + inset;
                         let cx = tx + (gap - 16.0 * s) / 2.0;
                         if let Some(icon) = &it.icon {
@@ -1309,7 +1343,8 @@ impl Panel {
                             let hc = if sel { [1.0, 1.0, 1.0, 0.85] } else { pal.dim };
                             texts.push(mk(&it.hint, Font::Small, [right - bar - inset - hint_w, ry, hint_w, rh], DWRITE_TEXT_ALIGNMENT_TRAILING, hc));
                         }
-                        let name_w = right - bar - inset - tx - gap - hint_w;
+                        let name_r = button.map_or(content_r - hint_w, |(bx, ..)| (content_r - hint_w).min(bx - 8.0 * s));
+                        let name_w = name_r - tx - gap;
                         texts.push(mk(&it.text, font, [tx + gap, ry, name_w, rh], DWRITE_TEXT_ALIGNMENT_LEADING, ink));
                     }
                     if let Some((start, size)) = scroll {
@@ -1874,7 +1909,8 @@ impl Panel {
                     false
                 }
             }),
-            0x0D => {
+            // 0x0A: Ctrl+Enter (o conteúdo lê os modificadores, ex.: Ctrl+Shift+Enter).
+            0x0D | 0x0A => {
                 let Some(id) = self.focus else { return };
                 let Some(field) = self.fields.iter().find(|x| x.id == id) else { return };
                 let text = String::from_utf16_lossy(&field.text);
