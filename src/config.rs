@@ -481,3 +481,16 @@ pub fn raw(key: &str) -> Option<String> {
 pub fn set_raw(key: &str, value: String) {
     set(key, value);
 }
+
+/// Registro de diagnóstico (só com `debug_log=1` no settings.txt): debug.log na pasta do dock.
+pub fn debug_log(msg: &str) {
+    if get("debug_log").as_deref() != Some("1") {
+        return;
+    }
+    use std::io::Write;
+    let path = crate::apps::config_path().with_file_name("debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = writeln!(f, "{t} {msg}");
+    }
+}

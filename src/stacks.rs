@@ -93,12 +93,24 @@ impl Stacks {
 
 /// Itens da ponta direita conforme as opções.
 pub fn wanted() -> Vec<&'static str> {
-    let mut v = crate::tools::enabled();
+    let mut v = Vec::new();
     if crate::config::show_downloads() {
         v.push(DOWNLOADS);
     }
     if crate::config::show_trash() {
         v.push(TRASH);
+    }
+    // Ferramentas ao lado da Lixeira: uma sozinha ocupa um lugar; duas ou mais dividem um
+    // lugar só (uma sobre a outra, ou em grade 2×2).
+    let tools = crate::tools::enabled();
+    match tools.len() {
+        0 => {}
+        1 => v.push(tools[0]),
+        _ => v.push(crate::tools::GRID),
+    }
+    // Arrastando arquivos: a prateleira vira um lugar próprio, fácil de acertar.
+    if crate::droptarget::dragging() && crate::extras::on("tool_shelf") {
+        v.push(crate::tools::SHELF);
     }
     v
 }

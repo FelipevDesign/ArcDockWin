@@ -7,6 +7,7 @@ mod colordb;
 mod config;
 mod control;
 mod drag;
+mod droptarget;
 mod extras;
 mod heal;
 mod musicbar;
@@ -402,6 +403,23 @@ impl Dock {
         Some((s.source.clone(), self.menu_anchor(i)?))
     }
 
+    /// Item da ponta sob o mouse; na grade de ferramentas, a ferramenta do quadrante.
+    fn stack_pick(&self, x: f32, y: f32) -> Option<(String, POINT)> {
+        let i = self.hit(x)?;
+        let (src, anchor) = self.stack_at(i)?;
+        if src != tools::GRID {
+            return Some((src, anchor));
+        }
+        let slots = self.slots();
+        let slot = slots.get(i)?;
+        let (_, _, _, b) = render::box_rect(&slots, &self.m, self.pixmap.height() as f32)?;
+        let top = b as f32 - self.m.pad - slot.size;
+        let (rx, ry) = ((x - slot.x) / slot.size, (y - top) / slot.size);
+        let list = tools::grid_tools();
+        let k = if list.len() <= 2 { (ry >= 0.5) as usize } else { (ry >= 0.5) as usize * 2 + (rx >= 0.5) as usize };
+        Some((list.get(k)?.to_string(), anchor))
+    }
+
     fn refresh(&mut self) -> bool {
         self.refresh_some(true, true)
     }
@@ -522,15 +540,15 @@ impl Dock {
                 let _ = ShowWindow(self.glass, SW_HIDE);
             }
             if self.primary {
-                musicbar::anchor(None, self.scale);
+                musicbar::anchor(None, self.scale, false);
             }
             return;
         };
-        // Quadro da música ao lado do dock principal (só com o dock parado).
-        if self.primary && !self.animating {
+        // Quadro da música ao lado do dock principal: acompanha o dock aparecendo e sumindo.
+        if self.primary {
             let off = self.offset();
             let r = RECT { left: self.pos.x + l, top: self.pos.y + t + off, right: self.pos.x + r, bottom: self.pos.y + b + off };
-            musicbar::anchor(Some(r), self.scale);
+            musicbar::anchor(Some(r), self.scale, !self.animating);
         }
         let (w, h) = (r - l, b - t);
         if let Some(fx) = &self.glass_fx {
@@ -869,8 +887,17 @@ pub fn panel_scale() -> f32 {
 /// Aceita arquivos soltos no dock só com a opção (ou a prateleira) ligada.
 fn drop_target(hwnd: HWND) {
     let on = extras::on("pin_drop") || extras::on("tool_shelf");
+    // Só refaz o registro quando muda (apply_settings roda muitas vezes).
+    if DROP_ON.with(|d| d.borrow().iter().any(|(h, v)| *h == hwnd.0 as isize && *v == on)) {
+        return;
+    }
+    DROP_ON.with(|d| {
+        let mut d = d.borrow_mut();
+        d.retain(|(h, _)| *h != hwnd.0 as isize);
+        d.push((hwnd.0 as isize, on));
+    });
+    droptarget::set(hwnd, on);
     unsafe {
-        windows::Win32::UI::Shell::DragAcceptFiles(hwnd, on);
         if on {
             // Arrastar de um Explorador comum para o dock (mesmo nível de permissão).
             use windows::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW};
@@ -879,6 +906,16 @@ fn drop_target(hwnd: HWND) {
             }
         }
     }
+}
+
+thread_local! {
+    /// Docks com o arrastar de arquivos registrado (janela, ligado).
+    static DROP_ON: RefCell<Vec<(isize, bool)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Arquivos soltos (OLE, droptarget.rs) no ponto `pt` da janela do dock.
+pub fn dropped_files(hwnd: HWND, files: Vec<std::path::PathBuf>, pt: POINT) {
+    handle_drop(hwnd, files, pt);
 }
 
 /// Arquivos soltos no dock: no ícone de um app, abre com ele; na prateleira, guarda; numa
@@ -897,6 +934,12 @@ unsafe fn dropped(hwnd: HWND, wp: WPARAM) {
         let mut pt = POINT::default();
         let _ = DragQueryPoint(drop, &mut pt);
         DragFinish(drop);
+        handle_drop(hwnd, files, pt);
+    }
+}
+
+fn handle_drop(hwnd: HWND, files: Vec<std::path::PathBuf>, pt: POINT) {
+    unsafe {
         if files.is_empty() {
             return;
         }
@@ -1793,7 +1836,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     return LRESULT(0);
                 }
                 // Pilhas da ponta (Downloads, Lixeira).
-                if let Some((source, anchor)) = with_dock(hwnd, |d| d.stack_at(d.hit(mouse_x(lp))?)).flatten() {
+                if let Some((source, anchor)) = with_dock(hwnd, |d| d.stack_pick(mouse_x(lp), mouse_y(lp))).flatten() {
                     stacks::click(&source, anchor);
                     return LRESULT(0);
                 }
@@ -1837,7 +1880,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_RBUTTONUP => {
                 hide_tip(hwnd);
                 preview::dismiss();
-                if let Some((source, anchor)) = with_dock(hwnd, |d| d.stack_at(d.hit(mouse_x(lp))?)).flatten() {
+                if let Some((source, anchor)) = with_dock(hwnd, |d| d.stack_pick(mouse_x(lp), mouse_y(lp))).flatten() {
                     MENU_OPEN.store(true, Ordering::Relaxed);
                     stacks::context_menu(hwnd, &source, anchor);
                     MENU_OPEN.store(false, Ordering::Relaxed);

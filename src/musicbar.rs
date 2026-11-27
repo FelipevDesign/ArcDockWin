@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, w};
+use windows::core::w;
 
 use crate::panel::{self, Buffer, Font, Text, TextOp};
 use crate::topbar::rounded_rect;
@@ -107,28 +107,83 @@ fn ensure() -> Option<HWND> {
     }
 }
 
-/// O dock (principal) parou num lugar: `rect` na tela, ou `None` se ele se escondeu.
-pub fn anchor(rect: Option<RECT>, scale: f32) {
+/// O dock principal se mexeu: `rect` na tela (ou `None`, escondido). `resting` = dock parado
+/// (sem ícones ampliados): só aí vale a largura; nos outros quadros (aparecer/sumir) o quadro
+/// acompanha só o movimento vertical, no mesmo passo do dock.
+pub fn anchor(rect: Option<RECT>, scale: f32, resting: bool) {
     if !crate::extras::on("tool_music") {
         return;
     }
-    let changed = ST.with_borrow_mut(|s| match s.as_mut() {
-        Some(s) => {
-            let new = rect.map(|r| (r, scale));
-            let diff = s.anchor.map(|(r, k)| (r.left, r.top, r.right, r.bottom, (k * 100.0) as i32))
-                != new.map(|(r, k)| (r.left, r.top, r.right, r.bottom, (k * 100.0) as i32));
-            s.anchor = new;
-            diff
+    enum Next {
+        Nothing,
+        Redraw,
+        Move,
+    }
+    let next = ST.with_borrow_mut(|s| {
+        let Some(s) = s.as_mut() else {
+            if resting {
+                PENDING.with(|p| p.set(rect.map(|r| (r, scale))));
+            }
+            return Next::Nothing;
+        };
+        let Some(r) = rect else {
+            s.anchor = None;
+            return Next::Redraw;
+        };
+        let old = s.anchor.map(|(a, _)| a);
+        let mut a = old.unwrap_or(r);
+        if resting || old.is_none() {
+            a.left = r.left;
+            a.right = r.right;
         }
-        None => {
-            // Ainda não criado: guarda para o primeiro update.
-            PENDING.with(|p| p.set(rect.map(|r| (r, scale))));
-            false
+        a.top = r.top;
+        a.bottom = r.bottom;
+        let same_size = old.is_some_and(|o| o.bottom - o.top == a.bottom - a.top && o.left == a.left && o.right == a.right);
+        let moved = old.is_none_or(|o| o.top != a.top);
+        s.anchor = Some((a, scale));
+        if s.visible && same_size {
+            if moved { Next::Move } else { Next::Nothing }
+        } else {
+            Next::Redraw
         }
     });
-    if changed {
-        update();
+    match next {
+        Next::Redraw => update(),
+        Next::Move => move_now(),
+        Next::Nothing => {}
     }
+}
+
+/// Onde o quadro fica: à direita do dock, com folga para a ampliação dos ícones; sem
+/// espaço, à esquerda.
+fn place(dock: RECT, w: i32, scale: f32) -> POINT {
+    let h = (dock.bottom - dock.top).max(40);
+    let grow = if crate::config::magnify() { ((crate::config::magnify_scale() - 1.0) * h as f32 * 0.6) as i32 } else { 0 };
+    let gap = (12.0 * scale) as i32 + grow;
+    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    unsafe {
+        let _ = GetMonitorInfoW(MonitorFromPoint(POINT { x: dock.left, y: dock.top }, MONITOR_DEFAULTTONEAREST), &mut mi);
+    }
+    let mut x = dock.right + gap;
+    if x + w > mi.rcMonitor.right - 4 {
+        x = dock.left - gap - w;
+    }
+    POINT { x, y: dock.top }
+}
+
+/// Só move (o desenho é o mesmo): acompanha o dock aparecendo/sumindo.
+fn move_now() {
+    ST.with_borrow_mut(|s| {
+        let Some(s) = s.as_mut() else { return };
+        let Some((dock, scale)) = s.anchor else { return };
+        let pos = place(dock, s.size.0, scale);
+        unsafe {
+            let flags = SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER;
+            let _ = SetWindowPos(s.glass, None, pos.x, pos.y, 0, 0, flags);
+            let _ = SetWindowPos(s.hwnd, None, pos.x, pos.y, 0, 0, flags);
+        }
+        s.pos = pos;
+    });
 }
 
 thread_local! {
@@ -162,18 +217,7 @@ pub fn update() {
     let Some((dock, scale)) = ST.with_borrow(|s| s.as_ref().and_then(|s| s.anchor)) else { return hide() };
     let h = (dock.bottom - dock.top).max(40);
     let w = (WIDTH * scale).round() as i32;
-    // À direita do dock, com folga para a ampliação dos ícones; sem espaço, à esquerda.
-    let grow = if crate::config::magnify() { ((crate::config::magnify_scale() - 1.0) * h as f32 * 0.6) as i32 } else { 0 };
-    let gap = (12.0 * scale) as i32 + grow;
-    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-    unsafe {
-        let _ = GetMonitorInfoW(MonitorFromPoint(POINT { x: dock.left, y: dock.top }, MONITOR_DEFAULTTONEAREST), &mut mi);
-    }
-    let mut x = dock.right + gap;
-    if x + w > mi.rcMonitor.right - 4 {
-        x = dock.left - gap - w;
-    }
-    let pos = POINT { x, y: dock.top };
+    let pos = place(dock, w, scale);
     draw(hwnd, &m, w, h, scale, pos);
     // Tocando: a barra anda; parado, nada a animar.
     unsafe {
@@ -343,8 +387,8 @@ fn click(x: f32, y: f32) {
         }
         Hit::Open => {
             if let Some(m) = crate::media::current().filter(|m| !m.app_id.is_empty()) {
-                crate::apps::launch(&format!("shell:AppsFolder\\{}", m.app_id), "");
-                let _ = HSTRING::new();
+                // Procura numa thread à parte (a busca da aba pode levar um instante).
+                std::thread::spawn(move || focus_player(&m.app_id, &m.title));
             }
             return;
         }
@@ -370,5 +414,94 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
     }
 }
 
-#[allow(dead_code)]
-fn _unused(_: RECT, _: LPARAM) {}
+/// Leva à frente a janela que está tocando: no navegador, a aba com o título da mídia (ex.:
+/// o vídeo do YouTube), em vez de abrir uma janela nova. Sem achar, abre o app.
+fn focus_player(app_id: &str, title: &str) {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+    use windows::Win32::UI::Accessibility::*;
+    let id = app_id.to_lowercase();
+    let title_l = title.to_lowercase();
+    // Janelas do app: o nome do .exe aparece no id da mídia ("Chrome", "Spotify...").
+    let wins: Vec<(HWND, String)> = top_windows()
+        .into_iter()
+        .filter(|(_, exe, _)| !exe.is_empty() && id.contains(exe.as_str()))
+        .map(|(h, _, t)| (h, t))
+        .collect();
+    let bring = |h: HWND| unsafe {
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(h);
+    };
+    if let Some((h, _)) = wins.iter().find(|(_, t)| !title_l.is_empty() && t.to_lowercase().contains(&title_l)) {
+        return bring(*h);
+    }
+    // A aba não está na frente: procura entre as abas (acessibilidade do navegador).
+    if !title_l.is_empty() {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                let cond = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &windows::Win32::System::Variant::VARIANT::from(UIA_TabItemControlTypeId.0));
+                for (h, _) in &wins {
+                    let (Ok(cond), Ok(root)) = (cond.as_ref(), uia.ElementFromHandle(*h)) else { continue };
+                    let Ok(tabs) = root.FindAll(TreeScope_Descendants, cond) else { continue };
+                    for i in 0..tabs.Length().unwrap_or(0) {
+                        let Ok(tab) = tabs.GetElement(i) else { continue };
+                        let name = tab.CurrentName().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+                        if name.contains(&title_l)
+                            && let Ok(sel) = tab.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+                        {
+                            let _ = sel.Select();
+                            bring(*h);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match wins.first() {
+        Some((h, _)) => bring(*h),
+        None => crate::apps::launch(&format!("shell:AppsFolder\\{app_id}"), ""),
+    }
+}
+
+/// Janelas visíveis de primeiro nível: (janela, nome do .exe sem extensão, título).
+fn top_windows() -> Vec<(HWND, String, String)> {
+    unsafe extern "system" fn each(h: HWND, lp: LPARAM) -> windows::core::BOOL {
+        unsafe {
+            let out = &mut *(lp.0 as *mut Vec<(HWND, String, String)>);
+            if IsWindowVisible(h).as_bool() && GetWindow(h, GW_OWNER).map(|o| o.is_invalid()).unwrap_or(true) {
+                let mut t = [0u16; 512];
+                let n = GetWindowTextW(h, &mut t) as usize;
+                if n > 0 {
+                    let mut pid = 0u32;
+                    GetWindowThreadProcessId(h, Some(&mut pid));
+                    out.push((h, exe_name(pid), String::from_utf16_lossy(&t[..n])));
+                }
+            }
+            windows::core::BOOL(1)
+        }
+    }
+    let mut v: Vec<(HWND, String, String)> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
+    }
+    v
+}
+
+fn exe_name(pid: u32) -> String {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+        let mut buf = [0u16; 512];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        if !ok {
+            return String::new();
+        }
+        let p = String::from_utf16_lossy(&buf[..n as usize]);
+        std::path::Path::new(&p).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
+    }
+}

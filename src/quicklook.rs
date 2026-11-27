@@ -111,8 +111,9 @@ fn explorer_list() -> Option<HWND> {
         let tid = GetWindowThreadProcessId(fg, None);
         let mut gi = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
         GetGUIThreadInfo(tid, &mut gi).ok()?;
-        // Renomeando um arquivo há um caret/campo de edição: deixa o Espaço passar.
-        if !gi.hwndCaret.is_invalid() || class_of(gi.hwndFocus) != "DirectUIHWND" {
+        // Só com o foco na lista de arquivos (renomeando, o foco é um campo "Edit"; na barra
+        // de endereço ou na busca, outra classe): aí o Espaço é nosso.
+        if class_of(gi.hwndFocus) != "DirectUIHWND" {
             return None;
         }
         Some(fg)
@@ -135,7 +136,9 @@ unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
                             if SWALLOWED.load(Ordering::Relaxed) {
                                 return LRESULT(1);
                             }
-                            if let Some(fg) = explorer_list() {
+                            let found = explorer_list();
+                            crate::config::debug_log(&format!("previa: espaco, explorador = {:?}", found.map(|h| h.0)));
+                            if let Some(fg) = found {
                                 SWALLOWED.store(true, Ordering::Relaxed);
                                 let fg = fg.0 as isize;
                                 std::thread::spawn(move || open_for(HWND(fg as _)));
@@ -156,7 +159,9 @@ unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
 fn open_for(fg: HWND) {
     unsafe {
         let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-        if let Some((list, index)) = selection(fg) {
+        let sel = selection(fg);
+        crate::config::debug_log(&format!("previa: selecao = {:?}", sel.as_ref().map(|(l, i)| (l.len(), *i, l.get(*i).cloned()))));
+        if let Some((list, index)) = sel {
             launch(&list, index);
         }
         if init {
@@ -180,14 +185,30 @@ fn selection(fg: HWND) -> Option<(Vec<String>, usize)> {
                 .ok()?;
             view = folder_view(&disp.cast().ok()?);
         } else {
+            // Explorador com abas: cada aba é uma entrada com o mesmo HWND; vale a aba visível.
             let n = windows.Count().ok()?;
+            let mut first = None;
             for i in 0..n {
                 let Ok(disp) = windows.Item(&VARIANT::from(i)) else { continue };
                 let Ok(app) = disp.cast::<IWebBrowserApp>() else { continue };
-                if app.HWND().map(|h| h.0 as isize) == Ok(fg.0 as isize) {
-                    view = folder_view(&disp.cast().ok()?);
+                if app.HWND().map(|h| h.0 as isize) != Ok(fg.0 as isize) {
+                    continue;
+                }
+                let Ok(sp) = disp.cast::<IServiceProvider>() else { continue };
+                let Ok(browser) = sp.QueryService::<IShellBrowser>(&SID_STopLevelBrowser) else { continue };
+                let tab = browser.GetWindow().ok();
+                let visible = tab.is_some_and(|t| IsWindowVisible(t).as_bool());
+                let v: Option<IFolderView2> = browser.QueryActiveShellView().ok().and_then(|v| v.cast().ok());
+                if visible {
+                    view = v;
                     break;
                 }
+                if first.is_none() {
+                    first = v;
+                }
+            }
+            if view.is_none() {
+                view = first;
             }
         }
         let view = view?;

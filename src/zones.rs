@@ -175,6 +175,10 @@ fn in_zone(hwnd: HWND) -> bool {
     let c = POINT { x: (f.left + f.right) / 2, y: (f.top + f.bottom) / 2 };
     let Some(z) = zone_at(c) else { return false };
     let tol = (12.0 * crate::panel_scale()) as i32;
+    crate::config::debug_log(&format!(
+        "zona: janela {:?} quadro ({},{},{},{}) zona ({},{},{},{})",
+        hwnd.0, f.left, f.top, f.right, f.bottom, z.left, z.top, z.right, z.bottom
+    ));
     (f.left - z.left).abs() <= tol && (f.top - z.top).abs() <= tol && (f.right - z.right).abs() <= tol && (f.bottom - z.bottom).abs() <= tol
 }
 
@@ -187,7 +191,9 @@ fn track(hwnd: HWND) {
     shadows(|v| {
         let has = v.iter().any(|s| s.target == hwnd);
         if inside && !has {
-            if let Some(s) = Shadow::new(hwnd) {
+            let s = Shadow::new(hwnd);
+            crate::config::debug_log(&format!("sombra: criar {:?} -> {}", hwnd.0, s.is_some()));
+            if let Some(s) = s {
                 v.push(s);
             }
         } else if !inside && has {

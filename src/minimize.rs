@@ -27,6 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 const WM_CAPTURE: u32 = WM_APP + 1;
+/// Botão solto em cima do "_": mostra já a cópia ao vivo por cima (o minimizar vem em seguida).
+const WM_ARM: u32 = WM_APP + 2;
 const TIMER_PENDING: usize = 1;
 /// Prazo para o minimizar acontecer depois da foto (ms).
 const PENDING_MS: u32 = 2000;
@@ -153,7 +155,7 @@ fn stop_hooks() {
 
 /// Animação em andamento: o dock fica visível e o laço principal desenha um quadro por vez.
 pub fn busy() -> bool {
-    STARTING.get() || ANIM.with(|a| a.borrow().is_some())
+    STARTING.get() || ANIM.with(|a| a.borrow().is_some()) || thumb::running()
 }
 
 /// Ganchos numa thread só deles: respondem na hora mesmo com o dock ocupado desenhando.
@@ -177,6 +179,9 @@ fn hook_thread() {
 /// Botão esquerdo apertado sobre o "_" de uma janela: pede a foto (o minimizar só vem ao soltar).
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
+        if code == HC_ACTION as i32 && wp.0 as u32 == WM_LBUTTONUP {
+            let _ = PostMessageW(Some(overlay()), WM_ARM, WPARAM(0), LPARAM(0));
+        }
         if code == HC_ACTION as i32 && wp.0 as u32 == WM_LBUTTONDOWN {
             let pt = (*(lp.0 as *const MSLLHOOKSTRUCT)).pt;
             let root = GetAncestor(WindowFromPoint(pt), GA_ROOT);
@@ -224,7 +229,7 @@ unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
             let win = |k: u16| GetAsyncKeyState(k as i32) as u16 & 0x8000 != 0;
             let fg = GetForegroundWindow();
             if (win(VK_LWIN.0) || win(VK_RWIN.0)) && !fg.is_invalid() && !IsZoomed(fg).as_bool() {
-                let _ = PostMessageW(Some(overlay()), WM_CAPTURE, WPARAM(fg.0 as usize), LPARAM(0));
+                let _ = PostMessageW(Some(overlay()), WM_CAPTURE, WPARAM(fg.0 as usize), LPARAM(1));
             }
         }
         CallNextHookEx(None, code, wp, lp)
@@ -234,11 +239,19 @@ unsafe extern "system" fn key_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
-            WM_CAPTURE => capture(HWND(wp.0 as *mut c_void)),
+            WM_CAPTURE => capture_with(HWND(wp.0 as *mut c_void), lp.0 == 1),
+            WM_ARM => {
+                if thumb::busy() && !thumb::running() {
+                    thumb::arm();
+                    // Soltou: o minimizar vem logo; se não vier, a cópia não fica por cima.
+                    SetTimer(Some(hwnd), TIMER_PENDING, 700, None);
+                }
+            }
             WM_TIMER if wp.0 == TIMER_PENDING => {
                 // O minimizar não veio (soltou fora do botão, Win+↓ só restaurou...).
                 let _ = KillTimer(Some(hwnd), TIMER_PENDING);
                 PENDING.with(|p| p.borrow_mut().take());
+                thumb::cancel();
                 restore_if_idle();
             }
             _ => return DefWindowProcW(hwnd, msg, wp, lp),
@@ -247,13 +260,29 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     }
 }
 
-/// Fotografa `hwnd` antes de minimizar e desliga a animação nativa até o minimizar vir.
+/// Prepara a animação de `hwnd` (o dock vai minimizá-la agora).
 pub fn capture(hwnd: HWND) {
+    capture_with(hwnd, true);
+}
+
+/// Prepara a animação e desliga a nativa até o minimizar vir. Primeiro tenta a cópia ao vivo
+/// do Windows (DWM: a placa de vídeo desenha, sem foto e sem piscar); sem ela, a foto antiga.
+/// `arm` = mostra já a cópia por cima (sem esperar o botão do mouse soltar).
+fn capture_with(hwnd: HWND, arm: bool) {
     if !crate::animcfg::enabled() || overlay().is_invalid() {
         return;
     }
     unsafe {
         if IsIconic(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+            return;
+        }
+        if thumb::prepare(hwnd) {
+            PENDING.with(|p| p.borrow_mut().take());
+            disable_native();
+            if arm {
+                thumb::arm();
+            }
+            SetTimer(Some(overlay()), TIMER_PENDING, PENDING_MS, None);
             return;
         }
         let Some(shot) = snapshot(hwnd) else { return };
@@ -353,6 +382,12 @@ unsafe fn free_dib(dc: HDC, dib: HBITMAP) {
 
 /// O minimizar começou: se for a janela fotografada, anima.
 unsafe extern "system" fn on_minimize(_: HWINEVENTHOOK, _: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
+    if thumb::start(hwnd) {
+        unsafe {
+            let _ = KillTimer(Some(overlay()), TIMER_PENDING);
+        }
+        return;
+    }
     let pending = PENDING.with(|p| {
         let mut p = p.borrow_mut();
         if p.as_ref().is_some_and(|s| s.hwnd() == hwnd) { p.take() } else { None }
@@ -423,6 +458,12 @@ fn build(shot: Shot, target: RECT) -> Option<Anim> {
 
 /// Um quadro (chamado pelo laço principal enquanto `busy()`).
 pub fn frame() {
+    if thumb::running() {
+        if thumb::frame() {
+            restore_if_idle();
+        }
+        return;
+    }
     let done = ANIM.with(|a| {
         let mut a = a.borrow_mut();
         let Some(a) = a.as_mut() else { return false };
@@ -689,7 +730,256 @@ pub fn restore_native() {
 }
 
 fn restore_if_idle() {
-    if PENDING.with(|p| p.borrow().is_none()) && ANIM.with(|a| a.borrow().is_none()) {
+    if PENDING.with(|p| p.borrow().is_none()) && ANIM.with(|a| a.borrow().is_none()) && !thumb::busy() {
         restore_native();
+    }
+}
+
+/// Animação pela cópia ao vivo do Windows (miniaturas do DWM). O compositor desenha a janela
+/// em pedaços (faixas horizontais no gênio, um só na escala) e o dock só move os retângulos a
+/// cada quadro: nada de copiar pixels, então fica leve e acompanha a taxa da tela.
+mod thumb {
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Dwm::*;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::w;
+
+    use super::{DURATION, Geo, lerp, smooth};
+
+    /// Faixas do gênio (mais faixas = curva mais lisa).
+    const STRIPS: usize = 40;
+
+    struct Thumb {
+        src: HWND,
+        /// Retângulo visível da janela (tela) e onde ele começa dentro do retângulo da janela.
+        frame: RECT,
+        inset: (i32, i32),
+        thumbs: Vec<isize>,
+        armed: bool,
+        start: Option<Instant>,
+        geo: Option<Geo>,
+        /// Canto da camada (tela virtual).
+        origin: (i32, i32),
+    }
+
+    thread_local! {
+        static T: RefCell<Option<Thumb>> = const { RefCell::new(None) };
+        static LAYER: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    }
+
+    unsafe extern "system" fn layer_proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        unsafe {
+            if m == WM_NCHITTEST {
+                return LRESULT(-1); // HTTRANSPARENT
+            }
+            DefWindowProcW(h, m, wp, lp)
+        }
+    }
+
+    /// Camada transparente do tamanho da tela virtual onde as faixas aparecem.
+    fn layer() -> Option<HWND> {
+        let h = LAYER.get();
+        if h != 0 {
+            return Some(HWND(h as _));
+        }
+        unsafe {
+            let inst = GetModuleHandleW(None).ok()?;
+            let wc = WNDCLASSW { lpfnWndProc: Some(layer_proc), hInstance: inst.into(), lpszClassName: w!("ArcDockWinMinThumb"), ..Default::default() };
+            RegisterClassW(&wc);
+            let ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+            let h = CreateWindowExW(ex, w!("ArcDockWinMinThumb"), w!(""), WS_POPUP, 0, 0, 1, 1, None, None, Some(inst.into()), None).ok()?;
+            LAYER.set(h.0 as isize);
+            Some(h)
+        }
+    }
+
+    pub fn busy() -> bool {
+        T.with_borrow(|t| t.is_some())
+    }
+
+    pub fn running() -> bool {
+        T.with_borrow(|t| t.as_ref().is_some_and(|t| t.start.is_some()))
+    }
+
+    /// Liga as miniaturas (ainda invisíveis). false = sem DWM: usa a foto.
+    pub fn prepare(src: HWND) -> bool {
+        cancel();
+        let Some(layer) = layer() else { return false };
+        unsafe {
+            let mut wr = RECT::default();
+            let mut fr = RECT::default();
+            if GetWindowRect(src, &mut wr).is_err() {
+                return false;
+            }
+            if DwmGetWindowAttribute(src, DWMWA_EXTENDED_FRAME_BOUNDS, &mut fr as *mut _ as *mut _, size_of::<RECT>() as u32).is_err() {
+                fr = wr;
+            }
+            let n = if crate::animcfg::effect() == crate::animcfg::Effect::Genie { STRIPS } else { 1 };
+            let mut thumbs = Vec::with_capacity(n);
+            for _ in 0..n {
+                match DwmRegisterThumbnail(layer, src) {
+                    Ok(t) => thumbs.push(t),
+                    Err(_) => {
+                        for t in thumbs {
+                            let _ = DwmUnregisterThumbnail(t);
+                        }
+                        return false;
+                    }
+                }
+            }
+            let (vx, vy) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+            let (vw, vh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            let _ = SetWindowPos(layer, Some(HWND_TOPMOST), vx, vy, vw, vh, SWP_NOACTIVATE);
+            T.with_borrow_mut(|t| {
+                *t = Some(Thumb {
+                    src,
+                    frame: fr,
+                    inset: (fr.left - wr.left, fr.top - wr.top),
+                    thumbs,
+                    armed: false,
+                    start: None,
+                    geo: None,
+                    origin: (vx, vy),
+                })
+            });
+            true
+        }
+    }
+
+    /// Mostra a cópia exatamente por cima da janela (fica idêntica): quando ela sumir, a
+    /// cópia já está lá e não pisca.
+    pub fn arm() {
+        let armed = T.with_borrow_mut(|t| {
+            let Some(t) = t.as_mut() else { return false };
+            if t.armed {
+                return false;
+            }
+            t.armed = true;
+            let f = t.frame;
+            let (ox, oy) = t.origin;
+            let n = t.thumbs.len();
+            let h = (f.bottom - f.top) as f32;
+            for (i, &th) in t.thumbs.iter().enumerate() {
+                let (y0, y1) = ((h * i as f32 / n as f32).round() as i32, (h * (i + 1) as f32 / n as f32).round() as i32);
+                set(th, t.inset, (f.right - f.left, y0, y1), RECT { left: f.left - ox, top: f.top - oy + y0, right: f.right - ox, bottom: f.top - oy + y1 }, 255);
+            }
+            true
+        });
+        if armed && let Some(l) = layer() {
+            unsafe {
+                let _ = SetWindowPos(l, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+        }
+    }
+
+    /// Faixa `th`: pedaço da janela (largura, linhas y0..y1 do retângulo visível) em `dest`.
+    fn set(th: isize, inset: (i32, i32), src: (i32, i32, i32), dest: RECT, opacity: u8) {
+        let p = DWM_THUMBNAIL_PROPERTIES {
+            dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_VISIBLE | DWM_TNP_SOURCECLIENTAREAONLY,
+            rcDestination: dest,
+            rcSource: RECT { left: inset.0, top: inset.1 + src.1, right: inset.0 + src.0, bottom: inset.1 + src.2 },
+            opacity,
+            fVisible: (dest.right > dest.left && dest.bottom > dest.top && opacity > 0).into(),
+            fSourceClientAreaOnly: false.into(),
+        };
+        unsafe {
+            let _ = DwmUpdateThumbnailProperties(th, &p);
+        }
+    }
+
+    /// O minimizar de `src` começou: dispara o relógio. false = não era nosso.
+    pub fn start(src: HWND) -> bool {
+        if !T.with_borrow(|t| t.as_ref().is_some_and(|t| t.src == src)) {
+            return false;
+        }
+        arm();
+        let target = crate::minimize_target(src).unwrap_or_else(super::fallback_target);
+        T.with_borrow_mut(|t| {
+            let Some(t) = t.as_mut() else { return };
+            let (ox, oy) = t.origin;
+            let f = |v: i32, o: i32| (v - o) as f32;
+            let fr = t.frame;
+            t.geo = Some(Geo {
+                win: [f(fr.left, ox), f(fr.top, oy), f(fr.right, ox), f(fr.bottom, oy)],
+                icon: [f(target.left, ox), f(target.top, oy), f(target.right, ox), f(target.bottom, oy)],
+                genie: t.thumbs.len() > 1,
+            });
+            t.start = Some(Instant::now());
+        });
+        true
+    }
+
+    /// Um quadro; true = acabou (tudo desligado).
+    pub fn frame() -> bool {
+        let done = T.with_borrow_mut(|t| {
+            let Some(t) = t.as_mut() else { return true };
+            let (Some(start), Some(g)) = (t.start, t.geo) else { return true };
+            let tt = start.elapsed().as_secs_f32() / DURATION;
+            if tt >= 1.0 {
+                return true;
+            }
+            let fr = t.frame;
+            let (fw, fh) = (fr.right - fr.left, (fr.bottom - fr.top) as f32);
+            let [wl, wt, wr, wb] = g.win;
+            let [il, it, ir, ib] = g.icon;
+            let n = t.thumbs.len();
+            if n == 1 {
+                // Escala: encolhe até um pouco menor que o ícone e some na segunda metade.
+                let s = 0.7 * ((ir - il) / (wr - wl)).min((ib - it) / (wb - wt));
+                let (cx, cy) = ((il + ir) / 2.0, (it + ib) / 2.0);
+                let (hw, hh) = ((wr - wl) * s / 2.0, (wb - wt) * s / 2.0);
+                let e = 1.0 - (1.0 - tt).powi(3);
+                let r = RECT {
+                    left: lerp(wl, cx - hw, e).round() as i32,
+                    top: lerp(wt, cy - hh, e).round() as i32,
+                    right: lerp(wr, cx + hw, e).round() as i32,
+                    bottom: lerp(wb, cy + hh, e).round() as i32,
+                };
+                let a = 1.0 - smooth((tt - 0.4) / 0.6);
+                set(t.thumbs[0], t.inset, (fw, 0, fh as i32), r, (a * 255.0) as u8);
+                return false;
+            }
+            // Gênio: a imagem desce pelo funil; cada faixa pega a largura do funil na altura dela.
+            let b = smooth((tt - 0.2) / 0.8);
+            let (top, bot) = (lerp(wt, it, b), lerp(wb, ib, b));
+            for (i, &th) in t.thumbs.iter().enumerate() {
+                let (v0, v1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+                let (y0, y1) = (top + v0 * (bot - top), top + v1 * (bot - top));
+                let (sy0, sy1) = ((fh * v0).round() as i32, (fh * v1).round() as i32);
+                match g.row(tt, (y0 + y1) / 2.0) {
+                    Some((_, l, r, a)) => {
+                        let dest = RECT { left: l.round() as i32, top: y0.floor() as i32, right: r.round() as i32, bottom: y1.ceil() as i32 };
+                        set(th, t.inset, (fw, sy0, sy1), dest, (a.clamp(0.0, 1.0) * 255.0) as u8);
+                    }
+                    None => set(th, t.inset, (fw, sy0, sy1), RECT::default(), 0),
+                }
+            }
+            false
+        });
+        if done {
+            cancel();
+        }
+        done
+    }
+
+    /// Desliga tudo (fim, ou o minimizar não veio).
+    pub fn cancel() {
+        let had = T.with_borrow_mut(|t| t.take());
+        if let Some(t) = had {
+            for th in t.thumbs {
+                unsafe {
+                    let _ = DwmUnregisterThumbnail(th);
+                }
+            }
+            if let Some(l) = layer() {
+                unsafe {
+                    let _ = ShowWindow(l, SW_HIDE);
+                }
+            }
+        }
     }
 }

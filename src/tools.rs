@@ -33,6 +33,13 @@ pub const CLIP: &str = "::tool-clip";
 pub const PICKER: &str = "::tool-picker";
 pub const TIMER: &str = "::tool-timer";
 pub const MUSIC: &str = "::tool-music";
+/// Duas ou mais ferramentas juntas num lugar só do dock.
+pub const GRID: &str = "::tool-grid";
+
+/// Ferramentas da grade, na ordem das células (cima-esquerda, cima-direita, baixo...).
+pub fn grid_tools() -> Vec<&'static str> {
+    enabled()
+}
 
 /// Ferramentas na ordem do dock, com a chave que as liga.
 const ALL: [(&str, &str); 5] =
@@ -44,7 +51,7 @@ pub fn enabled() -> Vec<&'static str> {
     ALL.iter()
         .filter(|(_, k)| extras::on(k))
         .map(|(s, _)| *s)
-        .filter(|s| *s != MUSIC && (*s != SHELF || !shelf().is_empty()))
+        .filter(|s| *s != MUSIC && (*s != SHELF || (!shelf().is_empty() && !crate::droptarget::dragging())))
         .collect()
 }
 
@@ -56,6 +63,7 @@ pub fn name(source: &str) -> String {
     let n = match source {
         SHELF => "Prateleira",
         CLIP => "Área de transferência",
+        GRID => "Ferramentas",
         PICKER => "Coletor de cores",
         TIMER => return timer_name(),
         MUSIC => {
@@ -134,6 +142,40 @@ fn glyph_icon_ex(glyph: u16, caption: Option<&str>, px: i32, strong: bool, faded
     to_pixmap(bytes, px)
 }
 
+/// Duas ferramentas uma sobre a outra, ou três/quatro em grade 2×2, num lugar só.
+fn grid_icon(px: i32) -> Option<Pixmap> {
+    let list = grid_tools();
+    let light = light();
+    let buf = Buffer::new(px, px)?;
+    let bytes = unsafe { std::slice::from_raw_parts_mut(buf.bits, (px * px * 4) as usize) };
+    bytes.fill(0);
+    let f = px as f32;
+    let text = Text::new(f / 95.0).ok()?;
+    let base = if light { [0.12, 0.13, 0.16] } else { [1.0, 1.0, 1.0] };
+    let ops: Vec<TextOp> = list
+        .iter()
+        .enumerate()
+        .map(|(k, t)| {
+            let (glyph, a, strong) = match *t {
+                SHELF => (0xE7B8, 0.72, false),
+                CLIP => (0xE77F, if crate::clipboard::paused() { 0.35 } else { 0.72 }, false),
+                PICKER => (0xE790, 0.72, false),
+                TIMER => (0xE916, 0.8, timer_left().0.is_some() || timer_left().1),
+                _ => (0xE8D6, 0.72, false),
+            };
+            let color = if strong { [0.38, 0.65, 0.98, 0.95] } else { [base[0], base[1], base[2], a] };
+            let rect = if list.len() <= 2 {
+                [0.0, k as f32 * f / 2.0, f, f / 2.0]
+            } else {
+                [(k % 2) as f32 * f / 2.0, (k / 2) as f32 * f / 2.0, f / 2.0, f / 2.0]
+            };
+            TextOp { text: vec![glyph], font: Font::IconLarge, rect, align: DWRITE_TEXT_ALIGNMENT_CENTER, color, wrap: false, clip: None }
+        })
+        .collect();
+    text.draw(buf.memdc, px, px, &ops);
+    to_pixmap(bytes, px)
+}
+
 /// BGRA pré-multiplicado (DIB) → Pixmap (RGBA pré-multiplicado).
 fn to_pixmap(bgra: &[u8], px: i32) -> Option<Pixmap> {
     let mut pm = Pixmap::new(px as u32, px as u32)?;
@@ -184,6 +226,7 @@ pub fn icon(source: &str, px: i32) -> Option<Pixmap> {
             glyph_icon(0xE916, if done { Some("0") } else { cap.as_deref() }, px, done)
         }
         MUSIC => cover_icon(px).or_else(|| glyph_icon(0xE8D6, None, px, false)),
+        GRID => grid_icon(px),
         _ => None,
     }
 }

@@ -913,7 +913,8 @@ pub fn activate(source: &str, windows: &[HWND]) {
         if windows.is_empty() {
             // App da Store fixado pelo .exe: abre pelo AppUserModelID, como a barra do Windows.
             let target = store_app_id(source).unwrap_or_else(|| source.to_string());
-            ShellExecuteW(None, w!("open"), &HSTRING::from(target), None, None, SW_SHOWNORMAL);
+            let r = ShellExecuteW(None, w!("open"), &HSTRING::from(target.as_str()), None, None, SW_SHOWNORMAL);
+            crate::config::debug_log(&format!("abrir: {source} -> {target} = {}", r.0 as isize));
             return;
         }
         let fg = GetForegroundWindow();
