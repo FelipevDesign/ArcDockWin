@@ -85,8 +85,10 @@ Módulos novos (Configurações › Barra do topo, cada um com o seu interruptor
 - **Ferramentas**: histórico da área de transferência, coletor de cores e timer de foco
   (com os minutos que faltam), as que estiverem ligadas em Ferramentas.
 - **Captura de tela**: área, janela, tela inteira e gravação, pela Ferramenta de Captura.
-- **Clima** (Open-Meteo, sem conta): local pela internet ou pela cidade digitada no painel;
-  atualiza a cada 30 min.
+- **Clima** (Open-Meteo, sem conta): agora, sensação, umidade, vento, chance de chuva, UV,
+  nascer/pôr do sol, as próximas 6 horas e 7 dias. A última leitura e o lugar ficam
+  guardados, então a barra já abre com o clima; atualiza a cada 30 min, ao voltar da
+  suspensão e ao abrir o painel (se passou de 10 min). Busca de cidade com lista para escolher.
 - **Próximo compromisso**: cole o endereço secreto iCal da agenda no painel; atualiza a cada
   15 min e avisa (bipe + painel aberto) N minutos antes.
 - **Bateria**: % e, na opção, o tempo restante; o clique mostra o modo de energia.

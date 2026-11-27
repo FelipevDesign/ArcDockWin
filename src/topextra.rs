@@ -1067,22 +1067,65 @@ pub fn focus_timer(running: bool) {
 
 // ---------------------------------------------------------------------------------------------
 // Clima (Open-Meteo, sem conta)
+//
+// Rápido: a última leitura fica num arquivo e aparece na hora ao abrir o dock; o lugar
+// achado pela internet também fica guardado (um dia), então cada atualização é um pedido só.
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Weather {
     pub temp: f64,
+    pub feels: f64,
+    pub humidity: f64,
+    pub wind: f64,
+    pub wind_dir: f64,
     pub code: u32,
     pub day: bool,
     pub place: String,
-    /// Próximos dias: (dia desde 1970, código, máxima, mínima).
-    pub days: Vec<(i64, u32, f64, f64)>,
+    pub lat: String,
+    pub lon: String,
+    /// Fahrenheit (e vento em mph).
+    pub imperial: bool,
+    /// Segundos desde 1970 (UTC) da leitura.
+    pub at: u64,
+    /// Próximas horas: (hora 0..23, código, temperatura, chance de chuva %, de dia).
+    pub hours: Vec<(u32, u32, f64, f64, bool)>,
+    /// Próximos dias: (dia desde 1970, código, máxima, mínima, chance de chuva %).
+    pub days: Vec<(i64, u32, f64, f64, f64)>,
+    /// Hoje: nascer e pôr do sol (minutos do dia) e índice UV máximo.
+    pub sunrise: Option<i64>,
+    pub sunset: Option<i64>,
+    pub uv: Option<f64>,
 }
 
 static WEATHER: Mutex<Option<Weather>> = Mutex::new(None);
 static WEATHER_BUSY: Mutex<bool> = Mutex::new(false);
+/// Cidades achadas na busca do painel: (nome mostrado, lat, lon, nome curto).
+static CITY_RESULTS: Mutex<Vec<(String, String, String, String)>> = Mutex::new(Vec::new());
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn weather_file() -> std::path::PathBuf {
+    crate::apps::config_path().with_file_name("weather.cache")
+}
+
+/// Clima atual; na primeira vez lê o do arquivo (a barra já começa com ele).
 pub fn weather() -> Option<Weather> {
-    WEATHER.lock().ok()?.clone()
+    let mut slot = WEATHER.lock().ok()?;
+    if slot.is_none() {
+        *slot = load_cache();
+    }
+    slot.clone()
+}
+
+/// Busca de novo se a leitura tem mais de `min` minutos (ou se não há nenhuma).
+pub fn refresh_weather_if_older(min: u64) {
+    let imperial = extras::choice("bar_temp_unit") == 1;
+    let stale = weather().is_none_or(|w| w.imperial != imperial || unix_now().saturating_sub(w.at) / 60 >= min);
+    if stale {
+        refresh_weather();
+    }
 }
 
 /// Símbolo e nome do tempo pelo código WMO.
@@ -1090,13 +1133,18 @@ pub fn weather_text(code: u32, day: bool) -> (&'static str, &'static str) {
     match code {
         0 if day => ("☀", "Céu limpo"),
         0 => ("☾", "Céu limpo"),
-        1 | 2 => ("⛅", "Poucas nuvens"),
+        1 if day => ("🌤", "Poucas nuvens"),
+        1 | 2 => ("⛅", "Parcialmente nublado"),
         3 => ("☁", "Nublado"),
-        45 | 48 => ("≋", "Neblina"),
-        51..=57 => ("☂", "Garoa"),
-        61..=67 | 80..=82 => ("☂", "Chuva"),
+        45 | 48 => ("🌫", "Neblina"),
+        51..=55 => ("🌦", "Garoa"),
+        56 | 57 | 66 | 67 => ("🌧", "Chuva congelante"),
+        61 | 80 => ("🌦", "Chuva fraca"),
+        63 | 81 => ("🌧", "Chuva"),
+        65 | 82 => ("🌧", "Chuva forte"),
         71..=77 | 85 | 86 => ("❄", "Neve"),
-        95..=99 => ("⚡", "Tempestade"),
+        95 => ("⛈", "Tempestade"),
+        96..=99 => ("⛈", "Tempestade com granizo"),
         _ => ("☁", "—"),
     }
 }
@@ -1119,6 +1167,14 @@ fn json_array(s: &str, key: &str) -> Vec<String> {
     rest[..end].split(',').map(|v| v.trim().trim_matches('"').to_string()).collect()
 }
 
+/// Seção `"nome":{...}` do JSON (até a chave que fecha).
+fn json_section<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let start = s.find(&format!("\"{name}\":{{"))?;
+    let rest = &s[start..];
+    let end = rest.find('}')?;
+    Some(&rest[..=end])
+}
+
 fn get_json(host: &str, path: &str) -> Option<String> {
     let (status, body) = crate::usage::http_get(PCWSTR(wide(host).as_ptr()), PCWSTR(wide(path).as_ptr()), "")?;
     (status == 200).then(|| String::from_utf8_lossy(&body).into_owned())
@@ -1130,38 +1186,153 @@ fn url_encode(s: &str) -> String {
         .collect()
 }
 
-/// Lugar do clima: (latitude, longitude, nome). Sem lugar escolhido, pelo IP.
-fn weather_place() -> Option<(String, String, String)> {
-    if let Some(v) = config::raw("weather_place") {
-        let mut p = v.splitn(3, ';');
-        if let (Some(a), Some(b), Some(c)) = (p.next(), p.next(), p.next()) {
-            return Some((a.into(), b.into(), c.into()));
-        }
-    }
-    let j = get_json("ipwho.is", "/?fields=latitude,longitude,city")?;
-    Some((json_value(&j, "latitude")?.into(), json_value(&j, "longitude")?.into(), json_value(&j, "city").unwrap_or("").into()))
+/// "2026-11-27T15:00" → (dia desde 1970, minutos do dia).
+fn iso_local(t: &str) -> Option<(i64, i64)> {
+    let (y, m, d) = (t.get(0..4)?.parse().ok()?, t.get(5..7)?.parse().ok()?, t.get(8..10)?.parse().ok()?);
+    let mins = match (t.get(11..13), t.get(14..16)) {
+        (Some(h), Some(mi)) => h.parse::<i64>().ok()? * 60 + mi.parse::<i64>().ok()?,
+        _ => 0,
+    };
+    Some((days_from_civil(y, m, d), mins))
 }
 
-/// Procura a cidade e guarda como lugar do clima (vazio = volta a usar o IP).
-pub fn set_weather_city(name: &str) {
+/// Lugar do clima: (latitude, longitude, nome). Escolhido no painel ou, sem isso, o achado
+/// pelo IP (guardado por um dia para não perguntar a cada atualização).
+fn weather_place() -> Option<(String, String, String)> {
+    let split = |v: String| {
+        let mut p = v.splitn(4, ';').map(String::from);
+        Some((p.next()?, p.next()?, p.next()?, p.next()))
+    };
+    if let Some((a, b, c, _)) = config::raw("weather_place").filter(|v| !v.is_empty()).and_then(split) {
+        return Some((a, b, c));
+    }
+    if let Some((a, b, c, Some(t))) = config::raw("weather_ip_place").and_then(split)
+        && t.parse::<u64>().is_ok_and(|t| unix_now().saturating_sub(t) < 86_400)
+    {
+        return Some((a, b, c));
+    }
+    let j = get_json("ipwho.is", "/?fields=latitude,longitude,city")?;
+    let (lat, lon) = (json_value(&j, "latitude")?.to_string(), json_value(&j, "longitude")?.to_string());
+    let city = json_value(&j, "city").unwrap_or("").to_string();
+    config::set_raw("weather_ip_place", format!("{lat};{lon};{city};{}", unix_now()));
+    Some((lat, lon, city))
+}
+
+/// Procura cidades com esse nome; o painel mostra a lista para escolher.
+pub fn search_city(name: &str) {
     let name = name.trim().to_string();
+    if name.is_empty() {
+        return;
+    }
     std::thread::spawn(move || {
-        if name.is_empty() {
-            config::set_raw("weather_place", String::new());
-        } else {
-            let path = format!("/v1/search?count=1&language=pt&name={}", url_encode(&name));
-            let Some(j) = get_json("geocoding-api.open-meteo.com", &path) else { return };
-            let (Some(lat), Some(lon)) = (json_value(&j, "latitude"), json_value(&j, "longitude")) else { return };
-            let city = json_value(&j, "name").unwrap_or(&name).to_string();
-            config::set_raw("weather_place", format!("{lat};{lon};{city}"));
+        let path = format!("/v1/search?count=6&language=pt&name={}", url_encode(&name));
+        let mut found = Vec::new();
+        if let Some(j) = get_json("geocoding-api.open-meteo.com", &path) {
+            // Cada resultado é um objeto com "id"; separa por ele.
+            for part in j.split("{\"id\":").skip(1) {
+                let (Some(lat), Some(lon), Some(city)) =
+                    (json_value(part, "latitude"), json_value(part, "longitude"), json_value(part, "name"))
+                else {
+                    continue;
+                };
+                let extra: Vec<&str> = ["admin1", "country"].iter().filter_map(|k| json_value(part, k)).collect();
+                let shown = if extra.is_empty() { city.to_string() } else { format!("{city}, {}", extra.join(", ")) };
+                found.push((shown, lat.to_string(), lon.to_string(), city.to_string()));
+            }
         }
-        fetch_weather_now();
+        if found.is_empty() {
+            found.push((String::new(), String::new(), String::new(), String::new()));
+        }
+        if let Ok(mut r) = CITY_RESULTS.lock() {
+            *r = found;
+        }
+        post_bar(1);
     });
+}
+
+/// Usa a cidade (ou, com `None`, volta à localização pela internet) e busca o clima.
+pub fn set_weather_place(place: Option<(String, String, String)>) {
+    let v = place.map(|(lat, lon, name)| format!("{lat};{lon};{name}")).unwrap_or_default();
+    config::set_raw("weather_place", v);
+    if let Ok(mut r) = CITY_RESULTS.lock() {
+        r.clear();
+    }
+    refresh_weather();
 }
 
 /// Busca o clima numa thread (uma de cada vez).
 pub fn refresh_weather() {
     std::thread::spawn(fetch_weather_now);
+}
+
+fn parse_weather(j: &str, place: (String, String, String), imperial: bool, at: u64) -> Option<Weather> {
+    let cur = json_section(j, "current")?;
+    let num = |s: &str, k: &str| json_value(s, k).and_then(|v| v.parse::<f64>().ok());
+    let mut w = Weather {
+        temp: num(cur, "temperature_2m")?,
+        feels: num(cur, "apparent_temperature").unwrap_or(f64::NAN),
+        humidity: num(cur, "relative_humidity_2m").unwrap_or(f64::NAN),
+        wind: num(cur, "wind_speed_10m").unwrap_or(f64::NAN),
+        wind_dir: num(cur, "wind_direction_10m").unwrap_or(f64::NAN),
+        code: num(cur, "weather_code")? as u32,
+        day: num(cur, "is_day").unwrap_or(1.0) > 0.0,
+        lat: place.0,
+        lon: place.1,
+        place: place.2,
+        imperial,
+        at,
+        ..Default::default()
+    };
+    if let Some(h) = json_section(j, "hourly") {
+        let (times, codes, temps, probs, days) = (
+            json_array(h, "time"),
+            json_array(h, "weather_code"),
+            json_array(h, "temperature_2m"),
+            json_array(h, "precipitation_probability"),
+            json_array(h, "is_day"),
+        );
+        w.hours = (0..times.len())
+            .filter_map(|i| {
+                let (_, m) = iso_local(&times[i])?;
+                let prob = probs.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                Some(((m / 60) as u32, codes.get(i)?.parse().ok()?, temps.get(i)?.parse().ok()?, prob, days.get(i).is_none_or(|d| d != "0")))
+            })
+            .collect();
+    }
+    if let Some(d) = json_section(j, "daily") {
+        let (dates, codes, maxs, mins, probs) = (
+            json_array(d, "time"),
+            json_array(d, "weather_code"),
+            json_array(d, "temperature_2m_max"),
+            json_array(d, "temperature_2m_min"),
+            json_array(d, "precipitation_probability_max"),
+        );
+        w.days = (0..dates.len())
+            .filter_map(|i| {
+                let (day, _) = iso_local(&dates[i])?;
+                let prob = probs.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                Some((day, codes.get(i)?.parse().ok()?, maxs.get(i)?.parse().ok()?, mins.get(i)?.parse().ok()?, prob))
+            })
+            .collect();
+        w.sunrise = json_array(d, "sunrise").first().and_then(|t| iso_local(t)).map(|t| t.1);
+        w.sunset = json_array(d, "sunset").first().and_then(|t| iso_local(t)).map(|t| t.1);
+        w.uv = json_array(d, "uv_index_max").first().and_then(|v| v.parse().ok());
+    }
+    Some(w)
+}
+
+/// Arquivo: hora da leitura, unidade, lat;lon;lugar e o JSON da Open-Meteo (uma linha).
+fn load_cache() -> Option<Weather> {
+    let text = std::fs::read_to_string(weather_file()).ok()?;
+    let mut lines = text.lines();
+    let at: u64 = lines.next()?.parse().ok()?;
+    let imperial = lines.next()? == "1";
+    if imperial != (extras::choice("bar_temp_unit") == 1) {
+        return None;
+    }
+    let mut p = lines.next()?.splitn(3, ';').map(String::from);
+    let place = (p.next()?, p.next()?, p.next().unwrap_or_default());
+    parse_weather(lines.next()?, place, imperial, at)
 }
 
 fn fetch_weather_now() {
@@ -1174,27 +1345,21 @@ fn fetch_weather_now() {
     }
     let w = (|| {
         let (lat, lon, place) = weather_place()?;
-        let unit = if extras::choice("bar_temp_unit") == 1 { "&temperature_unit=fahrenheit" } else { "" };
+        let imperial = extras::choice("bar_temp_unit") == 1;
+        let unit = if imperial { "&temperature_unit=fahrenheit&wind_speed_unit=mph" } else { "" };
         let path = format!(
-            "/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code,is_day\
-             &daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5{unit}"
+            "/v1/forecast?latitude={lat}&longitude={lon}\
+             &current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m\
+             &hourly=temperature_2m,weather_code,precipitation_probability,is_day&forecast_hours=12\
+             &daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max\
+             &timezone=auto&forecast_days=7{unit}"
         );
         let j = get_json("api.open-meteo.com", &path)?;
-        let cur = &j[j.find("\"current\":{")?..];
-        let num = |k: &str| json_value(cur, k).and_then(|v| v.parse::<f64>().ok());
-        let daily = &j[j.find("\"daily\":{")?..];
-        let dates = json_array(daily, "time");
-        let codes = json_array(daily, "weather_code");
-        let maxs = json_array(daily, "temperature_2m_max");
-        let mins = json_array(daily, "temperature_2m_min");
-        let days = (0..dates.len())
-            .filter_map(|i| {
-                let d = &dates[i];
-                let (y, m, dd) = (d.get(0..4)?.parse().ok()?, d.get(5..7)?.parse().ok()?, d.get(8..10)?.parse().ok()?);
-                Some((days_from_civil(y, m, dd), codes.get(i)?.parse().ok()?, maxs.get(i)?.parse().ok()?, mins.get(i)?.parse().ok()?))
-            })
-            .collect();
-        Some(Weather { temp: num("temperature_2m")?, code: num("weather_code")? as u32, day: num("is_day").unwrap_or(1.0) > 0.0, place, days })
+        let at = unix_now();
+        let w = parse_weather(&j, (lat.clone(), lon.clone(), place.clone()), imperial, at)?;
+        let line = j.replace(['\r', '\n'], "");
+        let _ = std::fs::write(weather_file(), format!("{at}\n{}\n{lat};{lon};{place}\n{line}\n", imperial as u8));
+        Some(w)
     })();
     if let Some(w) = w
         && let Ok(mut slot) = WEATHER.lock()
@@ -1207,57 +1372,176 @@ fn fetch_weather_now() {
     post_bar(1);
 }
 
+/// Direção do vento em pontos cardeais (de onde ele vem).
+fn compass(deg: f64) -> &'static str {
+    const P: [&str; 8] = ["N", "NE", "L", "SE", "S", "SO", "O", "NO"];
+    P[((deg.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]
+}
+
 const W_CITY: u32 = 1;
 const W_HERE: u32 = 2;
 const W_REFRESH: u32 = 3;
+const W_FULL: u32 = 4;
+const W_PICK: u32 = 100;
 
 pub struct WeatherPanel;
 
+impl WeatherPanel {
+    /// Abre com o que já tem e atualiza por trás se a leitura passou de 10 min.
+    pub fn new() -> Self {
+        refresh_weather_if_older(10);
+        Self
+    }
+}
+
 impl PanelContent for WeatherPanel {
     fn width(&self) -> f32 {
-        280.0
+        320.0
     }
     fn build(&mut self) -> Vec<Widget> {
+        use crate::panel::{Cell, CellStyle};
         let mut out = Vec::new();
+        let results = CITY_RESULTS.lock().map(|r| r.clone()).unwrap_or_default();
+        if !results.is_empty() {
+            out.push(Widget::Heading { text: tr("Escolha a cidade"), buttons: vec![(glyph::CHEVRON_LEFT, W_PICK - 1)] });
+            if results[0].1.is_empty() {
+                out.push(Widget::Text(tr("Nenhuma cidade encontrada")));
+            } else {
+                for (i, r) in results.iter().enumerate() {
+                    out.push(Widget::Row { id: W_PICK + i as u32, glyph: Some(0xE707), text: r.0.clone(), sub: None, selected: false });
+                }
+            }
+            return out;
+        }
         match weather() {
             Some(w) => {
                 let (sym, name) = weather_text(w.code, w.day);
-                out.push(Widget::Title(format!("{sym}  {:.0}°", w.temp)));
-                out.push(Widget::Text(if w.place.is_empty() { tr(name) } else { format!("{} · {}", w.place, tr(name)) }));
-                out.push(Widget::Separator);
                 let today = now_minutes().div_euclid(1440);
-                for (day, code, max, min) in w.days.iter().filter(|d| d.0 >= today).take(5) {
+                let td = w.days.iter().find(|d| d.0 == today);
+                out.push(Widget::Title(format!("{sym}  {:.0}°", w.temp)));
+                let mut line = tr(name);
+                if let Some(d) = td {
+                    line = format!("{line} · {} {:.0}° {} {:.0}°", tr("máx."), d.2, tr("mín."), d.3);
+                }
+                out.push(Widget::Text(line));
+                if !w.place.is_empty() {
+                    out.push(Widget::Label(w.place.clone()));
+                }
+                // Próximas horas: hora, símbolo e temperatura (chance de chuva se for alta).
+                let hours: Vec<_> = w.hours.iter().take(6).collect();
+                if !hours.is_empty() {
+                    let cell = |t: String, style| Cell { text: t, style, id: None };
+                    let mut cells: Vec<Cell> = Vec::new();
+                    for (i, (h, ..)) in hours.iter().enumerate() {
+                        cells.push(cell(if i == 0 { tr("Agora") } else { format!("{h}h") }, CellStyle::Header));
+                    }
+                    for (_, code, _, _, day) in &hours {
+                        cells.push(cell(weather_text(*code, *day).0.into(), CellStyle::Normal));
+                    }
+                    for (_, _, t, ..) in &hours {
+                        cells.push(cell(format!("{t:.0}°"), CellStyle::Normal));
+                    }
+                    // Chance de chuva só quando alguma hora passa de 30%.
+                    if hours.iter().any(|h| h.3 >= 30.0) {
+                        for (_, _, _, prob, _) in &hours {
+                            let t = if *prob >= 10.0 { format!("{prob:.0}%") } else { String::new() };
+                            cells.push(cell(t, CellStyle::Dim));
+                        }
+                    }
+                    out.push(Widget::Separator);
+                    out.push(Widget::Grid { cols: hours.len(), cells });
+                }
+                // Detalhes em duas fileiras de três.
+                let speed = if w.imperial { "mph" } else { "km/h" };
+                let na = |v: f64, f: &dyn Fn(f64) -> String| if v.is_nan() { "—".to_string() } else { f(v) };
+                let rain = td.map(|d| format!("{:.0}%", d.4)).unwrap_or_else(|| "—".into());
+                let uv = w.uv.map(|u| format!("{u:.0}")).unwrap_or_else(|| "—".into());
+                let sun = match (w.sunrise, w.sunset) {
+                    (Some(r), Some(s)) => {
+                        let now = now_minutes().rem_euclid(1440);
+                        if now < r || now > s { (tr("Nascer do sol"), hhmm(r)) } else { (tr("Pôr do sol"), hhmm(s)) }
+                    }
+                    _ => (tr("Pôr do sol"), "—".into()),
+                };
+                let mut cells = Vec::new();
+                for label in [tr("Sensação"), tr("Umidade"), tr("Vento")] {
+                    cells.push(Cell { text: label, style: CellStyle::Header, id: None });
+                }
+                let first = [
+                    na(w.feels, &|v| format!("{v:.0}°")),
+                    na(w.humidity, &|v| format!("{v:.0}%")),
+                    na(w.wind, &|v| format!("{v:.0} {speed} {}", if w.wind_dir.is_nan() { "" } else { compass(w.wind_dir) })),
+                ];
+                cells.extend(first.into_iter().map(|t| Cell { text: t.trim().to_string(), style: CellStyle::Normal, id: None }));
+                for label in [tr("Chuva hoje"), tr("Índice UV"), sun.0.clone()] {
+                    cells.push(Cell { text: label, style: CellStyle::Header, id: None });
+                }
+                for t in [rain, uv, sun.1] {
+                    cells.push(Cell { text: t, style: CellStyle::Normal, id: None });
+                }
+                out.push(Widget::Separator);
+                out.push(Widget::Grid { cols: 3, cells });
+                // Próximos dias.
+                out.push(Widget::Separator);
+                let lo = w.days.iter().map(|d| d.3).fold(f64::INFINITY, f64::min);
+                let hi = w.days.iter().map(|d| d.2).fold(f64::NEG_INFINITY, f64::max);
+                for (day, code, max, min, prob) in w.days.iter().filter(|d| d.0 >= today).take(7) {
                     let label = if *day == today { tr("Hoje") } else { tr(SHORT_DAYS[weekday_of(*day)]) };
+                    let rain = if *prob >= 30.0 { format!(" {prob:.0}%") } else { String::new() };
                     out.push(Widget::Bar {
-                        label: format!("{label}  {}", weather_text(*code, true).0),
+                        label: format!("{label}  {}{rain}", weather_text(*code, true).0),
                         value: format!("{max:.0}° / {min:.0}°"),
-                        frac: ((max - min) / 20.0).clamp(0.1, 1.0) as f32,
+                        frac: if hi > lo { ((max - lo) / (hi - lo)).clamp(0.08, 1.0) as f32 } else { 0.5 },
                         strong: *day == today,
                     });
                 }
+                let age = unix_now().saturating_sub(w.at) / 60;
+                let when = if age < 1 { tr("Atualizado agora") } else { format!("{} {age} min", tr("Atualizado há")) };
+                out.push(Widget::Label(format!("{when} · Open-Meteo")));
             }
             None => out.push(Widget::Text(tr("Buscando o clima…"))),
         }
         out.push(Widget::Separator);
-        out.push(Widget::Field { id: W_CITY, placeholder: tr("Outra cidade (Enter para usar)"), password: false });
+        out.push(Widget::Field { id: W_CITY, placeholder: tr("Buscar outra cidade (Enter)"), password: false });
         if config::raw("weather_place").is_some_and(|v| !v.is_empty()) {
             out.push(Widget::Row { id: W_HERE, glyph: Some(0xE81D), text: tr("Usar a minha localização"), sub: None, selected: false });
         }
         out.push(Widget::Row { id: W_REFRESH, glyph: Some(glyph::REFRESH), text: tr("Atualizar"), sub: None, selected: false });
+        out.push(Widget::Row { id: W_FULL, glyph: Some(0xE774), text: tr("Previsão completa no navegador"), sub: None, selected: false });
         out
     }
     fn event(&mut self, ev: Event) -> bool {
         match ev {
             Event::Submit(W_CITY, text) if !text.trim().is_empty() => {
-                set_weather_city(text);
+                search_city(text);
                 false
             }
+            Event::Click(id) if id == W_PICK - 1 => {
+                if let Ok(mut r) = CITY_RESULTS.lock() {
+                    r.clear();
+                }
+                true
+            }
+            Event::Click(id) if id >= W_PICK => {
+                let pick = CITY_RESULTS.lock().ok().and_then(|r| r.get((id - W_PICK) as usize).cloned());
+                if let Some((_, lat, lon, name)) = pick.filter(|p| !p.1.is_empty()) {
+                    set_weather_place(Some((lat, lon, name)));
+                }
+                true
+            }
             Event::Click(W_HERE) => {
-                set_weather_city("");
-                false
+                set_weather_place(None);
+                true
             }
             Event::Click(W_REFRESH) => {
                 refresh_weather();
+                false
+            }
+            Event::Click(W_FULL) => {
+                if let Some(w) = weather() {
+                    panel::close();
+                    open(&format!("https://www.windy.com/{}/{}?{},{},9", w.lat, w.lon, w.lat, w.lon));
+                }
                 false
             }
             _ => false,

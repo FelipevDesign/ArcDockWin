@@ -1205,7 +1205,7 @@ fn panel_for(kind: Kind) -> Option<(&'static str, fn() -> Box<dyn PanelContent>)
         Kind::App => ("appmenu", || Box::new(crate::topextra::AppMenu::new())),
         Kind::Space => ("desktops", || Box::new(crate::topextra::DesktopPanel)),
         Kind::Shot => ("shot", || Box::new(crate::topextra::ShotPanel)),
-        Kind::Weather => ("weather", || Box::new(crate::topextra::WeatherPanel)),
+        Kind::Weather => ("weather", || Box::new(crate::topextra::WeatherPanel::new())),
         Kind::Event => ("agenda", || Box::new(crate::topextra::AgendaPanel::new())),
         Kind::Battery => ("battery", || Box::new(crate::topextra::BatteryPanel)),
         Kind::Tray(_) | Kind::Desktop | Kind::Keyboard | Kind::Tool(_) | Kind::Notify => return None,
@@ -1328,8 +1328,14 @@ fn slow_tick() {
     if config::module_on(Module::Notify) {
         crate::topextra::refresh_notify();
     }
-    if config::module_on(Module::Weather) && (n % 60 == 0 || crate::topextra::weather().is_none() && n % 4 == 0) {
-        crate::topextra::refresh_weather();
+    // Clima: na hora ao abrir (se o guardado passou de 10 min), depois a cada 30 min; sem
+    // leitura (internet fora), tenta de novo a cada 2 min.
+    if config::module_on(Module::Weather) {
+        if n == 0 {
+            crate::topextra::refresh_weather_if_older(10);
+        } else if n % 60 == 0 || crate::topextra::weather().is_none() && n % 4 == 0 {
+            crate::topextra::refresh_weather();
+        }
     }
     if config::module_on(Module::Event) && n % 30 == 0 {
         crate::topextra::refresh_events();
@@ -1755,8 +1761,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_POWERBROADCAST if main => {
-                // Volta da suspensão ou mudança na energia: relógio e bateria na hora.
+                // Volta da suspensão ou mudança na energia: relógio e bateria na hora; o
+                // clima, se ficou velho.
                 update_clock();
+                if config::module_on(Module::Weather) {
+                    crate::topextra::refresh_weather_if_older(15);
+                }
                 panel::notify(crate::control::TICK, 0);
                 LRESULT(1)
             }
