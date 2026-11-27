@@ -285,7 +285,7 @@ fn draw(hwnd: HWND, m: &crate::media::Media, w: i32, h: i32, k: f32, pos: POINT)
     bytes.fill(0);
     let (fw, fh) = (w as f32, h as f32);
     let pad = (10.0 * k).round();
-    let radius = 18.0 * k;
+    let radius = crate::config::dock_radius() * k;
     let cover = fh - 2.0 * pad;
     let x0 = pad + cover + 12.0 * k;
     let bw = 30.0 * k;
@@ -295,7 +295,8 @@ fn draw(hwnd: HWND, m: &crate::media::Media, w: i32, h: i32, k: f32, pos: POINT)
     {
         let Some(mut pm) = PixmapMut::from_bytes(bytes, w as u32, h as u32) else { return };
         let id = Transform::identity();
-        let (tint, line) = if light { ([246, 246, 248, 150], [255, 255, 255, 200]) } else { ([24, 24, 28, 120], [255, 255, 255, 38]) };
+        // Mesma tinta e borda do fundo do dock (opacidade e estilo das Configurações).
+        let (tint, line) = crate::render::Theme::new(light, None).background();
         if let Some(p) = rounded_rect(0.5, 0.5, fw - 1.0, fh - 1.0, radius) {
             pm.fill_path(&p, &panel::paint(tint), FillRule::Winding, id, None);
             pm.stroke_path(&p, &panel::paint(line), &Stroke { width: 1.0, ..Default::default() }, id, None);

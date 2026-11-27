@@ -97,6 +97,13 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Tinta e borda do fundo do dock (o quadro da música usa as mesmas).
+    pub fn background(&self) -> ([u8; 4], [u8; 4]) {
+        (self.tint, self.border)
+    }
+}
+
 pub struct Slot {
     pub x: f32,
     pub size: f32,
