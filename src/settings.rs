@@ -60,6 +60,7 @@ enum Opt {
     Radius,
     Opacity,
     Padding,
+    SidePadding,
     Gap,
     Margin,
     Magnify,
@@ -170,6 +171,7 @@ fn px_slider(o: Opt) -> Option<(f32, f32, fn() -> f32, fn(f32))> {
         Opt::Radius => (0.0, 40.0, config::dock_radius, config::set_dock_radius),
         Opt::Opacity => (0.0, 100.0, config::dock_opacity, config::set_dock_opacity),
         Opt::Padding => (2.0, 24.0, config::dock_padding, config::set_dock_padding),
+        Opt::SidePadding => (0.0, 32.0, config::dock_side_padding, config::set_dock_side_padding),
         Opt::Gap => (0.0, 24.0, config::icon_gap, config::set_icon_gap),
         Opt::Margin => (0.0, 32.0, config::dock_margin, config::set_dock_margin),
         _ => return None,
@@ -293,7 +295,7 @@ fn toggle(o: Opt) {
                 crate::update::check_now();
             }
         }
-        Opt::IconSize | Opt::MagnifySize | Opt::Radius | Opt::Opacity | Opt::Padding | Opt::Gap | Opt::Margin => {}
+        Opt::IconSize | Opt::MagnifySize | Opt::Radius | Opt::Opacity | Opt::Padding | Opt::SidePadding | Opt::Gap | Opt::Margin => {}
     }
 }
 
@@ -390,6 +392,7 @@ fn blocks(page: usize) -> Vec<Block> {
                     slider(Opt::Radius, "Arredondamento dos cantos"),
                     slider(Opt::Opacity, "Opacidade do fundo"),
                     slider(Opt::Padding, "Espaço entre os ícones e a borda"),
+                    slider(Opt::SidePadding, "Espaço extra nas laterais"),
                     slider(Opt::Gap, "Espaço entre os ícones"),
                     slider(Opt::Margin, "Distância da borda da tela"),
                 ]),

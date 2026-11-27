@@ -87,6 +87,15 @@ pub fn set_dock_padding(px: f32) {
     set("dock_padding", px.round().to_string());
 }
 
+/// Espaço extra só nas pontas do dock, sem mudar a altura.
+pub fn dock_side_padding() -> f32 {
+    number("dock_side_padding", 0.0, 0.0, 32.0).round()
+}
+
+pub fn set_dock_side_padding(px: f32) {
+    set("dock_side_padding", px.round().to_string());
+}
+
 /// Espaço entre um ícone e outro.
 pub fn icon_gap() -> f32 {
     number("icon_gap", 9.0, 0.0, 24.0).round()

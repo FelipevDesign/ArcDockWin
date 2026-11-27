@@ -36,7 +36,7 @@ impl Metrics {
             // Espaço extra em volta do divisor: o grupo fica bem separado, como no macOS.
             sep: gap + 1.0 * scale,
             pad,
-            pad_x: pad,
+            pad_x: pad + config::dock_side_padding() * scale,
             margin: config::dock_margin() * scale,
             range: 2.0 * (base + gap), // 2 slots de cada lado
             // No máximo meia altura: o máximo vira uma pílula.
