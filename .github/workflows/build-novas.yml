@@ -1,0 +1,26 @@
+# Compila e testa o .exe a cada envio para o branch novas-funcoes e guarda como artefato.
+name: Build novas funções
+
+on:
+  push:
+    branches: [novas-funcoes]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Testar
+        run: cargo test --release --locked
+      - name: Compilar
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arcdockwin-novas-funcoes
+          path: target/release/arcdockwin.exe
+          if-no-files-found: error
